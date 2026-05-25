@@ -52,13 +52,31 @@ def _to_sync_url(url: str) -> str:
 SYNC_DATABASE_URL = _to_sync_url(_raw_url)
 
 # ---------------------------------------------------------------------------
-# Import ORM models so Alembic can autogenerate migrations
-# These imports register models with Base.metadata.
-# We import Base from app.database but guard against missing env vars by
-# pre-setting DATABASE_URL (already done above) before the import.
+# Stub out env vars that app.config (pydantic Settings) requires but
+# migrations do not actually use.  We set them BEFORE importing any app
+# module so that Settings() can be constructed without a full .env file.
+# Only DATABASE_URL carries a real value — all others are ignored at
+# migration time.
 # ---------------------------------------------------------------------------
-# Minimal stub — import Base without triggering full Settings validation.
-# We only need Base.metadata; we supply our own URL above.
+_MIGRATION_STUBS = {
+    "REDIS_URL":                  "redis://localhost",
+    "STRAVA_CLIENT_ID":           "0",
+    "STRAVA_CLIENT_SECRET":       "stub",
+    "STRAVA_WEBHOOK_VERIFY_TOKEN":"stub",
+    "TELEGRAM_BOT_TOKEN":         "0:stub",
+    "TELEGRAM_WEBHOOK_SECRET":    "stub",
+    # Any non-empty string passes pydantic's `str` type check.
+    # Fernet key validation only happens when crypto.py functions are called,
+    # which never happens during migrations.
+    "ENCRYPTION_KEY":             "c3R1Yi1rZXktZm9yLW1pZ3JhdGlvbnMtb25seQ==",
+    "BASE_URL":                   "https://example.com",
+}
+for _k, _v in _MIGRATION_STUBS.items():
+    os.environ.setdefault(_k, _v)
+
+# ---------------------------------------------------------------------------
+# Import ORM models so Alembic can autogenerate migrations
+# ---------------------------------------------------------------------------
 import app.models  # noqa: F401 — registers User, Activity, Goal, GroupChat with Base
 from app.database import Base
 
