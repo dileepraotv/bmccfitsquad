@@ -31,8 +31,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.orm import DeclarativeBase
-
+from app.base import Base  # noqa: F401 — re-exported for backwards compat
 from app.config import get_settings
 
 settings = get_settings()
@@ -115,14 +114,6 @@ AsyncSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
     expire_on_commit=False,
     autoflush=False,
 )
-
-
-# ---------------------------------------------------------------------------
-# Declarative base — imported by every model module
-# ---------------------------------------------------------------------------
-
-class Base(DeclarativeBase):
-    pass
 
 
 # ---------------------------------------------------------------------------

@@ -77,8 +77,8 @@ for _k, _v in _MIGRATION_STUBS.items():
 # ---------------------------------------------------------------------------
 # Import ORM models so Alembic can autogenerate migrations
 # ---------------------------------------------------------------------------
+from app.base import Base       # does NOT import app.database → no asyncpg needed
 import app.models  # noqa: F401 — registers User, Activity, Goal, GroupChat with Base
-from app.database import Base
 
 # ---------------------------------------------------------------------------
 # Alembic config
