@@ -7,20 +7,33 @@ settings = get_settings()
 _redis: aioredis.Redis | None = None
 
 
+def _build_redis_url() -> str:
+    """Ensure Upstash URLs always use the rediss:// (TLS) scheme.
+
+    Upstash requires TLS but users sometimes paste the redis:// URL by mistake.
+    Any URL pointing at a known Upstash host is upgraded to rediss:// so the
+    TLS handshake succeeds regardless of which URL was copied from the console.
+    """
+    url = settings.redis_url
+    if url.startswith("redis://") and "upstash.io" in url:
+        url = "rediss://" + url[len("redis://"):]
+    return url
+
+
 async def get_redis() -> aioredis.Redis:
     """Return the shared Redis connection, initialising it on first call."""
     global _redis
     if _redis is None:
+        url = _build_redis_url()
         kwargs: dict = {
             "encoding": "utf-8",
             "decode_responses": True,
         }
-        # Upstash requires TLS (rediss://) but uses a wildcard cert that
-        # Python's ssl module rejects by default. ssl_cert_reqs=None disables
-        # certificate verification while keeping the connection encrypted.
-        if settings.redis_url.startswith("rediss://"):
+        # Upstash uses a wildcard TLS cert that Python's ssl module rejects.
+        # Disable certificate verification while keeping the connection encrypted.
+        if url.startswith("rediss://"):
             kwargs["ssl_cert_reqs"] = None
-        _redis = aioredis.from_url(settings.redis_url, **kwargs)
+        _redis = aioredis.from_url(url, **kwargs)
     return _redis
 
 
