@@ -1,5 +1,3 @@
-import ssl
-
 import redis.asyncio as aioredis
 
 from app.config import get_settings
@@ -9,26 +7,20 @@ settings = get_settings()
 _redis: aioredis.Redis | None = None
 
 
-def _redis_ssl_context() -> ssl.SSLContext | None:
-    """Return an SSLContext for Upstash TLS (rediss://) or None for plain redis://."""
-    if not settings.redis_url.startswith("rediss://"):
-        return None
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
-
-
 async def get_redis() -> aioredis.Redis:
     """Return the shared Redis connection, initialising it on first call."""
     global _redis
     if _redis is None:
-        _redis = aioredis.from_url(
-            settings.redis_url,
-            encoding="utf-8",
-            decode_responses=True,
-            ssl_context=_redis_ssl_context(),
-        )
+        kwargs: dict = {
+            "encoding": "utf-8",
+            "decode_responses": True,
+        }
+        # Upstash requires TLS (rediss://) but uses a wildcard cert that
+        # Python's ssl module rejects by default. ssl_cert_reqs=None disables
+        # certificate verification while keeping the connection encrypted.
+        if settings.redis_url.startswith("rediss://"):
+            kwargs["ssl_cert_reqs"] = None
+        _redis = aioredis.from_url(settings.redis_url, **kwargs)
     return _redis
 
 
