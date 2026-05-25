@@ -9,8 +9,21 @@ The module exposes:
 
 Alembic uses a *synchronous* connection for its autogenerate step; the
 ``alembic/env.py`` imports ``Base`` and ``SYNC_DATABASE_URL`` from here.
+
+URL normalisation
+-----------------
+Railway injects ``?sslmode=require`` into DATABASE_URL.  That is a libpq /
+psycopg2 parameter — asyncpg does not accept it and raises:
+
+    TypeError: connect() got an unexpected keyword argument 'sslmode'
+
+``_async_url()`` strips ``sslmode`` from the query string and returns the
+equivalent asyncpg ``connect_args`` so the engine is configured correctly.
 """
 from __future__ import annotations
+
+import ssl as _ssl
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
@@ -18,19 +31,56 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.orm import DeclarativeBase
-
+from app.base import Base  # noqa: F401 — re-exported for backwards compat
 from app.config import get_settings
 
 settings = get_settings()
 
 
-def _async_url(raw: str) -> str:
-    """Ensure the URL uses the ``postgresql+asyncpg`` driver scheme."""
+def _async_url(raw: str) -> tuple[str, dict]:
+    """Normalise *raw* into an asyncpg-compatible URL + connect_args dict.
+
+    Steps:
+    1. Replace ``postgresql://`` / ``postgres://`` scheme with
+       ``postgresql+asyncpg://``.
+    2. Strip ``sslmode`` from the query string (asyncpg rejects it).
+    3. Translate the sslmode value into an ``ssl`` connect_arg:
+       - ``require``              → ssl context with cert verification disabled
+         (Railway's internal Postgres uses a self-signed cert)
+       - ``verify-ca`` / ``verify-full`` → ssl context with full verification
+       - ``disable`` / absent     → no SSL
+
+    Returns ``(url, connect_args)`` ready to pass to ``create_async_engine``.
+    """
+    # 1. Fix driver scheme
     for prefix in ("postgresql://", "postgres://"):
         if raw.startswith(prefix):
-            return raw.replace(prefix, "postgresql+asyncpg://", 1)
-    return raw  # already has the right scheme or is a non-postgres URL
+            raw = raw.replace(prefix, "postgresql+asyncpg://", 1)
+            break
+
+    connect_args: dict = {}
+
+    # 2. Strip sslmode and translate to asyncpg ssl connect_arg
+    if "sslmode" in raw:
+        parsed = urlparse(raw)
+        params = parse_qs(parsed.query, keep_blank_values=True)
+        sslmode_values = params.pop("sslmode", [])
+        sslmode = sslmode_values[0] if sslmode_values else "disable"
+
+        if sslmode in ("require", "verify-ca", "verify-full"):
+            ctx = _ssl.create_default_context()
+            if sslmode == "require":
+                # Railway's Postgres uses a self-signed cert — skip hostname
+                # verification while still encrypting the connection.
+                ctx.check_hostname = False
+                ctx.verify_mode = _ssl.CERT_NONE
+            connect_args["ssl"] = ctx
+
+        # Rebuild URL without sslmode
+        new_query = urlencode({k: v[0] for k, v in params.items()})
+        raw = urlunparse(parsed._replace(query=new_query))
+
+    return raw, connect_args
 
 
 def _sync_url(raw: str) -> str:
@@ -41,7 +91,7 @@ def _sync_url(raw: str) -> str:
     return raw
 
 
-ASYNC_DATABASE_URL: str = _async_url(settings.database_url)
+ASYNC_DATABASE_URL, _CONNECT_ARGS = _async_url(settings.database_url)
 SYNC_DATABASE_URL: str = _sync_url(settings.database_url)
 
 # ---------------------------------------------------------------------------
@@ -50,6 +100,7 @@ SYNC_DATABASE_URL: str = _sync_url(settings.database_url)
 
 engine = create_async_engine(
     ASYNC_DATABASE_URL,
+    connect_args=_CONNECT_ARGS,
     echo=not settings.is_production,  # log SQL in dev
     pool_size=5,
     max_overflow=10,
@@ -63,14 +114,6 @@ AsyncSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
     expire_on_commit=False,
     autoflush=False,
 )
-
-
-# ---------------------------------------------------------------------------
-# Declarative base — imported by every model module
-# ---------------------------------------------------------------------------
-
-class Base(DeclarativeBase):
-    pass
 
 
 # ---------------------------------------------------------------------------
