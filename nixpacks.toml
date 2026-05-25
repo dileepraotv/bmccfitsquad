@@ -1,5 +1,13 @@
 [phases.setup]
+# python311 installs the interpreter as python3.11 — pip is not a standalone
+# binary in the Nix environment, so we must invoke it through the interpreter.
 nixPkgs = ["python311"]
 
 [phases.install]
-cmds = ["pip install -r requirements.txt"]
+cmds = ["python3.11 -m pip install --upgrade pip", "python3.11 -m pip install -r requirements.txt"]
+
+[phases.build]
+cmds = []
+
+[start]
+cmd = "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
