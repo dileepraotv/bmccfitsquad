@@ -1,3 +1,5 @@
+import ssl
+
 import redis.asyncio as aioredis
 
 from app.config import get_settings
@@ -5,6 +7,16 @@ from app.config import get_settings
 settings = get_settings()
 
 _redis: aioredis.Redis | None = None
+
+
+def _redis_ssl_context() -> ssl.SSLContext | None:
+    """Return an SSLContext for Upstash TLS (rediss://) or None for plain redis://."""
+    if not settings.redis_url.startswith("rediss://"):
+        return None
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
 
 
 async def get_redis() -> aioredis.Redis:
@@ -15,6 +27,7 @@ async def get_redis() -> aioredis.Redis:
             settings.redis_url,
             encoding="utf-8",
             decode_responses=True,
+            ssl_context=_redis_ssl_context(),
         )
     return _redis
 
