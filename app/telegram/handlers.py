@@ -811,11 +811,12 @@ async def _show_goal_status(query) -> None:
             )
             return
 
-        lines = [
-            "*Goal Status*",
-            '*"Arriving at one goal is the starting point to another."*\n',
-        ]
+        athlete_name = user.strava_athlete_name or user.telegram_first_name or "You"
         divider = "─" * 28
+        lines = [
+            f"*Goal Status for: {athlete_name}*",
+            f'*"{_random_quote()}"*\n',
+        ]
 
         for g in goals:
             start_dt = datetime(
@@ -855,9 +856,9 @@ async def _show_goal_status(query) -> None:
                 f"| Done: {achieved}\n"
                 f"`{bar}` {pct}%\n"
                 f"_counts activities ≥ {g.category}_\n"
-                f"_{g.start_date}  →  {g.end_date}_\n"
-                f"{divider}"
+                f"_{g.start_date}  →  {g.end_date}_"
             )
+            lines.append(divider)
 
     await query.edit_message_text(
         "\n".join(lines),
