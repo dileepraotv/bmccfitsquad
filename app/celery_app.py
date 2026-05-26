@@ -25,18 +25,28 @@ settings = get_settings()
 _REDIS_URL: str = settings.redis_url
 _IS_TLS: bool = _REDIS_URL.startswith("rediss://")
 
-# When TLS is in use (Upstash), we must pass ssl_cert_reqs=None so that
-# Celery does not attempt to verify the certificate against a local CA bundle
-# (Upstash uses a wildcard cert that Python's ssl module may not trust).
-_SSL_OPTS: dict = {"ssl_cert_reqs": None} if _IS_TLS else {}
+# Celery's Redis backend requires ssl_cert_reqs to be present both as a URL
+# query parameter AND in the broker_use_ssl / redis_backend_use_ssl dicts.
+# Append it to the URL so the backend transport parser is satisfied.
+def _tls_url(url: str) -> str:
+    if not url.startswith("rediss://"):
+        return url
+    sep = "&" if "?" in url else "?"
+    if "ssl_cert_reqs" in url:
+        return url
+    return f"{url}{sep}ssl_cert_reqs=CERT_NONE"
+
+_BROKER_URL  = _tls_url(_REDIS_URL)
+_BACKEND_URL = _tls_url(_REDIS_URL)
+_SSL_OPTS: dict = {"ssl_cert_reqs": "CERT_NONE"} if _IS_TLS else {}
 
 # ---------------------------------------------------------------------------
 # Application
 # ---------------------------------------------------------------------------
 celery_app = Celery(
     "bmcc_bot",
-    broker=_REDIS_URL,
-    backend=_REDIS_URL,
+    broker=_BROKER_URL,
+    backend=_BACKEND_URL,
     include=["app.tasks"],
 )
 
