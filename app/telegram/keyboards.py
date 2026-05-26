@@ -25,12 +25,12 @@ def stats_sport_keyboard() -> InlineKeyboardMarkup:
       Row 3: Exit
     """
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚴 Ride",           callback_data="stats:sport:Ride"),
-         InlineKeyboardButton("🚴 Ride Endurance", callback_data="stats:sport:RideEndurance")],
-        [InlineKeyboardButton("🏃 Run",            callback_data="stats:sport:Run"),
-         InlineKeyboardButton("🏊 Swim",           callback_data="stats:sport:Swim"),
-         InlineKeyboardButton("🚶 Walk",           callback_data="stats:sport:Walk")],
-        [InlineKeyboardButton("❌ Exit",           callback_data="stats:exit")],
+        [InlineKeyboardButton("Ride",           callback_data="stats:sport:Ride"),
+         InlineKeyboardButton("Ride Endurance", callback_data="stats:sport:RideEndurance")],
+        [InlineKeyboardButton("Run",            callback_data="stats:sport:Run"),
+         InlineKeyboardButton("Swim",           callback_data="stats:sport:Swim"),
+         InlineKeyboardButton("Walk",           callback_data="stats:sport:Walk")],
+        [InlineKeyboardButton("❌ Exit",        callback_data="stats:exit")],
     ])
 
 
