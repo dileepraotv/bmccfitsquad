@@ -355,19 +355,31 @@ _SPORT_ACTIVITY_TYPES: dict[str, list[str]] = {
     "Swim":          ["Swim", "OpenWaterSwim"],
 }
 
-# Used only for Goal Status progress bars — maps free-text category → min metres
-_DIST_THRESHOLDS: dict[str, float] = {
-    "50 km": 50_000, "100 km": 100_000, "200 km": 200_000,
-    "300 km": 300_000, "400 km": 400_000, "600 km": 600_000,
-    "1000 km": 1_000_000,
-    "5 km": 5_000, "10 km": 10_000,
-    "Half Marathon": 21_097, "Full Marathon": 42_195, "Ultra": 50_000,
-    "500 m": 500, "1000 m": 1_000, "1500 m": 1_500,
-    "2000 m": 2_000, "3800 m": 3_800,
-    "2 km": 2_000,
-}
+def _parse_category_threshold(category: str) -> float:
+    """Convert a stored category string to minimum metres for activity counting.
 
-_GOAL_PERIODS = ["This Month", "This Year", "This Week"]
+    Examples:
+        "100 km"  → 100_000.0
+        "1500 m"  → 1_500.0
+        "21.1 km" → 21_100.0
+    Falls back to 0 if unparseable so all activities of that type are counted.
+    """
+    try:
+        parts = category.strip().split()
+        val = float(parts[0].replace(",", "."))
+        unit = parts[1].lower() if len(parts) > 1 else "km"
+        return val * 1_000 if unit == "km" else val
+    except (IndexError, ValueError):
+        return 0.0
+
+_GOAL_PERIODS = [
+    "This Month",
+    "This Quarter",
+    "This Year",
+    "First Half of Year",
+    "Second Half of Year",
+    "This Week",
+]
 
 _GOAL_DRAFT_TTL = 600  # seconds — draft expires after 10 min of inactivity
 
@@ -406,28 +418,54 @@ def _goal_sport_keyboard() -> InlineKeyboardMarkup:
 
 
 def _goal_period_keyboard(sport: str, category: str, count: str) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(p, callback_data=f"goal:period:{sport}|{category}|{count}|{p}")]
-        for p in _GOAL_PERIODS
-    ]
-    rows.append([InlineKeyboardButton("❌ Cancel", callback_data="goal:exit")])
-    return InlineKeyboardMarkup(rows)
+    p = _GOAL_PERIODS
+    enc = lambda period: f"goal:period:{sport}|{category}|{count}|{period}"  # noqa: E731
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(p[0], callback_data=enc(p[0])),
+         InlineKeyboardButton(p[1], callback_data=enc(p[1]))],
+        [InlineKeyboardButton(p[2], callback_data=enc(p[2])),
+         InlineKeyboardButton(p[5], callback_data=enc(p[5]))],
+        [InlineKeyboardButton(p[3], callback_data=enc(p[3]))],
+        [InlineKeyboardButton(p[4], callback_data=enc(p[4]))],
+        [InlineKeyboardButton("❌ Cancel", callback_data="goal:exit")],
+    ])
 
 
 def _goal_period_dates(period: str):
     now = datetime.now(timezone.utc)
+    y = now.year
+
     if period == "This Month":
-        start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
-        end = (datetime(now.year + 1, 1, 1, tzinfo=timezone.utc)
+        start = datetime(y, now.month, 1, tzinfo=timezone.utc)
+        end = (datetime(y + 1, 1, 1, tzinfo=timezone.utc)
                if now.month == 12
-               else datetime(now.year, now.month + 1, 1, tzinfo=timezone.utc))
+               else datetime(y, now.month + 1, 1, tzinfo=timezone.utc))
+
+    elif period == "This Quarter":
+        q_start_month = ((now.month - 1) // 3) * 3 + 1
+        start = datetime(y, q_start_month, 1, tzinfo=timezone.utc)
+        q_end_month = q_start_month + 3
+        end = (datetime(y + 1, 1, 1, tzinfo=timezone.utc)
+               if q_end_month > 12
+               else datetime(y, q_end_month, 1, tzinfo=timezone.utc))
+
     elif period == "This Year":
-        start = datetime(now.year, 1, 1, tzinfo=timezone.utc)
-        end   = datetime(now.year + 1, 1, 1, tzinfo=timezone.utc)
-    else:  # This Week
-        start = (datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+        start = datetime(y, 1, 1, tzinfo=timezone.utc)
+        end   = datetime(y + 1, 1, 1, tzinfo=timezone.utc)
+
+    elif period == "First Half of Year":
+        start = datetime(y, 1, 1, tzinfo=timezone.utc)
+        end   = datetime(y, 7, 1, tzinfo=timezone.utc)
+
+    elif period == "Second Half of Year":
+        start = datetime(y, 7, 1, tzinfo=timezone.utc)
+        end   = datetime(y + 1, 1, 1, tzinfo=timezone.utc)
+
+    else:  # This Week (Mon–Sun)
+        start = (datetime(y, now.month, now.day, tzinfo=timezone.utc)
                  - timedelta(days=now.weekday()))
         end = start + timedelta(weeks=1)
+
     return start.date(), end.date()
 
 
@@ -525,9 +563,17 @@ async def _handle_goal_callbacks(query, data: str) -> None:
             parse_mode="Markdown",
         )
         unit = _sport_unit(sport)
+        examples = {
+            "Run":            "`5`, `10`, `21.1`, `42.2`",
+            "Walk":           "`2`, `5`, `10`, `21.1`",
+            "Ride":           "`50`, `100`, `200`",
+            "Ride Endurance": "`200`, `300`, `600`",
+            "Swim":           "`500`, `1000`, `1500`, `3800`",
+        }
+        eg = examples.get(sport, "`100`")
         await query.message.reply_text(
-            f"✏️ *What is your goal distance / target for {sport}?*\n\n"
-            f"Enter a number ({unit}) — for example: `100`\n\n"
+            f"✏️ *What is your goal distance for {sport}?*\n\n"
+            f"Enter a number in {unit} — e.g. {eg}\n\n"
             f"Type /cancel to abort.",
             parse_mode="Markdown",
         )
@@ -630,18 +676,21 @@ async def _handle_goal_text_input(update: Update) -> bool:
     step = draft.get("step")
 
     if step == "category":
-        if not text.isdigit() or int(text) < 1:
-            sport = draft.get("sport", "")
-            unit  = _sport_unit(sport)
+        sport = draft.get("sport", "")
+        unit  = _sport_unit(sport)
+        try:
+            val = float(text.replace(",", "."))
+            if val <= 0:
+                raise ValueError
+        except ValueError:
             await update.message.reply_text(
-                f"Please enter a positive number ({unit}) — e.g. *100*:",
+                f"Please enter a positive number ({unit}) — e.g. *100* or *21.1*:",
                 parse_mode="Markdown",
             )
             return True
-        # Store as "<number> <unit>" so it reads naturally in summaries
-        sport    = draft.get("sport", "")
-        unit     = _sport_unit(sport)
-        category = f"{text} {unit}"
+        # Normalise: drop trailing .0 for whole numbers so "100.0 km" → "100 km"
+        display_val = int(val) if val == int(val) else val
+        category = f"{display_val} {unit}"
         draft["category"] = category
         draft["step"]     = "count"
         await _save_draft(tg_id, draft)
@@ -741,7 +790,12 @@ async def _show_goal_status(query) -> None:
             )
             return
 
-        lines = ['_"Arriving at one goal is the starting point to another."_\n']
+        lines = [
+            "*Goal Status*",
+            '*"Arriving at one goal is the starting point to another."*\n',
+        ]
+        divider = "─" * 28
+
         for g in goals:
             start_dt = datetime(
                 g.start_date.year, g.start_date.month, g.start_date.day, tzinfo=timezone.utc
@@ -750,7 +804,9 @@ async def _show_goal_status(query) -> None:
                 g.end_date.year, g.end_date.month, g.end_date.day, tzinfo=timezone.utc
             )
             act_types = _SPORT_ACTIVITY_TYPES.get(g.activity_type, [g.activity_type])
-            threshold_m = _DIST_THRESHOLDS.get(g.category, 0)
+
+            # Parse threshold from stored category string, e.g. "100 km" → 100_000 m
+            threshold_m = _parse_category_threshold(g.category)
 
             count_result = await db.execute(
                 select(func.count(Activity.id))
@@ -765,17 +821,20 @@ async def _show_goal_status(query) -> None:
                 )
             )
             achieved = count_result.scalar_one() or 0
-
-            filled = min(achieved, g.target_count)
-            empty = max(0, g.target_count - achieved)
-            bar = "✅" * filled + "⬜" * empty
             pct = min(100, round(achieved / g.target_count * 100))
+
+            # Compact progress bar — 10 segments
+            filled_segs = round(pct / 10)
+            bar = "█" * filled_segs + "░" * (10 - filled_segs)
 
             sport_label = "Ride Endurance" if g.activity_type == "RideEndurance" else g.activity_type
             lines.append(
                 f"*{sport_label}* — {g.category}\n"
-                f"{bar} {achieved}/{g.target_count} ({pct}%)\n"
-                f"Period: {g.start_date} to {g.end_date}\n"
+                f"Target: {g.target_count} time{'s' if g.target_count != 1 else ''} "
+                f"| Done: {achieved}\n"
+                f"`{bar}` {pct}%\n"
+                f"_{g.start_date}  →  {g.end_date}_\n"
+                f"{divider}"
             )
 
     await query.edit_message_text(
