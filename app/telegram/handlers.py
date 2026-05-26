@@ -63,6 +63,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("sync",          cmd_sync))
     app.add_handler(CommandHandler("stats",         cmd_stats))
     app.add_handler(CommandHandler("goals",         cmd_goals))
+    app.add_handler(CommandHandler("cancel",        cmd_cancel))
     app.add_handler(CommandHandler("leaderboard",   cmd_leaderboard))
     app.add_handler(CommandHandler("notifications", cmd_notifications))
     app.add_handler(CommandHandler("quote",         cmd_quote))
@@ -318,25 +319,43 @@ async def cmd_quote(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f'💬 *"{_random_quote()}"*', parse_mode="Markdown")
 
 
+async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Cancel any in-progress goal entry."""
+    from app.redis_client import get_redis
+    r = await get_redis()
+    deleted = await r.delete(_draft_key(update.effective_user.id))
+    if deleted:
+        await update.message.reply_text("Goal entry cancelled. Use /goals anytime.")
+    else:
+        await update.message.reply_text("Nothing to cancel.")
+
+
 # ---------------------------------------------------------------------------
-# Goals — pure callback-driven flow (no ConversationHandler)
+# Goals — callback-driven sport selection + Redis-backed free-text entry
+# ---------------------------------------------------------------------------
+# Flow:
+#   /goals  →  main menu keyboard
+#   ➕ Add Goal  →  sport keyboard (stats-style layout)
+#   sport chosen  →  bot sends NEW message asking for goal description (free text)
+#                    draft stored in Redis: goal_draft:{tg_id} = JSON{sport, step}
+#   user types goal (e.g. "100 km")  →  bot asks for count (e.g. "4")
+#   user types count  →  bot asks for period (keyboard)
+#   period chosen  →  saved, confirmation shown
 # ---------------------------------------------------------------------------
 
-_GOAL_SPORTS = ["Ride", "Ride Endurance", "Run", "Swim", "Walk"]
-
-_GOAL_CATEGORIES: dict[str, list[str]] = {
-    "Ride":           ["50 km", "100 km", "200 km"],
-    "Ride Endurance": ["200 km", "300 km", "400 km", "600 km", "1000 km"],
-    "Run":            ["5 km", "10 km", "Half Marathon", "Full Marathon", "Ultra"],
-    "Swim":           ["500 m", "1000 m", "1500 m", "2000 m", "3800 m"],
-    "Walk":           ["2 km", "5 km", "10 km"],
-}
-
-_GOAL_PERIODS = ["This Month", "This Year", "This Week"]
+import json as _json
 
 _SPORT_TYPE_MAP = {"Ride Endurance": "RideEndurance"}
 
-# Minimum activity distance (metres) to count towards each category
+_SPORT_ACTIVITY_TYPES: dict[str, list[str]] = {
+    "Ride":          ["Ride", "VirtualRide"],
+    "RideEndurance": ["Ride", "VirtualRide"],
+    "Run":           ["Run", "VirtualRun"],
+    "Walk":          ["Walk", "Hike"],
+    "Swim":          ["Swim", "OpenWaterSwim"],
+}
+
+# Used only for Goal Status progress bars — maps free-text category → min metres
 _DIST_THRESHOLDS: dict[str, float] = {
     "50 km": 50_000, "100 km": 100_000, "200 km": 200_000,
     "300 km": 300_000, "400 km": 400_000, "600 km": 600_000,
@@ -348,45 +367,30 @@ _DIST_THRESHOLDS: dict[str, float] = {
     "2 km": 2_000,
 }
 
-_SPORT_ACTIVITY_TYPES: dict[str, list[str]] = {
-    "Ride":          ["Ride", "VirtualRide"],
-    "RideEndurance": ["Ride", "VirtualRide"],
-    "Run":           ["Run", "VirtualRun"],
-    "Walk":          ["Walk", "Hike"],
-    "Swim":          ["Swim", "OpenWaterSwim"],
-}
+_GOAL_PERIODS = ["This Month", "This Year", "This Week"]
+
+_GOAL_DRAFT_TTL = 600  # seconds — draft expires after 10 min of inactivity
 
 
 def _goals_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Add Goal",    callback_data="goal:add"),
-         InlineKeyboardButton("❌ Delete Goal", callback_data="goal:delete_menu")],
+        [InlineKeyboardButton("➕ Add Goal",     callback_data="goal:add"),
+         InlineKeyboardButton("❌ Delete Goal",  callback_data="goal:delete_menu")],
         [InlineKeyboardButton("✅  Goal Status", callback_data="goal:status")],
     ])
 
 
 def _goal_sport_keyboard() -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(s, callback_data=f"goal:sport:{s}")] for s in _GOAL_SPORTS]
-    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="goal:back")])
-    return InlineKeyboardMarkup(rows)
-
-
-def _goal_category_keyboard(sport: str) -> InlineKeyboardMarkup:
-    cats = _GOAL_CATEGORIES.get(sport, [])
-    rows = [[InlineKeyboardButton(c, callback_data=f"goal:cat:{sport}|{c}")] for c in cats]
-    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="goal:add")])
-    return InlineKeyboardMarkup(rows)
-
-
-def _goal_count_keyboard(sport: str, category: str) -> InlineKeyboardMarkup:
-    """1-12 count picker laid out 4 per row."""
-    btns = [
-        InlineKeyboardButton(str(n), callback_data=f"goal:count:{sport}|{category}|{n}")
-        for n in range(1, 13)
-    ]
-    rows = [btns[i:i + 4] for i in range(0, len(btns), 4)]
-    rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"goal:sport:{sport}")])
-    return InlineKeyboardMarkup(rows)
+    """Sport selector — mirrors the stats sport keyboard layout."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Ride",           callback_data="goal:sport:Ride"),
+         InlineKeyboardButton("Ride Endurance", callback_data="goal:sport:Ride Endurance")],
+        [InlineKeyboardButton("Run",            callback_data="goal:sport:Run"),
+         InlineKeyboardButton("Swim",           callback_data="goal:sport:Swim"),
+         InlineKeyboardButton("Walk",           callback_data="goal:sport:Walk")],
+        [InlineKeyboardButton("⬅️ Back",        callback_data="goal:back"),
+         InlineKeyboardButton("❌ Exit",        callback_data="goal:exit")],
+    ])
 
 
 def _goal_period_keyboard(sport: str, category: str, count: str) -> InlineKeyboardMarkup:
@@ -394,7 +398,7 @@ def _goal_period_keyboard(sport: str, category: str, count: str) -> InlineKeyboa
         [InlineKeyboardButton(p, callback_data=f"goal:period:{sport}|{category}|{count}|{p}")]
         for p in _GOAL_PERIODS
     ]
-    rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"goal:cat:{sport}|{category}")])
+    rows.append([InlineKeyboardButton("❌ Cancel", callback_data="goal:exit")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -402,19 +406,55 @@ def _goal_period_dates(period: str):
     now = datetime.now(timezone.utc)
     if period == "This Month":
         start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
-        if now.month == 12:
-            end = datetime(now.year + 1, 1, 1, tzinfo=timezone.utc)
-        else:
-            end = datetime(now.year, now.month + 1, 1, tzinfo=timezone.utc)
+        end = (datetime(now.year + 1, 1, 1, tzinfo=timezone.utc)
+               if now.month == 12
+               else datetime(now.year, now.month + 1, 1, tzinfo=timezone.utc))
     elif period == "This Year":
         start = datetime(now.year, 1, 1, tzinfo=timezone.utc)
-        end = datetime(now.year + 1, 1, 1, tzinfo=timezone.utc)
+        end   = datetime(now.year + 1, 1, 1, tzinfo=timezone.utc)
     else:  # This Week
-        days_since_monday = now.weekday()
         start = (datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
-                 - timedelta(days=days_since_monday))
+                 - timedelta(days=now.weekday()))
         end = start + timedelta(weeks=1)
     return start.date(), end.date()
+
+
+def _format_goal_summary(sport_display: str, category: str, count: int,
+                          period: str, start, end) -> str:
+    lines = [
+        "✅ *Goal saved!*\n",
+        f"Sport:    *{sport_display}*",
+        f"Goal:     *{category}*",
+        f"Target:   *{count} time{'s' if count != 1 else ''}*",
+        f"Period:   *{period}*",
+        f"Window:   {start}  →  {end}",
+    ]
+    return "\n".join(lines)
+
+
+# Redis draft helpers
+
+def _draft_key(tg_id: int) -> str:
+    return f"goal_draft:{tg_id}"
+
+
+async def _save_draft(tg_id: int, data: dict) -> None:
+    from app.redis_client import get_redis
+    r = await get_redis()
+    await r.set(_draft_key(tg_id), _json.dumps(data), ex=_GOAL_DRAFT_TTL)
+
+
+async def _load_draft(tg_id: int) -> dict | None:
+    from app.redis_client import get_redis
+    r = await get_redis()
+    raw = await r.get(_draft_key(tg_id))
+    return _json.loads(raw) if raw else None
+
+
+async def _clear_draft(tg_id: int) -> None:
+    from app.redis_client import get_redis
+    r = await get_redis()
+    await r.delete(_draft_key(tg_id))
 
 
 async def _send_goals_menu(target, user_id: int) -> None:
@@ -439,17 +479,20 @@ async def _send_goals_menu(target, user_id: int) -> None:
 
 async def _handle_goal_callbacks(query, data: str) -> None:
     """Route all goal: callback data."""
+    tg_id = query.from_user.id
 
-    # ── Main menu ──────────────────────────────────────────────────────────
     if data == "goal:add":
+        await _clear_draft(tg_id)
         await query.edit_message_text(
-            "Which sport is this goal for?",
+            "🎯 *Add a Goal*\n\nChoose a sport:",
+            parse_mode="Markdown",
             reply_markup=_goal_sport_keyboard(),
         )
         return
 
-    if data == "goal:back":
-        await _send_goals_menu(query, query.from_user.id)
+    if data in ("goal:back", "goal:exit"):
+        await _clear_draft(tg_id)
+        await _send_goals_menu(query, tg_id)
         return
 
     if data == "goal:delete_menu":
@@ -460,45 +503,35 @@ async def _handle_goal_callbacks(query, data: str) -> None:
         await _show_goal_status(query)
         return
 
-    # ── Sport chosen ───────────────────────────────────────────────────────
+    # ── Sport chosen → ask for goal description via text ───────────────────
     if data.startswith("goal:sport:"):
         sport = data[len("goal:sport:"):]
+        await _save_draft(tg_id, {"sport": sport, "step": "category"})
+        # Edit the inline message to acknowledge the sport, then send a
+        # separate plain message so the user can reply to it with free text.
         await query.edit_message_text(
-            f"Sport: *{sport}*\n\nChoose a distance category:",
+            f"Sport: *{sport}*",
             parse_mode="Markdown",
-            reply_markup=_goal_category_keyboard(sport),
+        )
+        await query.message.reply_text(
+            f"✏️ *What is your goal?*\n\n"
+            f"Type your goal description for *{sport}* — for example:\n"
+            f"• `100 km ride`\n"
+            f"• `Half Marathon`\n"
+            f"• `1000 m swim`\n\n"
+            f"Type /cancel to abort.",
+            parse_mode="Markdown",
         )
         return
 
-    # ── Category chosen (data = goal:cat:<sport>|<cat>) ───────────────────
-    if data.startswith("goal:cat:"):
-        payload = data[len("goal:cat:"):]
-        sport, category = payload.split("|", 1)
-        await query.edit_message_text(
-            f"Sport: *{sport}* — {category}\n\nHow many times? Pick a count:",
-            parse_mode="Markdown",
-            reply_markup=_goal_count_keyboard(sport, category),
-        )
-        return
-
-    # ── Count chosen (data = goal:count:<sport>|<cat>|<n>) ────────────────
-    if data.startswith("goal:count:"):
-        payload = data[len("goal:count:"):]
-        sport, category, count_str = payload.rsplit("|", 2)
-        await query.edit_message_text(
-            f"Sport: *{sport}* — {category} × {count_str}\n\nChoose the time period:",
-            parse_mode="Markdown",
-            reply_markup=_goal_period_keyboard(sport, category, count_str),
-        )
-        return
-
-    # ── Period chosen → save goal (data = goal:period:<sport>|<cat>|<n>|<per>) ──
+    # ── Period chosen → save goal ──────────────────────────────────────────
     if data.startswith("goal:period:"):
         payload = data[len("goal:period:"):]
         parts = payload.split("|")
         if len(parts) < 4:
             await query.edit_message_text("Invalid goal data. Please try /goals again.")
             return
+
         sport_display = parts[0]
         category      = parts[1]
         count         = int(parts[2])
@@ -508,7 +541,7 @@ async def _handle_goal_callbacks(query, data: str) -> None:
 
         async with AsyncSessionLocal() as db:
             result = await db.execute(
-                select(User).where(User.telegram_user_id == query.from_user.id)
+                select(User).where(User.telegram_user_id == tg_id)
             )
             user = result.scalar_one_or_none()
             if not user:
@@ -526,18 +559,17 @@ async def _handle_goal_callbacks(query, data: str) -> None:
             db.add(goal)
             await db.commit()
 
+        await _clear_draft(tg_id)
         await query.edit_message_text(
-            f"✅ *Goal saved!*\n\n"
-            f"Sport: *{sport_display}*\n"
-            f"Category: *{category}*\n"
-            f"Target: *{count}x*\n"
-            f"Period: *{period}* ({start} to {end})\n\n"
-            f"Use /goals to view or manage your goals.",
+            _format_goal_summary(sport_display, category, count, period, start, end),
             parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🎯 My Goals", callback_data="goal:menu"),
+            ]]),
         )
         return
 
-    # ── Confirm delete (data = goal:confirm_delete:<uuid>) ─────────────────
+    # ── Confirm delete ─────────────────────────────────────────────────────
     if data.startswith("goal:confirm_delete:"):
         goal_id = data[len("goal:confirm_delete:"):]
         async with AsyncSessionLocal() as db:
@@ -546,16 +578,89 @@ async def _handle_goal_callbacks(query, data: str) -> None:
             )
             goal = result.scalar_one_or_none()
             if goal:
+                sport_label = ("Ride Endurance"
+                               if goal.activity_type == "RideEndurance"
+                               else goal.activity_type)
                 goal.is_active = False
                 await db.commit()
                 await query.edit_message_text(
-                    f"✅ *Goal deleted:* {goal.activity_type} — {goal.category} × {goal.target_count}\n\n"
+                    f"✅ *Goal deleted*\n\n"
+                    f"Sport: *{sport_label}*\n"
+                    f"Goal: *{goal.category}*\n"
+                    f"Target: *{goal.target_count} times*\n\n"
                     f"Use /goals to manage your goals.",
                     parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🎯 My Goals", callback_data="goal:menu"),
+                    ]]),
                 )
             else:
                 await query.edit_message_text("Goal not found.")
         return
+
+
+# ── Free-text handler: receives goal description and count ─────────────────
+
+async def _handle_goal_text_input(update: Update) -> bool:
+    """Handle free-text input for the in-progress goal draft.
+
+    Returns True if the message was consumed by the goal flow.
+    """
+    tg_id = update.effective_user.id
+    text  = update.message.text.strip()
+
+    if text.lower() == "/cancel":
+        await _clear_draft(tg_id)
+        await update.message.reply_text("Goal entry cancelled. Use /goals anytime.")
+        return True
+
+    draft = await _load_draft(tg_id)
+    if not draft:
+        return False
+
+    step = draft.get("step")
+
+    if step == "category":
+        # User typed their goal description — ask for count
+        draft["category"] = text
+        draft["step"] = "count"
+        await _save_draft(tg_id, draft)
+        await update.message.reply_text(
+            f"Goal: *{text}*\n\n"
+            f"How many times do you want to achieve this?\n"
+            f"Reply with a number — e.g. *4*\n\n"
+            f"Type /cancel to abort.",
+            parse_mode="Markdown",
+        )
+        return True
+
+    if step == "count":
+        if not text.isdigit() or int(text) < 1:
+            await update.message.reply_text(
+                "Please enter a positive whole number — e.g. *4*:",
+                parse_mode="Markdown",
+            )
+            return True
+
+        draft["count"] = int(text)
+        draft["step"] = "period"
+        await _save_draft(tg_id, draft)
+
+        sport    = draft["sport"]
+        category = draft["category"]
+        count    = draft["count"]
+
+        await update.message.reply_text(
+            f"Sport: *{sport}*\n"
+            f"Goal: *{category}*\n"
+            f"Target: *{count} time{'s' if count != 1 else ''}*\n\n"
+            f"Choose the time period:",
+            parse_mode="Markdown",
+            reply_markup=_goal_period_keyboard(sport, category, str(count)),
+        )
+        return True
+
+    return False
 
 
 async def _show_delete_menu(query) -> None:
@@ -782,6 +887,9 @@ async def _do_disconnect(query) -> None:
 # ---------------------------------------------------------------------------
 
 async def handle_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Check if user is mid-way through adding a goal
+    if await _handle_goal_text_input(update):
+        return
     await update.message.reply_text("Use /help to see what I can do.")
 
 
