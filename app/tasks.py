@@ -254,7 +254,7 @@ async def _sync_user_activities_async(user_id: str) -> None:
                     strava_activity_id=int(data["id"]),
                     user_id=user.id,
                     activity_name=data.get("name") or "Unnamed Activity",
-                    activity_type=data.get("type") or "Unknown",
+                    activity_type=data.get("sport_type") or data.get("type") or "Unknown",
                     activity_date=activity_date,
                     distance_meters=float(data.get("distance") or 0),
                     moving_time_seconds=int(data.get("moving_time") or 0),

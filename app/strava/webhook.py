@@ -378,7 +378,7 @@ async def _handle_activity_created(db: AsyncSession, owner_id: int, activity_id:
             strava_activity_id=activity_id,
             user_id=user.id,
             activity_name=activity_data.get("name") or "Unnamed Activity",
-            activity_type=activity_data.get("type") or "Unknown",
+            activity_type=activity_data.get("sport_type") or activity_data.get("type") or "Unknown",
             activity_date=activity_date,
             distance_meters=float(activity_data.get("distance") or 0),
             moving_time_seconds=int(activity_data.get("moving_time") or 0),

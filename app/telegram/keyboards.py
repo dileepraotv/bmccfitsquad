@@ -8,10 +8,8 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     """Main menu shown after /start or when user is already connected."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 My Stats",         callback_data="stats:menu"),
-         InlineKeyboardButton("🎯 My Goals",         callback_data="goal:menu")],
-        [InlineKeyboardButton("💬 Random Quote",     callback_data="quote:random"),
-         InlineKeyboardButton("🔗 Reconnect Strava", callback_data="reconnect:strava")],
+        [InlineKeyboardButton("📊 My Stats",  callback_data="stats:menu"),
+         InlineKeyboardButton("🎯 My Goals",  callback_data="goal:menu")],
     ])
 
 
@@ -51,6 +49,19 @@ def stats_period_keyboard(sport: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⬅️ Back",         callback_data="stats:menu"),
          InlineKeyboardButton("❌ Exit",         callback_data="stats:exit")],
     ])
+
+
+def stats_nav_keyboard(sport: str) -> InlineKeyboardMarkup:
+    """Navigation keyboard shown below a stats result.
+
+    Lets the user change the period, switch sport, or close — without
+    having to re-type /stats.
+    """
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("⬅️ Period",     callback_data=f"stats:sport:{sport}"),
+        InlineKeyboardButton("🔄 Sport",      callback_data="stats:menu"),
+        InlineKeyboardButton("❌ Close",      callback_data="stats:exit"),
+    ]])
 
 
 def goals_keyboard(goals: list) -> InlineKeyboardMarkup:
