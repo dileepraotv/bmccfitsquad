@@ -240,7 +240,7 @@ async def strava_oauth_callback(
     # ------------------------------------------------------------------
     try:
         from app.tasks import sync_user_activities
-        sync_user_activities.delay(telegram_user_id=telegram_user_id)
+        sync_user_activities.delay(user_id=str(user.id))
     except Exception:
         logger.warning("Could not dispatch history sync task (Celery may not be running)")
 
@@ -253,12 +253,16 @@ async def strava_oauth_callback(
         await bot.send_message(
             chat_id=telegram_user_id,
             text=(
-                f"✅ *Strava connected!*\n\n"
-                f"Welcome, {athlete_firstname}! Your Strava account is now linked.\n"
-                f"New activities will be posted to the group automatically.\n\n"
-                f"Use /stats to see your numbers or /goals to set a challenge."
+                f"🎉 *Welcome, {athlete_firstname}\\!*\n\n"
+                f"Your Strava account has been successfully connected\\.\n"
+                f"You've taken a step in the right direction toward achieving your fitness goals\\! "
+                f"🚴🏃🏊🚶\n\n"
+                f"Here's how to get started:\n\n"
+                f"📊 Use /stats to see your activity numbers\n"
+                f"🎯 Use /goals to set a new challenge\n"
+                f"❓ Use /help to explore all available features"
             ),
-            parse_mode="Markdown",
+            parse_mode="MarkdownV2",
         )
     except Exception as exc:
         # Non-fatal — the web response is more important
