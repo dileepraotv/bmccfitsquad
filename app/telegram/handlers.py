@@ -420,7 +420,9 @@ def _goals_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Add Goal",     callback_data="goal:add"),
          InlineKeyboardButton("❌ Delete Goal",  callback_data="goal:delete_menu")],
-        [InlineKeyboardButton("✅  Goal Status", callback_data="goal:status")],
+        [InlineKeyboardButton("✅ Goal Status",  callback_data="goal:status")],
+        [InlineKeyboardButton("📊 Stats",        callback_data="stats:menu"),
+         InlineKeyboardButton("❌ Exit",         callback_data="goal:exit")],
     ])
 
 
@@ -572,6 +574,10 @@ async def _handle_goal_callbacks(query, data: str) -> None:
 
     if data == "goal:status":
         await _show_goal_status(query)
+        return
+
+    if data == "goal:exit":
+        await query.edit_message_text("Goals closed. Tap /goals anytime to return.")
         return
 
     # ── Sport chosen → ask for goal target as a number ─────────────────────
