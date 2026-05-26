@@ -17,28 +17,40 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
 
 
 def stats_sport_keyboard() -> InlineKeyboardMarkup:
-    """Sport type selector — shown when user taps /stats."""
+    """Sport type selector — shown when user taps /stats.
+
+    Layout:
+      Row 1: Ride | Ride Endurance
+      Row 2: Run  | Swim | Walk
+      Row 3: Exit
+    """
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚴  Ride",               callback_data="stats:sport:Ride")],
-        [InlineKeyboardButton("🚴  Ride Endurance",     callback_data="stats:sport:RideEndurance")],
-        [InlineKeyboardButton("🏃  Run",                callback_data="stats:sport:Run")],
-        [InlineKeyboardButton("🏊  Swim",               callback_data="stats:sport:Swim")],
-        [InlineKeyboardButton("🚶  Walk",               callback_data="stats:sport:Walk")],
-        [InlineKeyboardButton("❌  Exit",               callback_data="stats:exit")],
+        [InlineKeyboardButton("🚴 Ride",           callback_data="stats:sport:Ride"),
+         InlineKeyboardButton("🚴 Ride Endurance", callback_data="stats:sport:RideEndurance")],
+        [InlineKeyboardButton("🏃 Run",            callback_data="stats:sport:Run"),
+         InlineKeyboardButton("🏊 Swim",           callback_data="stats:sport:Swim"),
+         InlineKeyboardButton("🚶 Walk",           callback_data="stats:sport:Walk")],
+        [InlineKeyboardButton("❌ Exit",           callback_data="stats:exit")],
     ])
 
 
 def stats_period_keyboard(sport: str) -> InlineKeyboardMarkup:
-    """Time-period selector — shown after the user picks a sport."""
+    """Time-period selector — shown after the user picks a sport.
+
+    Layout:
+      Row 1: All Time | Year to Date | Previous Year
+      Row 2: Current Month | Previous Month
+      Row 3: ⬅ Back | ❌ Exit
+    """
     s = sport
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("All Time",       callback_data=f"stats:period:{s}:all_time"),
-         InlineKeyboardButton("Year to Date",   callback_data=f"stats:period:{s}:year_to_date")],
-        [InlineKeyboardButton("This Month",     callback_data=f"stats:period:{s}:current_month"),
-         InlineKeyboardButton("Last Month",     callback_data=f"stats:period:{s}:previous_month")],
-        [InlineKeyboardButton("Last Year",      callback_data=f"stats:period:{s}:previous_year")],
-        [InlineKeyboardButton("⬅️  Back",       callback_data="stats:menu"),
-         InlineKeyboardButton("❌  Exit",       callback_data="stats:exit")],
+        [InlineKeyboardButton("All Time",        callback_data=f"stats:period:{s}:all_time"),
+         InlineKeyboardButton("Year to Date",    callback_data=f"stats:period:{s}:year_to_date"),
+         InlineKeyboardButton("Previous Year",   callback_data=f"stats:period:{s}:previous_year")],
+        [InlineKeyboardButton("Current Month",   callback_data=f"stats:period:{s}:current_month"),
+         InlineKeyboardButton("Previous Month",  callback_data=f"stats:period:{s}:previous_month")],
+        [InlineKeyboardButton("⬅️ Back",         callback_data="stats:menu"),
+         InlineKeyboardButton("❌ Exit",         callback_data="stats:exit")],
     ])
 
 
