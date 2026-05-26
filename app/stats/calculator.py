@@ -227,13 +227,13 @@ def _compute_ride_stats(activities: list[Activity]) -> dict:
     """
     distances_km = [a.distance_meters / 1_000 for a in activities]
     return {
-        "rides":             len(activities),
-        "distance_km":       _round2(sum(distances_km)),
-        "moving_time":       _fmt_duration(sum(a.moving_time_seconds for a in activities)),
-        "elevation_gain_km": _round2(sum(a.elevation_gain for a in activities) / 1_000),
-        "biggest_ride_km":   _round2(max(distances_km, default=0.0)),
-        "fifties":           sum(1 for d in distances_km if 50.0 <= d < 100.0),
-        "hundreds":          sum(1 for d in distances_km if d >= 100.0),
+        "rides":          len(activities),
+        "distance_km":    _round2(sum(distances_km)),
+        "moving_time":    _fmt_duration(sum(a.moving_time_seconds for a in activities)),
+        "elevation_m":    round(sum(a.elevation_gain for a in activities)),
+        "biggest_ride_km": _round2(max(distances_km, default=0.0)),
+        "fifties":        sum(1 for d in distances_km if 50.0 <= d < 100.0),
+        "hundreds":       sum(1 for d in distances_km if d >= 100.0),
     }
 
 
@@ -241,17 +241,17 @@ def _compute_ride_endurance_stats(activities: list[Activity]) -> dict:
     """Only rides ≥ 200 km (already filtered in the DB query)."""
     distances_km = [a.distance_meters / 1_000 for a in activities]
     return {
-        "rides":             len(activities),
-        "distance_km":       _round2(sum(distances_km)),
-        "moving_time":       _fmt_duration(sum(a.moving_time_seconds for a in activities)),
-        "elevation_gain_km": _round2(sum(a.elevation_gain for a in activities) / 1_000),
-        "biggest_ride_km":   _round2(max(distances_km, default=0.0)),
-        "two_hundreds":      sum(1 for d in distances_km if 200.0 <= d < 300.0),
-        "three_hundreds":    sum(1 for d in distances_km if 300.0 <= d < 400.0),
-        "four_hundreds":     sum(1 for d in distances_km if 400.0 <= d < 600.0),
-        "six_hundreds":      sum(1 for d in distances_km if 600.0 <= d < 1_000.0),
-        "thousands":         sum(1 for d in distances_km if 1_000.0 <= d < 1_200.0),
-        "twelve_hundreds":   sum(1 for d in distances_km if d >= 1_200.0),
+        "rides":           len(activities),
+        "distance_km":     _round2(sum(distances_km)),
+        "moving_time":     _fmt_duration(sum(a.moving_time_seconds for a in activities)),
+        "elevation_m":     round(sum(a.elevation_gain for a in activities)),
+        "biggest_ride_km": _round2(max(distances_km, default=0.0)),
+        "two_hundreds":    sum(1 for d in distances_km if 200.0 <= d < 300.0),
+        "three_hundreds":  sum(1 for d in distances_km if 300.0 <= d < 400.0),
+        "four_hundreds":   sum(1 for d in distances_km if 400.0 <= d < 600.0),
+        "six_hundreds":    sum(1 for d in distances_km if 600.0 <= d < 1_000.0),
+        "thousands":       sum(1 for d in distances_km if 1_000.0 <= d < 1_200.0),
+        "twelve_hundreds": sum(1 for d in distances_km if d >= 1_200.0),
     }
 
 
@@ -262,14 +262,14 @@ def _compute_run_stats(activities: list[Activity]) -> dict:
     indoor_dist_km    = [a.distance_meters / 1_000 for a in indoor]
 
     return {
-        "runs":                len(activities),
-        "indoor_runs":         len(indoor),
-        "distance_km":         _round2(sum(all_distances_km)),
-        "indoor_distance_km":  _round2(sum(indoor_dist_km)),
-        "moving_time":         _fmt_duration(sum(a.moving_time_seconds for a in activities)),
-        "indoor_time":         _fmt_duration(sum(a.moving_time_seconds for a in indoor)),
-        "elevation_gain_km":   _round2(sum(a.elevation_gain for a in activities) / 1_000),
-        "biggest_run_km":      _round2(max(all_distances_km, default=0.0)),
+        "runs":               len(activities),
+        "indoor_runs":        len(indoor),
+        "distance_km":        _round2(sum(all_distances_km)),
+        "indoor_distance_km": _round2(sum(indoor_dist_km)),
+        "moving_time":        _fmt_duration(sum(a.moving_time_seconds for a in activities)),
+        "indoor_time":        _fmt_duration(sum(a.moving_time_seconds for a in indoor)),
+        "elevation_m":        round(sum(a.elevation_gain for a in activities)),
+        "biggest_run_km":     _round2(max(all_distances_km, default=0.0)),
         "fives":               sum(1 for d in all_distances_km if 5.0 <= d < 10.0),
         "tens":                sum(1 for d in all_distances_km if 10.0 <= d < _HALF_MARATHON_KM),
         "half_marathons":      sum(1 for d in all_distances_km if _HALF_MARATHON_KM <= d < _FULL_MARATHON_KM),
@@ -301,11 +301,11 @@ def _compute_walk_stats(activities: list[Activity]) -> dict:
     """Walks and Hikes."""
     distances_km = [a.distance_meters / 1_000 for a in activities]
     return {
-        "walks":             len(activities),
-        "distance_km":       _round2(sum(distances_km)),
-        "moving_time":       _fmt_duration(sum(a.moving_time_seconds for a in activities)),
-        "elevation_gain_km": _round2(sum(a.elevation_gain for a in activities) / 1_000),
-        "biggest_walk_km":   _round2(max(distances_km, default=0.0)),
+        "walks":           len(activities),
+        "distance_km":     _round2(sum(distances_km)),
+        "moving_time":     _fmt_duration(sum(a.moving_time_seconds for a in activities)),
+        "elevation_m":     round(sum(a.elevation_gain for a in activities)),
+        "biggest_walk_km": _round2(max(distances_km, default=0.0)),
         "twos":              sum(1 for d in distances_km if 2.0 <= d < 5.0),
         "fives":             sum(1 for d in distances_km if 5.0 <= d < 10.0),
         "tens":              sum(1 for d in distances_km if d >= 10.0),
@@ -321,7 +321,7 @@ def _format_ride(s: dict) -> list[str]:
         f"Rides: {s['rides']}",
         f"Distance: {s['distance_km']:.2f} km",
         f"Moving Time: {s['moving_time']} hours",
-        f"Elevation Gain: {s['elevation_gain_km']:.2f} km",
+        f"Elevation Gain: {s['elevation_m']:,} m",
         f"Biggest Ride: {s['biggest_ride_km']:.2f} km",
         f"50's: {s['fifties']}",
         f"100's: {s['hundreds']}",
@@ -333,7 +333,7 @@ def _format_ride_endurance(s: dict) -> list[str]:
         f"Rides: {s['rides']}",
         f"Distance: {s['distance_km']:.2f} km",
         f"Moving Time: {s['moving_time']} hours",
-        f"Elevation Gain: {s['elevation_gain_km']:.2f} km",
+        f"Elevation Gain: {s['elevation_m']:,} m",
         f"Biggest Ride: {s['biggest_ride_km']:.2f} km",
         f"200's: {s['two_hundreds']}",
         f"300's: {s['three_hundreds']}",
@@ -352,7 +352,7 @@ def _format_run(s: dict) -> list[str]:
         f"Indoor Distance: {s['indoor_distance_km']:.2f} km",
         f"Moving Time: {s['moving_time']} hours",
         f"Indoor Time: {s['indoor_time']} hours",
-        f"Elevation Gain: {s['elevation_gain_km']:.2f} km",
+        f"Elevation Gain: {s['elevation_m']:,} m",
         f"Biggest Run: {s['biggest_run_km']:.2f} km",
         f"5 Km's: {s['fives']}",
         f"10 Km's: {s['tens']}",
@@ -381,7 +381,7 @@ def _format_walk(s: dict) -> list[str]:
         f"Walks: {s['walks']}",
         f"Distance: {s['distance_km']:.2f} km",
         f"Moving Time: {s['moving_time']} hours",
-        f"Elevation Gain: {s['elevation_gain_km']:.2f} km",
+        f"Elevation Gain: {s['elevation_m']:,} m",
         f"Biggest Walk: {s['biggest_walk_km']:.2f} km",
         f"2 Km's: {s['twos']}",
         f"5 Km's: {s['fives']}",

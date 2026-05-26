@@ -41,6 +41,7 @@ from app.telegram.keyboards import (
     confirm_keyboard,
     connect_strava_keyboard,
     main_menu_keyboard,
+    stats_nav_keyboard,
     stats_period_keyboard,
     stats_sport_keyboard,
 )
@@ -55,18 +56,24 @@ _QUOTES_PATH = pathlib.Path("data/quotes.txt")
 # ---------------------------------------------------------------------------
 
 def register_handlers(app: Application) -> None:
-    """Attach all handlers to the PTB Application."""
-    app.add_handler(CommandHandler("start",         cmd_start))
-    app.add_handler(CommandHandler("help",          cmd_help))
-    app.add_handler(CommandHandler("connect",       cmd_connect))
-    app.add_handler(CommandHandler("disconnect",    cmd_disconnect))
-    app.add_handler(CommandHandler("sync",          cmd_sync))
-    app.add_handler(CommandHandler("stats",         cmd_stats))
-    app.add_handler(CommandHandler("goals",         cmd_goals))
-    app.add_handler(CommandHandler("cancel",        cmd_cancel))
-    app.add_handler(CommandHandler("leaderboard",   cmd_leaderboard))
-    app.add_handler(CommandHandler("notifications", cmd_notifications))
-    app.add_handler(CommandHandler("quote",         cmd_quote))
+    """Attach all handlers to the PTB Application.
+
+    All command handlers are restricted to private chats so the bot does not
+    respond to /stats, /goals etc. when added to a group conversation.
+    """
+    _priv = filters.ChatType.PRIVATE
+
+    app.add_handler(CommandHandler("start",         cmd_start,         filters=_priv))
+    app.add_handler(CommandHandler("help",          cmd_help,          filters=_priv))
+    app.add_handler(CommandHandler("connect",       cmd_connect,       filters=_priv))
+    app.add_handler(CommandHandler("disconnect",    cmd_disconnect,    filters=_priv))
+    app.add_handler(CommandHandler("sync",          cmd_sync,          filters=_priv))
+    app.add_handler(CommandHandler("stats",         cmd_stats,         filters=_priv))
+    app.add_handler(CommandHandler("goals",         cmd_goals,         filters=_priv))
+    app.add_handler(CommandHandler("cancel",        cmd_cancel,        filters=_priv))
+    app.add_handler(CommandHandler("leaderboard",   cmd_leaderboard,   filters=_priv))
+    app.add_handler(CommandHandler("notifications", cmd_notifications, filters=_priv))
+    app.add_handler(CommandHandler("quote",         cmd_quote,         filters=_priv))
 
     app.add_handler(CallbackQueryHandler(handle_callback))
 
@@ -223,17 +230,13 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    await update.message.reply_text(
-        "⏳ Syncing your full Strava activity history\\. This may take a minute for large accounts\\.",
-        parse_mode="MarkdownV2",
-    )
-
     import asyncio
     from app.tasks import _sync_user_activities_async
     asyncio.ensure_future(_sync_user_activities_async(user_id=str(user.id)))
 
     await update.message.reply_text(
-        "✅ Sync started\\! Your stats will be up to date shortly\\. Use /stats to check your numbers\\.",
+        "⏳ Sync started\\! Your stats will update shortly — this may take a minute for large accounts\\. "
+        "Use /stats to check your numbers once it completes\\.",
         parse_mode="MarkdownV2",
     )
 
@@ -756,7 +759,8 @@ async def _show_delete_menu(query) -> None:
 
     rows = [
         [InlineKeyboardButton(
-            f"{g.activity_type} — {g.category} x{g.target_count} ({g.start_date} to {g.end_date})",
+            f"{'Ride Endurance' if g.activity_type == 'RideEndurance' else g.activity_type}"
+            f" — {g.category} x{g.target_count} ({g.start_date} to {g.end_date})",
             callback_data=f"goal:confirm_delete:{g.id}",
         )]
         for g in goals
@@ -833,6 +837,7 @@ async def _show_goal_status(query) -> None:
                 f"Target: {g.target_count} time{'s' if g.target_count != 1 else ''} "
                 f"| Done: {achieved}\n"
                 f"`{bar}` {pct}%\n"
+                f"_counts activities ≥ {g.category}_\n"
                 f"_{g.start_date}  →  {g.end_date}_\n"
                 f"{divider}"
             )
@@ -909,7 +914,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await _do_disconnect(query)
 
     elif data in ("disconnect:cancel", "cancel"):
-        await query.edit_message_text("Cancelled — your account is still connected.")
+        await query.edit_message_text(
+            "Cancelled — your account is still connected.",
+            reply_markup=main_menu_keyboard(),
+        )
 
     else:
         logger.warning("Unhandled callback data: %s", data)
@@ -937,7 +945,11 @@ async def _send_stats(query, sport: str, time_frame: str) -> None:
 
     athlete_name = user.strava_athlete_name or user.telegram_first_name
     text = format_stats_message(stats, sport, time_frame, athlete_name)
-    await query.edit_message_text(text, parse_mode="Markdown")
+    await query.edit_message_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=stats_nav_keyboard(sport),
+    )
 
 
 async def _do_disconnect(query) -> None:
@@ -969,7 +981,20 @@ async def handle_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Check if user is mid-way through adding a goal
     if await _handle_goal_text_input(update):
         return
-    await update.message.reply_text("Use /help to see what I can do.")
+    text = update.message.text.strip()
+    # Numeric input with no active draft — likely a timed-out goal entry
+    try:
+        float(text.replace(",", "."))
+        is_numeric = True
+    except ValueError:
+        is_numeric = False
+    if is_numeric:
+        await update.message.reply_text(
+            "Were you adding a goal? Your session may have expired. "
+            "Type /goals to start again."
+        )
+    else:
+        await update.message.reply_text("Use /help to see what I can do.")
 
 
 async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
