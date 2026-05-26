@@ -109,14 +109,22 @@ async def format_activity_notification(activity: dict, athlete_name: str) -> str
     Returns:
         Fully formatted, plain-text notification string ready to send.
     """
-    activity_type: str = activity.get("type") or activity.get("sport_type") or "Unknown"
+    activity_type: str = activity.get("sport_type") or activity.get("type") or "Unknown"
     emoji = _EMOJI.get(activity_type, _DEFAULT_EMOJI)
+    activity_id   = activity.get("id")
+    activity_name = activity.get("name") or "Unnamed Activity"
+
+    # Hyperlink the activity name to Strava if we have an ID
+    if activity_id:
+        activity_link = f"[{activity_name}](https://www.strava.com/activities/{activity_id})"
+    else:
+        activity_link = activity_name
 
     # ------------------------------------------------------------------
-    # Section 1 — Header
+    # Section 1 — Header  (bold "New Activity!")
     # ------------------------------------------------------------------
     lines: list[str] = [
-        f"{emoji} New Activity!",
+        f"{emoji} *New Activity!*",
         "",
     ]
 
@@ -125,7 +133,7 @@ async def format_activity_notification(activity: dict, athlete_name: str) -> str
     # ------------------------------------------------------------------
     lines += [
         f"Athlete Name: {athlete_name}",
-        f"Activity: {activity.get('name') or 'Unnamed Activity'}",
+        f"Activity: {activity_link}",
         f"Activity Date: {format_strava_date(activity.get('start_date'))}",
         f"Activity Type: {activity_type}",
     ]
@@ -169,11 +177,16 @@ async def format_activity_notification(activity: dict, athlete_name: str) -> str
     # ------------------------------------------------------------------
     # Footer — separator, club message, quote, CTA
     # ------------------------------------------------------------------
+    club_msg = _load_club_message()
     lines += [
         "",
         _SEPARATOR,
-        _load_club_message(),
-        f'💬 "{_random_quote()}"',
+    ]
+    if club_msg:
+        lines.append(club_msg)
+    lines += [
+        "",
+        f'*"{_random_quote()}"*',
         "",
         "Click /stats to check your updated stats",
     ]
