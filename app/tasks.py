@@ -120,33 +120,47 @@ async def _send_activity_notification_async(
         )
         group_chats: list[GroupChat] = chats_result.scalars().all()
 
-        if not group_chats:
-            logger.info(
-                "No group chats configured — activity notification skipped for user=%s",
-                user_id,
-            )
-            return
-
         # ------------------------------------------------------------------
-        # 3. Format the notification using format_activity_notification
+        # 3. Format the notification
         # ------------------------------------------------------------------
         text = await format_activity_notification(activity_data, athlete_name)
 
         # ------------------------------------------------------------------
         # 4. Send via Telegram Bot API directly (no PTB Application needed)
         # ------------------------------------------------------------------
-        # We create a standalone Bot instance — lightweight and safe to use
-        # in a Celery worker process that has no PTB Application running.
         bot = TelegramBot(token=settings.telegram_bot_token)
 
-        sent = 0
+        # Always DM the athlete directly so they get a confirmation even if
+        # no group chats are configured yet.
+        try:
+            async with bot:
+                await bot.send_message(
+                    chat_id=user.telegram_user_id,
+                    text=text,
+                    parse_mode="Markdown",
+                )
+            logger.info(
+                "Activity notification DM sent to telegram_id=%s", user.telegram_user_id
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to DM user telegram_id=%s: %s", user.telegram_user_id, exc
+            )
+
+        # Also broadcast to any registered group chats
+        if not group_chats:
+            logger.info(
+                "No group chats configured — skipping group broadcast for user=%s",
+                user_id,
+            )
+            return
+
         for chat in group_chats:
             try:
                 async with bot:
-                    await bot.send_message(chat_id=chat.id, text=text)
-                sent += 1
+                    await bot.send_message(chat_id=chat.id, text=text, parse_mode="Markdown")
                 logger.info(
-                    "Activity notification sent: chat_id=%s user_id=%s",
+                    "Activity notification sent to group chat_id=%s user_id=%s",
                     chat.id,
                     user_id,
                 )
@@ -157,22 +171,6 @@ async def _send_activity_notification_async(
                     user_id,
                     exc,
                 )
-
-        # Optionally, DM the athlete to confirm their activity was broadcast
-        if sent > 0:
-            try:
-                async with bot:
-                    await bot.send_message(
-                        chat_id=user.telegram_user_id,
-                        text=(
-                            f"✅ Your activity *{activity_data.get('name', 'Unnamed')}* "
-                            f"was posted to {sent} group chat(s)!"
-                        ),
-                        parse_mode="Markdown",
-                    )
-            except Exception as exc:
-                # Non-fatal — the group notifications already went out
-                logger.debug("Could not send DM confirmation to user %s: %s", user_id, exc)
 
 
 # ---------------------------------------------------------------------------
