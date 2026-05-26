@@ -164,7 +164,7 @@ def format_stats_message(
     """
     sport_label = _SPORT_LABELS.get(sport_type, sport_type)
     time_label = _TIME_FRAME_LABELS.get(time_frame, time_frame)
-    header = f"{sport_label} - {time_label} Stats: ({athlete_name})"
+    header = f"*{sport_label} - {time_label} Stats: ({athlete_name})*"
 
     formatters = {
         "Ride":          _format_ride,
@@ -176,7 +176,7 @@ def format_stats_message(
     body_lines = formatters.get(sport_type, lambda _: [])(stats)
     body = "\n".join(f"- {line}" for line in body_lines)
     quote = _random_quote()
-    return f"{header}\n\n{body}\n\n_{quote}_"
+    return f"{header}\n\n{body}\n\n*{quote}*"
 
 
 # ---------------------------------------------------------------------------

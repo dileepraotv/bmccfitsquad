@@ -21,7 +21,7 @@ import logging
 
 import httpx
 from fastapi import APIRouter, Request, Response
-from telegram import Update
+from telegram import BotCommand, Update
 from telegram.ext import Application, ApplicationBuilder
 
 from app.config import get_settings
@@ -102,6 +102,19 @@ async def setup_bot() -> None:
             webhook_url,
             info.url,
         )
+
+    # ------------------------------------------------------------------
+    # Register bot command menu (shown in the / menu inside Telegram)
+    # ------------------------------------------------------------------
+    await _application.bot.set_my_commands([
+        BotCommand("start",      "Welcome message and main menu"),
+        BotCommand("stats",      "View activity stats by sport and period"),
+        BotCommand("goals",      "Add, delete or check fitness goals"),
+        BotCommand("connect",    "Link your Strava account"),
+        BotCommand("sync",       "Sync your full Strava activity history"),
+        BotCommand("help",       "Show all available commands"),
+    ])
+    logger.info("Telegram bot command menu registered")
 
 
 async def teardown_bot() -> None:
