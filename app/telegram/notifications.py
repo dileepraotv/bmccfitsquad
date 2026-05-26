@@ -189,6 +189,7 @@ async def format_activity_notification(activity: dict, athlete_name: str) -> str
         f'*"{_random_quote()}"*',
         "",
         "Click /stats to check your updated stats",
+        "Click /goals to check your goal progress",
     ]
 
     return "\n".join(lines)
