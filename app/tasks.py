@@ -222,13 +222,10 @@ async def _sync_user_activities_async(user_id: str) -> None:
             return
 
         # ------------------------------------------------------------------
-        # 2. Fetch all activities from Strava (paginated, current year onwards)
+        # 2. Fetch ALL activities from Strava (no time bound — full history)
         # ------------------------------------------------------------------
-        now = datetime.now(timezone.utc)
-        year_start_ts = int(datetime(now.year, 1, 1, tzinfo=timezone.utc).timestamp())
-
         access_token = await get_valid_access_token(db, user)
-        activities = await fetch_activities(access_token, after=year_start_ts)
+        activities = await fetch_activities(access_token)
 
         logger.info(
             "sync_user_activities: fetched %s activities for user_id=%s",
