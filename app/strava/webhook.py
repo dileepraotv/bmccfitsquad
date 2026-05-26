@@ -237,12 +237,23 @@ async def strava_oauth_callback(
 
     # ------------------------------------------------------------------
     # Kick off a background history sync
+    # Try Celery first; fall back to running the async function directly
+    # in a background FastAPI task so the OAuth redirect returns fast.
     # ------------------------------------------------------------------
+    from app.tasks import _sync_user_activities_async
+    import asyncio
+
+    user_id_str = str(user.id)
+
     try:
         from app.tasks import sync_user_activities
-        sync_user_activities.delay(user_id=str(user.id))
+        sync_user_activities.delay(user_id=user_id_str)
+        logger.info("History sync dispatched to Celery for user_id=%s", user_id_str)
     except Exception:
-        logger.warning("Could not dispatch history sync task (Celery may not be running)")
+        logger.warning(
+            "Celery not available — running history sync inline for user_id=%s", user_id_str
+        )
+        asyncio.ensure_future(_sync_user_activities_async(user_id=user_id_str))
 
     # ------------------------------------------------------------------
     # Notify the user in Telegram
@@ -253,10 +264,9 @@ async def strava_oauth_callback(
         await bot.send_message(
             chat_id=telegram_user_id,
             text=(
-                f"🎉 *Welcome, {athlete_firstname}\\!*\n\n"
-                f"Your Strava account has been successfully connected\\.\n"
-                f"You've taken a step in the right direction toward achieving your fitness goals\\! "
-                f"🚴🏃🏊🚶\n\n"
+                f"🎉 *Welcome, {athlete_firstname}\\!* 🚴🏃🏊🚶\n\n"
+                f"✅ Your Strava account has been successfully connected\\.\n\n"
+                f"You've taken a step in the right direction toward achieving your fitness goals\\!\n\n"
                 f"Here's how to get started:\n\n"
                 f"📊 Use /stats to see your activity numbers\n"
                 f"🎯 Use /goals to set a new challenge\n"
