@@ -106,6 +106,8 @@ def _random_quote() -> str:
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Welcome message — register the user and prompt Strava connection if needed."""
+    from app.strava.auth import build_authorization_url, generate_oauth_state
+
     user = await _get_or_create_user(update)
     name = update.effective_user.first_name or "there"
 
@@ -118,18 +120,21 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             reply_markup=main_menu_keyboard(),
         )
     else:
+        state = await generate_oauth_state(update.effective_user.id)
+        auth_url = build_authorization_url(state)
         await update.message.reply_text(
-            f"👋 Hey *{name}*, welcome to the *BMCC Fitness Bot*! 🚴‍♂️\n\n"
-            f"I post activity notifications, stats, and motivational quotes for "
-            f"Beyond Miles Cycling Club.\n\n"
-            f"To get started, connect your Strava account:",
-            parse_mode="Markdown",
-            reply_markup=connect_strava_keyboard(
-                f"https://t.me/{context.bot.username}?start=connect"
-            ),
-        )
-        await update.message.reply_text(
-            "Or tap /connect to link your Strava account.",
+            "*Welcome to BMCC FitSquad\\!* 🚴🏃🏊🚶\n\n"
+            "_\"It's the Ride That Matters\"_\n\n"
+            "I help you track your Strava cycling, running, swimming, and walking activities, "
+            "along with your statistics and fitness goals\\.\n\n"
+            "To get started, connect your Strava account using the *Connect Strava* button below\\.\n\n"
+            "You can also use /help anytime to see all available commands and features\\.\n\n"
+            "Stay connected with BMCC:\n"
+            "🌐 [www\\.beyondmiles\\.cc](http://www.beyondmiles.cc)\n"
+            "📸 Instagram: @beyondmilescc",
+            parse_mode="MarkdownV2",
+            reply_markup=connect_strava_keyboard(auth_url),
+            disable_web_page_preview=True,
         )
 
 
@@ -160,8 +165,10 @@ async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     auth_url = build_authorization_url(state)
 
     await update.message.reply_text(
-        "Tap the button below to connect your Strava account.\n\n"
-        "You'll be asked to approve access — we only read your activities, we never write.",
+        "Tap *Connect Strava* below to link your account\\.\n\n"
+        "We request access to read all your activities \\(including private ones\\) "
+        "so your stats and notifications are complete\\.",
+        parse_mode="MarkdownV2",
         reply_markup=connect_strava_keyboard(auth_url),
     )
 
@@ -305,8 +312,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if data.startswith("stats:sport:"):
         sport = data.split(":")[-1]
+        sport_labels = {
+            "Ride": "🚴 Ride", "RideEndurance": "🚴 Ride Endurance",
+            "Run": "🏃 Run", "Swim": "🏊 Swim", "Walk": "🚶 Walk",
+        }
+        label = sport_labels.get(sport, sport)
         await query.edit_message_text(
-            f"📊 *{sport} Stats*\n\nChoose a time period:",
+            f"📊 *{label} Stats*\n\nChoose a time period:",
             parse_mode="Markdown",
             reply_markup=stats_period_keyboard(sport),
         )
@@ -325,11 +337,24 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             reply_markup=stats_sport_keyboard(),
         )
 
-    elif data == "leaderboard:week":
+    elif data == "stats:exit":
+        await query.edit_message_text("Stats closed. Use /stats anytime to check your numbers.")
+
+    elif data in ("leaderboard:month", "leaderboard:week"):
         await query.edit_message_text("Use /leaderboard to see this month's standings.")
 
     elif data == "quote:random":
         await query.edit_message_text(f'💬 *"{_random_quote()}"*', parse_mode="Markdown")
+
+    elif data == "reconnect:strava":
+        from app.strava.auth import build_authorization_url, generate_oauth_state
+        state = await generate_oauth_state(query.from_user.id)
+        auth_url = build_authorization_url(state)
+        from app.telegram.keyboards import connect_strava_keyboard
+        await query.edit_message_text(
+            "Tap below to reconnect your Strava account:",
+            reply_markup=connect_strava_keyboard(auth_url),
+        )
 
     elif data == "disconnect:confirm":
         await _do_disconnect(query)

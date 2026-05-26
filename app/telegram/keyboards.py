@@ -6,33 +6,39 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 
 def main_menu_keyboard() -> InlineKeyboardMarkup:
-    """Main menu shown after /start."""
+    """Main menu shown after /start or when user is already connected."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 My Stats",     callback_data="stats:menu")],
-        [InlineKeyboardButton("🎯 My Goals",     callback_data="goal:menu")],
-        [InlineKeyboardButton("🏆 Leaderboard",  callback_data="leaderboard:week")],
-        [InlineKeyboardButton("💬 Random Quote", callback_data="quote:random")],
+        [InlineKeyboardButton("📊 My Stats",      callback_data="stats:menu"),
+         InlineKeyboardButton("🎯 My Goals",      callback_data="goal:menu")],
+        [InlineKeyboardButton("🏆 Leaderboard",   callback_data="leaderboard:month"),
+         InlineKeyboardButton("💬 Random Quote",  callback_data="quote:random")],
+        [InlineKeyboardButton("🔗 Reconnect Strava", callback_data="reconnect:strava")],
     ])
 
 
 def stats_sport_keyboard() -> InlineKeyboardMarkup:
-    """Sport type selector shown after /stats."""
+    """Sport type selector — shown when user taps /stats."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚴 Rides",    callback_data="stats:sport:Ride"),
-         InlineKeyboardButton("🏃 Runs",     callback_data="stats:sport:Run")],
-        [InlineKeyboardButton("🏊 Swims",    callback_data="stats:sport:Swim"),
-         InlineKeyboardButton("🚶 Walks",    callback_data="stats:sport:Walk")],
+        [InlineKeyboardButton("🚴  Ride",               callback_data="stats:sport:Ride")],
+        [InlineKeyboardButton("🚴  Ride Endurance",     callback_data="stats:sport:RideEndurance")],
+        [InlineKeyboardButton("🏃  Run",                callback_data="stats:sport:Run")],
+        [InlineKeyboardButton("🏊  Swim",               callback_data="stats:sport:Swim")],
+        [InlineKeyboardButton("🚶  Walk",               callback_data="stats:sport:Walk")],
+        [InlineKeyboardButton("❌  Exit",               callback_data="stats:exit")],
     ])
 
 
 def stats_period_keyboard(sport: str) -> InlineKeyboardMarkup:
-    """Time-period selector shown after the user picks a sport."""
+    """Time-period selector — shown after the user picks a sport."""
+    s = sport
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📅 This Month",    callback_data=f"stats:period:{sport}:current_month"),
-         InlineKeyboardButton("📅 Last Month",    callback_data=f"stats:period:{sport}:previous_month")],
-        [InlineKeyboardButton("📆 Year to Date",  callback_data=f"stats:period:{sport}:year_to_date"),
-         InlineKeyboardButton("📆 Last Year",     callback_data=f"stats:period:{sport}:previous_year")],
-        [InlineKeyboardButton("🗓  All Time",      callback_data=f"stats:period:{sport}:all_time")],
+        [InlineKeyboardButton("All Time",       callback_data=f"stats:period:{s}:all_time"),
+         InlineKeyboardButton("Year to Date",   callback_data=f"stats:period:{s}:year_to_date")],
+        [InlineKeyboardButton("This Month",     callback_data=f"stats:period:{s}:current_month"),
+         InlineKeyboardButton("Last Month",     callback_data=f"stats:period:{s}:previous_month")],
+        [InlineKeyboardButton("Last Year",      callback_data=f"stats:period:{s}:previous_year")],
+        [InlineKeyboardButton("⬅️  Back",       callback_data="stats:menu"),
+         InlineKeyboardButton("❌  Exit",       callback_data="stats:exit")],
     ])
 
 
