@@ -260,7 +260,9 @@ async def strava_oauth_callback(
     # ------------------------------------------------------------------
     try:
         from app.telegram.bot import get_application
+        from app.telegram.keyboards import main_menu_keyboard, nav_keyboard
         bot = get_application().bot
+        # First message: set the persistent nav bar at the bottom of the keyboard
         await bot.send_message(
             chat_id=telegram_user_id,
             text=(
@@ -273,6 +275,13 @@ async def strava_oauth_callback(
                 f"❓ Use /help to explore all available features"
             ),
             parse_mode="MarkdownV2",
+            reply_markup=nav_keyboard(),
+        )
+        # Second message: inline menu so they can tap straight into stats/goals
+        await bot.send_message(
+            chat_id=telegram_user_id,
+            text="What would you like to do first?",
+            reply_markup=main_menu_keyboard(),
         )
     except Exception as exc:
         # Non-fatal — the web response is more important

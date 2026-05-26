@@ -1,8 +1,34 @@
-"""Inline keyboard builders.
+"""Keyboard builders — both inline and reply keyboards.
 
-Return InlineKeyboardMarkup objects ready to pass to reply_text / edit_message_text.
+Return InlineKeyboardMarkup or ReplyKeyboardMarkup objects ready to pass to
+reply_text / edit_message_text.
 """
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
+
+# Labels used by the persistent nav bar — imported in handlers.py to route
+# incoming text messages back to the matching command.
+NAV_STATS = "📊 Stats"
+NAV_GOALS = "🎯 Goals"
+NAV_HELP  = "❓ Help"
+
+
+def nav_keyboard() -> ReplyKeyboardMarkup:
+    """Persistent bottom-row navigation bar.
+
+    Shown after /start and after Strava is connected so the user always has a
+    visible path back to the main features.  resize_keyboard=True keeps it
+    compact on all screen sizes.
+    """
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton(NAV_STATS), KeyboardButton(NAV_GOALS), KeyboardButton(NAV_HELP)]],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
 
 
 def main_menu_keyboard() -> InlineKeyboardMarkup:

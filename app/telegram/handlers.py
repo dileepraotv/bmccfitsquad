@@ -38,9 +38,13 @@ from app.database import AsyncSessionLocal
 from app.models import Activity, Goal, User
 from app.stats.calculator import calculate_stats, format_stats_message
 from app.telegram.keyboards import (
+    NAV_GOALS,
+    NAV_HELP,
+    NAV_STATS,
     confirm_keyboard,
     connect_strava_keyboard,
     main_menu_keyboard,
+    nav_keyboard,
     stats_nav_keyboard,
     stats_period_keyboard,
     stats_sport_keyboard,
@@ -76,6 +80,13 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("quote",         cmd_quote,         filters=_priv))
 
     app.add_handler(CallbackQueryHandler(handle_callback))
+
+    # Persistent nav bar — route the three button labels to their commands.
+    # These must be registered BEFORE handle_unknown so they are matched first.
+    _nav_filter = filters.ChatType.PRIVATE & filters.TEXT
+    app.add_handler(MessageHandler(_nav_filter & filters.Regex(f"^{NAV_STATS}$"), cmd_stats))
+    app.add_handler(MessageHandler(_nav_filter & filters.Regex(f"^{NAV_GOALS}$"), cmd_goals))
+    app.add_handler(MessageHandler(_nav_filter & filters.Regex(f"^{NAV_HELP}$"),  cmd_help))
 
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_unknown)
@@ -138,11 +149,17 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     name = update.effective_user.first_name or "there"
 
     if user.strava_athlete_id:
+        # Send the nav bar first so it anchors at the bottom, then send the
+        # inline menu on top — two messages keeps both visible.
         await update.message.reply_text(
             f"👋 Welcome back, *{name}*\\!\n\n"
             f"Your Strava account is connected as *{_escape_md(user.strava_athlete_name or 'Athlete')}*\\.\n"
             f"Use the menu below or type /help to see all commands\\.",
             parse_mode="MarkdownV2",
+            reply_markup=nav_keyboard(),
+        )
+        await update.message.reply_text(
+            "What would you like to do?",
             reply_markup=main_menu_keyboard(),
         )
     else:
