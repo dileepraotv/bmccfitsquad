@@ -371,6 +371,18 @@ _GOAL_PERIODS = ["This Month", "This Year", "This Week"]
 
 _GOAL_DRAFT_TTL = 600  # seconds — draft expires after 10 min of inactivity
 
+_SPORT_UNITS: dict[str, str] = {
+    "Ride":           "km",
+    "Ride Endurance": "km",
+    "Run":            "km",
+    "Walk":           "km",
+    "Swim":           "m",
+}
+
+
+def _sport_unit(sport: str) -> str:
+    return _SPORT_UNITS.get(sport, "km")
+
 
 def _goals_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -468,8 +480,8 @@ async def _send_goals_menu(target, user_id: int) -> None:
         )
         count = len(goals_res.scalars().all())
 
-    n = f"{count} active goal{'s' if count != 1 else ''}"
-    text = f"🎯 *Your Goals*\n\n{n}"
+    n = f"{count} Active Goal{'s' if count != 1 else ''}"
+    text = f'🎯 _"A goal is a dream with a deadline."_\n\nYou have *{n}*.'
 
     if hasattr(target, "edit_message_text"):
         await target.edit_message_text(text, parse_mode="Markdown", reply_markup=_goals_main_keyboard())
@@ -484,7 +496,8 @@ async def _handle_goal_callbacks(query, data: str) -> None:
     if data == "goal:add":
         await _clear_draft(tg_id)
         await query.edit_message_text(
-            "🎯 *Add a Goal*\n\nChoose a sport:",
+            '_"Setting goals is the first step in turning the invisible into the visible."_\n\n'
+            "Choose a Sport:",
             parse_mode="Markdown",
             reply_markup=_goal_sport_keyboard(),
         )
@@ -503,22 +516,18 @@ async def _handle_goal_callbacks(query, data: str) -> None:
         await _show_goal_status(query)
         return
 
-    # ── Sport chosen → ask for goal description via text ───────────────────
+    # ── Sport chosen → ask for goal target as a number ─────────────────────
     if data.startswith("goal:sport:"):
         sport = data[len("goal:sport:"):]
         await _save_draft(tg_id, {"sport": sport, "step": "category"})
-        # Edit the inline message to acknowledge the sport, then send a
-        # separate plain message so the user can reply to it with free text.
         await query.edit_message_text(
             f"Sport: *{sport}*",
             parse_mode="Markdown",
         )
+        unit = _sport_unit(sport)
         await query.message.reply_text(
-            f"✏️ *What is your goal?*\n\n"
-            f"Type your goal description for *{sport}* — for example:\n"
-            f"• `100 km ride`\n"
-            f"• `Half Marathon`\n"
-            f"• `1000 m swim`\n\n"
+            f"✏️ *What is your goal distance / target for {sport}?*\n\n"
+            f"Enter a number ({unit}) — for example: `100`\n\n"
             f"Type /cancel to abort.",
             parse_mode="Markdown",
         )
@@ -621,14 +630,25 @@ async def _handle_goal_text_input(update: Update) -> bool:
     step = draft.get("step")
 
     if step == "category":
-        # User typed their goal description — ask for count
-        draft["category"] = text
-        draft["step"] = "count"
+        if not text.isdigit() or int(text) < 1:
+            sport = draft.get("sport", "")
+            unit  = _sport_unit(sport)
+            await update.message.reply_text(
+                f"Please enter a positive number ({unit}) — e.g. *100*:",
+                parse_mode="Markdown",
+            )
+            return True
+        # Store as "<number> <unit>" so it reads naturally in summaries
+        sport    = draft.get("sport", "")
+        unit     = _sport_unit(sport)
+        category = f"{text} {unit}"
+        draft["category"] = category
+        draft["step"]     = "count"
         await _save_draft(tg_id, draft)
         await update.message.reply_text(
-            f"Goal: *{text}*\n\n"
+            f"Goal: *{category}*\n\n"
             f"How many times do you want to achieve this?\n"
-            f"Reply with a number — e.g. *4*\n\n"
+            f"Enter a number — e.g. *4*\n\n"
             f"Type /cancel to abort.",
             parse_mode="Markdown",
         )
@@ -643,7 +663,7 @@ async def _handle_goal_text_input(update: Update) -> bool:
             return True
 
         draft["count"] = int(text)
-        draft["step"] = "period"
+        draft["step"]  = "period"
         await _save_draft(tg_id, draft)
 
         sport    = draft["sport"]
@@ -721,7 +741,7 @@ async def _show_goal_status(query) -> None:
             )
             return
 
-        lines = ["*Goal Status*\n"]
+        lines = ['_"Arriving at one goal is the starting point to another."_\n']
         for g in goals:
             start_dt = datetime(
                 g.start_date.year, g.start_date.month, g.start_date.day, tzinfo=timezone.utc
