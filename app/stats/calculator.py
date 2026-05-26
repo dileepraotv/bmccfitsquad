@@ -31,6 +31,8 @@ Units
 """
 from __future__ import annotations
 
+import pathlib
+import random
 import uuid
 from datetime import datetime, timezone
 from typing import Literal
@@ -40,6 +42,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Activity
 from app.utils import meters_to_km, safe_round, seconds_to_hhmmss
+
+_QUOTES_PATH = pathlib.Path("data/quotes.txt")
+
+
+def _random_quote() -> str:
+    try:
+        lines = [l.strip() for l in _QUOTES_PATH.read_text().splitlines() if l.strip()]
+        return random.choice(lines) if lines else "Keep moving forward."
+    except FileNotFoundError:
+        return "Every kilometre counts."
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -163,7 +175,8 @@ def format_stats_message(
     }
     body_lines = formatters.get(sport_type, lambda _: [])(stats)
     body = "\n".join(f"- {line}" for line in body_lines)
-    return f"{header}\n\n{body}"
+    quote = _random_quote()
+    return f"{header}\n\n{body}\n\n_{quote}_"
 
 
 # ---------------------------------------------------------------------------
@@ -208,8 +221,9 @@ async def _fetch_activities(
 def _compute_ride_stats(activities: list[Activity]) -> dict:
     """All rides (Ride + VirtualRide). VirtualRide counted as indoor.
 
-    Bracket counts cover 50–100 km (fifties) and 100–200 km (hundreds).
-    Rides ≥ 200 km appear in aggregate totals but not in any bracket here.
+    Bracket counts:
+      50's  — rides 50 km to < 100 km
+      100's — rides >= 100 km (no upper cap)
     """
     distances_km = [a.distance_meters / 1_000 for a in activities]
     return {
@@ -219,7 +233,7 @@ def _compute_ride_stats(activities: list[Activity]) -> dict:
         "elevation_gain_km": _round2(sum(a.elevation_gain for a in activities) / 1_000),
         "biggest_ride_km":   _round2(max(distances_km, default=0.0)),
         "fifties":           sum(1 for d in distances_km if 50.0 <= d < 100.0),
-        "hundreds":          sum(1 for d in distances_km if 100.0 <= d < 200.0),
+        "hundreds":          sum(1 for d in distances_km if d >= 100.0),
     }
 
 

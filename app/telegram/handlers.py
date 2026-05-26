@@ -671,6 +671,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     data = query.data or ""
 
     # Goals
+    if data == "goal:menu":
+        await _send_goals_menu(query, query.from_user.id)
+        return
+
     if data.startswith("goal:"):
         await _handle_goal_callbacks(query, data)
         return
