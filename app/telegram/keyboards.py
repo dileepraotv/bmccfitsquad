@@ -8,11 +8,10 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     """Main menu shown after /start or when user is already connected."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 My Stats",      callback_data="stats:menu"),
-         InlineKeyboardButton("🎯 My Goals",      callback_data="goal:menu")],
-        [InlineKeyboardButton("🏆 Leaderboard",   callback_data="leaderboard:month"),
-         InlineKeyboardButton("💬 Random Quote",  callback_data="quote:random")],
-        [InlineKeyboardButton("🔗 Reconnect Strava", callback_data="reconnect:strava")],
+        [InlineKeyboardButton("📊 My Stats",         callback_data="stats:menu"),
+         InlineKeyboardButton("🎯 My Goals",         callback_data="goal:menu")],
+        [InlineKeyboardButton("💬 Random Quote",     callback_data="quote:random"),
+         InlineKeyboardButton("🔗 Reconnect Strava", callback_data="reconnect:strava")],
     ])
 
 
