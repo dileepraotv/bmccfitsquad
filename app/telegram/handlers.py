@@ -812,10 +812,12 @@ async def _show_goal_status(query) -> None:
             return
 
         athlete_name = user.strava_athlete_name or user.telegram_first_name or "You"
-        divider = "─" * 28
+        divider = "─" * 24
         lines = [
             f"*Goal Status for: {athlete_name}*",
-            f'*"{_random_quote()}"*\n',
+            "",
+            f'*"{_random_quote()}"*',
+            "",
         ]
 
         for g in goals:
@@ -850,13 +852,12 @@ async def _show_goal_status(query) -> None:
             bar = "█" * filled_segs + "░" * (10 - filled_segs)
 
             sport_label = "Ride Endurance" if g.activity_type == "RideEndurance" else g.activity_type
+            target_word = "time" if g.target_count == 1 else "times"
             lines.append(
                 f"*{sport_label}* — {g.category}\n"
-                f"Target: {g.target_count} time{'s' if g.target_count != 1 else ''} "
-                f"| Done: {achieved}\n"
+                f"🎯 {achieved}/{g.target_count} {target_word}\n"
                 f"`{bar}` {pct}%\n"
-                f"_counts activities ≥ {g.category}_\n"
-                f"_{g.start_date}  →  {g.end_date}_"
+                f"_{g.start_date} → {g.end_date}_"
             )
             lines.append(divider)
 
