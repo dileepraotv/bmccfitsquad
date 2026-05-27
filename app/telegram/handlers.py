@@ -81,12 +81,12 @@ def register_handlers(app: Application) -> None:
 
     app.add_handler(CallbackQueryHandler(handle_callback))
 
-    # Persistent nav bar — route the three button labels to their commands.
-    # These must be registered BEFORE handle_unknown so they are matched first.
-    _nav_filter = filters.ChatType.PRIVATE & filters.TEXT
-    app.add_handler(MessageHandler(_nav_filter & filters.Regex(f"^{NAV_STATS}$"), cmd_stats))
-    app.add_handler(MessageHandler(_nav_filter & filters.Regex(f"^{NAV_GOALS}$"), cmd_goals))
-    app.add_handler(MessageHandler(_nav_filter & filters.Regex(f"^{NAV_HELP}$"),  cmd_help))
+    # Persistent nav bar — placed in group -1 so they are evaluated before
+    # all group-0 handlers (including handle_unknown).
+    _priv_text = filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND
+    app.add_handler(MessageHandler(_priv_text & filters.Regex(f"^{NAV_STATS}$"), cmd_stats),  group=-1)
+    app.add_handler(MessageHandler(_priv_text & filters.Regex(f"^{NAV_GOALS}$"), cmd_goals), group=-1)
+    app.add_handler(MessageHandler(_priv_text & filters.Regex(f"^{NAV_HELP}$"),  cmd_help),  group=-1)
 
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_unknown)
