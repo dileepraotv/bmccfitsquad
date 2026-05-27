@@ -418,11 +418,10 @@ def _sport_unit(sport: str) -> str:
 
 def _goals_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Add Goal",     callback_data="goal:add"),
-         InlineKeyboardButton("❌ Delete Goal",  callback_data="goal:delete_menu")],
-        [InlineKeyboardButton("✅ Goal Status",  callback_data="goal:status")],
-        [InlineKeyboardButton("📊 Stats",        callback_data="stats:menu"),
-         InlineKeyboardButton("❌ Exit",         callback_data="goal:exit")],
+        [InlineKeyboardButton("➕ Add Goal",    callback_data="goal:add"),
+         InlineKeyboardButton("✖️ Delete Goal", callback_data="goal:delete_menu")],
+        [InlineKeyboardButton("✅ Goal Status", callback_data="goal:status"),
+         InlineKeyboardButton("❌ Exit",        callback_data="goal:exit")],
     ])
 
 
@@ -454,39 +453,46 @@ def _goal_period_keyboard(sport: str, category: str, count: str) -> InlineKeyboa
 
 
 def _goal_period_dates(period: str):
+    """Return (start_date, end_date_inclusive) for display and DB queries.
+
+    The end date returned is the *last day* of the period (inclusive) so it
+    displays as e.g. 2026-01-01 → 2026-12-31.  The DB query uses
+    ``activity_date < end_dt + 1 day`` (exclusive upper bound) to stay correct.
+    """
     now = datetime.now(timezone.utc)
     y = now.year
 
     if period == "This Month":
         start = datetime(y, now.month, 1, tzinfo=timezone.utc)
-        end = (datetime(y + 1, 1, 1, tzinfo=timezone.utc)
-               if now.month == 12
-               else datetime(y, now.month + 1, 1, tzinfo=timezone.utc))
+        # First day of next month minus 1 day = last day of this month
+        next_month = datetime(y + 1, 1, 1, tzinfo=timezone.utc) if now.month == 12 \
+                     else datetime(y, now.month + 1, 1, tzinfo=timezone.utc)
+        end = next_month - timedelta(days=1)
 
     elif period == "This Quarter":
         q_start_month = ((now.month - 1) // 3) * 3 + 1
         start = datetime(y, q_start_month, 1, tzinfo=timezone.utc)
         q_end_month = q_start_month + 3
-        end = (datetime(y + 1, 1, 1, tzinfo=timezone.utc)
-               if q_end_month > 12
-               else datetime(y, q_end_month, 1, tzinfo=timezone.utc))
+        next_q = datetime(y + 1, 1, 1, tzinfo=timezone.utc) if q_end_month > 12 \
+                 else datetime(y, q_end_month, 1, tzinfo=timezone.utc)
+        end = next_q - timedelta(days=1)
 
     elif period == "This Year":
         start = datetime(y, 1, 1, tzinfo=timezone.utc)
-        end   = datetime(y + 1, 1, 1, tzinfo=timezone.utc)
+        end   = datetime(y, 12, 31, tzinfo=timezone.utc)
 
     elif period == "First Half of Year":
         start = datetime(y, 1, 1, tzinfo=timezone.utc)
-        end   = datetime(y, 7, 1, tzinfo=timezone.utc)
+        end   = datetime(y, 6, 30, tzinfo=timezone.utc)
 
     elif period == "Second Half of Year":
         start = datetime(y, 7, 1, tzinfo=timezone.utc)
-        end   = datetime(y + 1, 1, 1, tzinfo=timezone.utc)
+        end   = datetime(y, 12, 31, tzinfo=timezone.utc)
 
     else:  # This Week (Mon–Sun)
         start = (datetime(y, now.month, now.day, tzinfo=timezone.utc)
                  - timedelta(days=now.weekday()))
-        end = start + timedelta(weeks=1)
+        end = start + timedelta(days=6)
 
     return start.date(), end.date()
 
@@ -830,9 +836,10 @@ async def _show_goal_status(query) -> None:
             start_dt = datetime(
                 g.start_date.year, g.start_date.month, g.start_date.day, tzinfo=timezone.utc
             )
+            # end_date is inclusive (last day of period); add 1 day for exclusive SQL upper bound
             end_dt = datetime(
                 g.end_date.year, g.end_date.month, g.end_date.day, tzinfo=timezone.utc
-            )
+            ) + timedelta(days=1)
             act_types = _SPORT_ACTIVITY_TYPES.get(g.activity_type, [g.activity_type])
 
             # Parse threshold from stored category string, e.g. "100 km" → 100_000 m
