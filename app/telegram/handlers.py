@@ -152,9 +152,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if user.strava_athlete_id:
         athlete_name = user.strava_athlete_name or name
         await update.message.reply_text(
-            f"👋 Welcome {name}! Its great to have you back.\n\n"
-            f"Your Strava account is connected as {athlete_name}.\n\n"
+            f"👋 Welcome *{name}*! Its great to have you back.\n\n"
+            f"Your Strava account is connected as *{athlete_name}*.\n\n"
             f"Use the menu below or type /help to see all commands.",
+            parse_mode="Markdown",
             reply_markup=nav_keyboard(),
         )
         await update.message.reply_text(
