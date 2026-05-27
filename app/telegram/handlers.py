@@ -418,10 +418,10 @@ def _sport_unit(sport: str) -> str:
 
 def _goals_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Add Goal",    callback_data="goal:add"),
-         InlineKeyboardButton("✖️ Delete Goal", callback_data="goal:delete_menu")],
-        [InlineKeyboardButton("✅ Goal Status", callback_data="goal:status"),
-         InlineKeyboardButton("❌ Exit",        callback_data="goal:exit")],
+        [InlineKeyboardButton("Add Goal",    callback_data="goal:add"),
+         InlineKeyboardButton("Delete Goal", callback_data="goal:delete_menu")],
+        [InlineKeyboardButton("Goal Status", callback_data="goal:status"),
+         InlineKeyboardButton("Exit",        callback_data="goal:exit")],
     ])
 
 
@@ -433,8 +433,8 @@ def _goal_sport_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("Run",            callback_data="goal:sport:Run"),
          InlineKeyboardButton("Swim",           callback_data="goal:sport:Swim"),
          InlineKeyboardButton("Walk",           callback_data="goal:sport:Walk")],
-        [InlineKeyboardButton("⬅️ Back",        callback_data="goal:back"),
-         InlineKeyboardButton("❌ Exit",        callback_data="goal:exit")],
+        [InlineKeyboardButton("Back",           callback_data="goal:back"),
+         InlineKeyboardButton("Exit",          callback_data="goal:exit")],
     ])
 
 
@@ -448,7 +448,7 @@ def _goal_period_keyboard(sport: str, category: str, count: str) -> InlineKeyboa
          InlineKeyboardButton(p[5], callback_data=enc(p[5]))],
         [InlineKeyboardButton(p[3], callback_data=enc(p[3]))],
         [InlineKeyboardButton(p[4], callback_data=enc(p[4]))],
-        [InlineKeyboardButton("❌ Cancel", callback_data="goal:exit")],
+        [InlineKeyboardButton("Cancel",   callback_data="goal:exit")],
     ])
 
 
@@ -651,7 +651,7 @@ async def _handle_goal_callbacks(query, data: str) -> None:
             _format_goal_summary(sport_display, category, count, period, start, end),
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🎯 My Goals", callback_data="goal:menu"),
+                InlineKeyboardButton("My Goals", callback_data="goal:menu"),
             ]]),
         )
         return
@@ -678,7 +678,7 @@ async def _handle_goal_callbacks(query, data: str) -> None:
                     f"Use /goals to manage your goals.",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("🎯 My Goals", callback_data="goal:menu"),
+                        InlineKeyboardButton("My Goals", callback_data="goal:menu"),
                     ]]),
                 )
             else:
@@ -794,7 +794,7 @@ async def _show_delete_menu(query) -> None:
         )]
         for g in goals
     ]
-    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="goal:back")])
+    rows.append([InlineKeyboardButton("Back", callback_data="goal:back")])
     await query.edit_message_text(
         "Tap a goal to delete it:",
         reply_markup=InlineKeyboardMarkup(rows),
