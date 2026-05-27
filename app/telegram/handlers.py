@@ -81,12 +81,13 @@ def register_handlers(app: Application) -> None:
 
     app.add_handler(CallbackQueryHandler(handle_callback))
 
-    # Persistent nav bar — placed in group -1 so they are evaluated before
-    # all group-0 handlers (including handle_unknown).
+    # Persistent nav bar — registered in group 0 BEFORE handle_unknown.
+    # Within a single group PTB stops at the first matching handler, so these
+    # will consume the nav button messages and handle_unknown never sees them.
     _priv_text = filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND
-    app.add_handler(MessageHandler(_priv_text & filters.Regex(f"^{NAV_STATS}$"), cmd_stats),  group=-1)
-    app.add_handler(MessageHandler(_priv_text & filters.Regex(f"^{NAV_GOALS}$"), cmd_goals), group=-1)
-    app.add_handler(MessageHandler(_priv_text & filters.Regex(f"^{NAV_HELP}$"),  cmd_help),  group=-1)
+    app.add_handler(MessageHandler(_priv_text & filters.Regex(f"^{NAV_STATS}$"), cmd_stats))
+    app.add_handler(MessageHandler(_priv_text & filters.Regex(f"^{NAV_GOALS}$"), cmd_goals))
+    app.add_handler(MessageHandler(_priv_text & filters.Regex(f"^{NAV_HELP}$"),  cmd_help))
 
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_unknown)
@@ -149,13 +150,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     name = update.effective_user.first_name or "there"
 
     if user.strava_athlete_id:
-        # Send the nav bar first so it anchors at the bottom, then send the
-        # inline menu on top — two messages keeps both visible.
+        athlete_name = user.strava_athlete_name or name
         await update.message.reply_text(
-            f"👋 Welcome back, *{name}*\\!\n\n"
-            f"Your Strava account is connected as *{_escape_md(user.strava_athlete_name or 'Athlete')}*\\.\n"
-            f"Use the menu below or type /help to see all commands\\.",
-            parse_mode="MarkdownV2",
+            f"👋 Welcome {name}! Its great to have you back.\n\n"
+            f"Your Strava account is connected as {athlete_name}.\n\n"
+            f"Use the menu below or type /help to see all commands.",
             reply_markup=nav_keyboard(),
         )
         await update.message.reply_text(
