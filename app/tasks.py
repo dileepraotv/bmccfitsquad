@@ -27,14 +27,14 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import and_, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from telegram import Bot as TelegramBot
 
 from app.celery_app import celery_app
 from app.config import get_settings
 from app.database import AsyncSessionLocal
-from app.models import Activity, GroupChat, User
+from app.models import Activity, Goal, GroupChat, User
 from app.strava.auth import get_valid_access_token
 from app.strava.client import fetch_activities
 from app.telegram.notifications import format_activity_notification
@@ -121,9 +121,14 @@ async def _send_activity_notification_async(
         group_chats: list[GroupChat] = chats_result.scalars().all()
 
         # ------------------------------------------------------------------
-        # 3. Format the notification
+        # 3. Build goal summary lines for the footer
         # ------------------------------------------------------------------
-        text = await format_activity_notification(activity_data, athlete_name)
+        goal_lines = await _build_goal_lines(db, user)
+
+        # ------------------------------------------------------------------
+        # 4. Format the notification
+        # ------------------------------------------------------------------
+        text = await format_activity_notification(activity_data, athlete_name, goal_lines=goal_lines)
 
         # ------------------------------------------------------------------
         # 4. Send via Telegram Bot API directly (no PTB Application needed)
@@ -280,6 +285,76 @@ async def _sync_user_activities_async(user_id: str) -> None:
 # ---------------------------------------------------------------------------
 # Shared utilities
 # ---------------------------------------------------------------------------
+
+_SPORT_ACTIVITY_TYPES: dict[str, list[str]] = {
+    "Ride":          ["Ride", "VirtualRide"],
+    "RideEndurance": ["Ride", "VirtualRide"],
+    "Run":           ["Run", "VirtualRun"],
+    "Walk":          ["Walk", "Hike"],
+    "Swim":          ["Swim", "OpenWaterSwim"],
+}
+
+
+def _parse_category_threshold(category: str) -> float:
+    try:
+        parts = category.strip().split()
+        val  = float(parts[0].replace(",", "."))
+        unit = parts[1].lower() if len(parts) > 1 else "km"
+        return val * 1_000 if unit == "km" else val
+    except (IndexError, ValueError):
+        return 0.0
+
+
+async def _build_goal_lines(db, user: User) -> list[str]:
+    """Return a list of formatted goal-status strings for the notification footer.
+
+    Example output lines:
+        "Goal 1: Run — 10 km — Status 3/10"
+        "Goal 2: Ride — 100 km — Status 17/50"
+    Returns an empty list if the user has no active goals.
+    """
+    from datetime import timedelta
+
+    goals_res = await db.execute(
+        select(Goal).where(Goal.user_id == user.id, Goal.is_active == True)  # noqa: E712
+    )
+    goals = goals_res.scalars().all()
+    if not goals:
+        return []
+
+    lines: list[str] = []
+    for i, g in enumerate(goals, start=1):
+        start_dt = datetime(
+            g.start_date.year, g.start_date.month, g.start_date.day, tzinfo=timezone.utc
+        )
+        # end_date is inclusive — add 1 day for exclusive SQL upper bound
+        end_dt = datetime(
+            g.end_date.year, g.end_date.month, g.end_date.day, tzinfo=timezone.utc
+        ) + timedelta(days=1)
+
+        act_types    = _SPORT_ACTIVITY_TYPES.get(g.activity_type, [g.activity_type])
+        threshold_m  = _parse_category_threshold(g.category)
+
+        count_result = await db.execute(
+            select(func.count(Activity.id)).where(
+                and_(
+                    Activity.user_id == user.id,
+                    Activity.activity_type.in_(act_types),
+                    Activity.activity_date >= start_dt,
+                    Activity.activity_date < end_dt,
+                    Activity.distance_meters >= threshold_m,
+                )
+            )
+        )
+        achieved = count_result.scalar_one() or 0
+
+        sport_label = "Ride Endurance" if g.activity_type == "RideEndurance" else g.activity_type
+        lines.append(
+            f"Goal {i}: {sport_label} — {g.category} — Status {achieved}/{g.target_count}"
+        )
+
+    return lines
+
 
 def _parse_strava_date(date_str: str | None) -> datetime:
     """Parse a Strava ISO 8601 string into a UTC-aware datetime."""
