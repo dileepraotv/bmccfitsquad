@@ -349,9 +349,11 @@ async def _build_goal_lines(db, user: User) -> list[str]:
         achieved = count_result.scalar_one() or 0
 
         sport_label = "Ride Endurance" if g.activity_type == "RideEndurance" else g.activity_type
-        lines.append(
-            f"Goal {i}: {sport_label} — {g.category} — Status {achieved}/{g.target_count}"
-        )
+        sport_emoji = {
+            "Ride": "🚴", "RideEndurance": "🚴",
+            "Run": "🏃", "Walk": "🚶", "Swim": "🏊",
+        }.get(g.activity_type, "🏅")
+        lines.append(f"{sport_emoji} {sport_label} {g.category} - {achieved}/{g.target_count}")
 
     return lines
 

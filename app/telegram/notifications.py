@@ -100,39 +100,41 @@ async def format_activity_notification(
     athlete_name: str,
     goal_lines: list[str] | None = None,
 ) -> str:
-    """Format a raw Strava activity dict into a BMCC Telegram notification.
-
-    Args:
-        activity:     Dict with Strava activity fields.
-        athlete_name: Full name of the athlete (e.g. "Dileep Rao").
-        goal_lines:   Optional pre-built goal status lines to show in the footer.
-                      If None or empty the quote + /stats CTA is shown instead.
-    """
+    """Format a raw Strava activity dict into a BMCC Telegram notification."""
     activity_type: str = activity.get("sport_type") or activity.get("type") or "Unknown"
-    emoji = _EMOJI.get(activity_type, _DEFAULT_EMOJI)
+    emoji         = _EMOJI.get(activity_type, _DEFAULT_EMOJI)
     activity_id   = activity.get("id")
     activity_name = activity.get("name") or "Unnamed Activity"
+    first_name    = athlete_name.split()[0] if athlete_name else athlete_name
 
     if activity_id:
         activity_link = f"[{activity_name}](https://www.strava.com/activities/{activity_id})"
     else:
         activity_link = activity_name
 
+    # ------------------------------------------------------------------
+    # Header
+    # ------------------------------------------------------------------
     lines: list[str] = [
-        f"{emoji} *New Activity!*",
-        "",
+        f"{emoji} *Great work {first_name}! on your New Activity!*",
+        _SEPARATOR,
         f"Athlete Name: {athlete_name}",
         f"Activity: {activity_link}",
         f"Activity Date: {format_strava_date(activity.get('start_date'))}",
-        f"Activity Type: {activity_type}",
     ]
 
+    # ------------------------------------------------------------------
+    # Metrics
+    # ------------------------------------------------------------------
     distance_km   = meters_to_km(activity.get("distance"))
     moving_secs   = int(activity.get("moving_time")  or 0)
     elapsed_secs  = int(activity.get("elapsed_time") or 0)
     calories      = int(activity.get("calories")     or 0)
     avg_speed_kmh = ms_to_kmh(activity.get("average_speed"))
     max_speed_kmh = ms_to_kmh(activity.get("max_speed"))
+    elevation_m   = activity.get("total_elevation_gain") or 0
+    avg_hr        = activity.get("average_heartrate")
+    max_hr        = activity.get("max_heartrate")
 
     lines += [
         "",
@@ -142,32 +144,31 @@ async def format_activity_notification(
         f"Calories: {calories}",
         f"Avg Speed: {avg_speed_kmh:.2f} km/h",
         f"Max Speed: {max_speed_kmh:.2f} km/h",
+        f"Elevation Gain: {int(elevation_m)} m",
     ]
-
-    elevation_m = activity.get("total_elevation_gain") or 0
-    avg_hr      = activity.get("average_heartrate")
-    max_hr      = activity.get("max_heartrate")
-
-    lines += ["", f"Elevation Gain: {int(elevation_m)} m"]
     if avg_hr is not None:
         lines.append(f"Avg HR: {int(avg_hr)} bpm")
     if max_hr is not None:
         lines.append(f"Max HR: {int(max_hr)} bpm")
 
     # ------------------------------------------------------------------
-    # Footer — goal summary if available, otherwise quote + CTA
+    # Goal progress section
     # ------------------------------------------------------------------
-    lines += ["", _SEPARATOR]
-
+    lines += ["", _SEPARATOR, "🎯 *Goal Progress*", ""]
     if goal_lines:
-        lines += ["", "*My Goals*"] + goal_lines
+        lines += goal_lines
     else:
-        lines += [
-            "",
-            f'*"{_random_quote()}"*',
-            "",
-            "Use /stats · /goals to check your progress",
-        ]
+        lines.append("No active goals. Use /goals to set one.")
+
+    # ------------------------------------------------------------------
+    # Quote + tagline
+    # ------------------------------------------------------------------
+    lines += [
+        _SEPARATOR,
+        f'*"{_random_quote()}"*',
+        "",
+        "Beyond Miles - Beyond Limits",
+    ]
 
     return "\n".join(lines)
 
