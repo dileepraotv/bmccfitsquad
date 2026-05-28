@@ -22,7 +22,6 @@ def nav_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [[KeyboardButton(NAV_STATS), KeyboardButton(NAV_GOALS), KeyboardButton(NAV_HELP)]],
         resize_keyboard=True,
-        is_persistent=True,
     )
 
 
