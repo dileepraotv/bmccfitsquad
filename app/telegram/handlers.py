@@ -1138,9 +1138,13 @@ async def _push_activity_update(
                 activity.activity_name = name
             await db.commit()
         except Exception as exc:
-            logger.error("Failed to update Strava activity %s: %s", activity_id, exc)
+            import httpx
+            detail = ""
+            if isinstance(exc, httpx.HTTPStatusError):
+                detail = f" (HTTP {exc.response.status_code}: {exc.response.text[:200]})"
+            logger.error("Failed to update Strava activity %s: %s%s", activity_id, exc, detail)
             await update.message.reply_text(
-                "❌ Could not update the activity on Strava. Please try again later."
+                f"❌ Could not update the activity on Strava.{detail or ' Please try again later.'}"
             )
             return
 

@@ -83,7 +83,7 @@ def build_authorization_url(state: str) -> str:
         "client_id": settings.strava_client_id,
         "redirect_uri": settings.strava_redirect_uri,
         "response_type": "code",
-        "scope": "read,read_all,activity:read_all,profile:read_all",
+        "scope": "read,read_all,activity:read_all,activity:write,profile:read_all",
         "state": state,
         "approval_prompt": "force",  # always show consent so new scopes are accepted
     })
