@@ -131,6 +131,43 @@ async def fetch_activity_detail(access_token: str, activity_id: int) -> dict:
     return data
 
 
+async def update_activity(
+    access_token: str,
+    activity_id: int,
+    name: str | None = None,
+    description: str | None = None,
+) -> dict:
+    """Update mutable fields on a Strava activity.
+
+    Endpoint: PUT /activities/{activity_id}
+
+    Args:
+        access_token: Plaintext access token.
+        activity_id:  Strava activity ID to update.
+        name:         New activity name (optional).
+        description:  New activity description (optional).
+
+    Returns:
+        Updated DetailedActivity dict from Strava.
+
+    Raises:
+        httpx.HTTPStatusError: On non-2xx response (e.g. 403 if scope missing).
+    """
+    payload: dict = {}
+    if name is not None:
+        payload["name"] = name
+    if description is not None:
+        payload["description"] = description
+
+    async with _auth_client(access_token) as client:
+        response = await client.put(f"/activities/{activity_id}", json=payload)
+        response.raise_for_status()
+        data = response.json()
+
+    logger.info("Updated activity id=%s fields=%s", activity_id, list(payload.keys()))
+    return data
+
+
 async def fetch_activities(
     access_token: str,
     after: int | None = None,

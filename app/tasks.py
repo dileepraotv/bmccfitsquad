@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import and_, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from telegram import Bot as TelegramBot
+from telegram import Bot as TelegramBot, InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.celery_app import celery_app
 from app.config import get_settings
@@ -135,6 +135,17 @@ async def _send_activity_notification_async(
         # ------------------------------------------------------------------
         bot = TelegramBot(token=settings.telegram_bot_token)
 
+        # Inline button lets user update the activity name/description on Strava
+        activity_id = activity_data.get("id")
+        edit_markup = None
+        if activity_id:
+            edit_markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "Update Activity",
+                    callback_data=f"activity:edit:{activity_id}",
+                )
+            ]])
+
         # Always DM the athlete directly so they get a confirmation even if
         # no group chats are configured yet.
         try:
@@ -143,6 +154,7 @@ async def _send_activity_notification_async(
                     chat_id=user.telegram_user_id,
                     text=text,
                     parse_mode="Markdown",
+                    reply_markup=edit_markup,
                 )
             logger.info(
                 "Activity notification DM sent to telegram_id=%s", user.telegram_user_id

@@ -75,6 +75,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("stats",         cmd_stats,         filters=_priv))
     app.add_handler(CommandHandler("goals",         cmd_goals,         filters=_priv))
     app.add_handler(CommandHandler("cancel",        cmd_cancel,        filters=_priv))
+    app.add_handler(CommandHandler("skip",          cmd_skip,          filters=_priv))
     app.add_handler(CommandHandler("leaderboard",   cmd_leaderboard,   filters=_priv))
     app.add_handler(CommandHandler("notifications", cmd_notifications, filters=_priv))
     app.add_handler(CommandHandler("quote",         cmd_quote,         filters=_priv))
@@ -340,14 +341,36 @@ async def cmd_quote(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Cancel any in-progress goal entry."""
-    from app.redis_client import get_redis
+    """Cancel any in-progress goal entry or activity edit."""
+    from app.redis_client import get_redis, key_activity_edit
     r = await get_redis()
-    deleted = await r.delete(_draft_key(update.effective_user.id))
-    if deleted:
+    tg_id = update.effective_user.id
+    # Try to cancel activity edit first
+    if await r.delete(key_activity_edit(tg_id)):
+        await update.message.reply_text("Activity update cancelled.")
+        return
+    # Then try goal draft
+    if await r.delete(_draft_key(tg_id)):
         await update.message.reply_text("Goal entry cancelled. Use /goals anytime.")
-    else:
-        await update.message.reply_text("Nothing to cancel.")
+        return
+    await update.message.reply_text("Nothing to cancel.")
+
+
+async def cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Skip the description step in an activity edit."""
+    from app.redis_client import get_redis, key_activity_edit
+    r = await get_redis()
+    tg_id = update.effective_user.id
+    raw = await r.get(key_activity_edit(tg_id))
+    if not raw:
+        await update.message.reply_text("Nothing to skip.")
+        return
+    draft = _json.loads(raw)
+    if draft.get("step") != "description":
+        await update.message.reply_text("Nothing to skip at this step.")
+        return
+    await r.delete(key_activity_edit(tg_id))
+    await _push_activity_update(update, draft["activity_id"], draft["name"], "")
 
 
 # ---------------------------------------------------------------------------
@@ -891,6 +914,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.answer()
     data = query.data or ""
 
+    # Activity edit
+    if data.startswith("activity:edit:"):
+        await _handle_activity_edit_start(query, data)
+        return
+
     # Goals
     if data == "goal:menu":
         await _send_goals_menu(query, query.from_user.id)
@@ -1006,10 +1034,132 @@ async def _do_disconnect(query) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Activity edit flow
+# ---------------------------------------------------------------------------
+
+_ACTIVITY_EDIT_TTL = 600  # 10 minutes
+
+
+async def _handle_activity_edit_start(query, data: str) -> None:
+    """Callback: user tapped 'Update Activity' on a notification."""
+    activity_id = int(data.split(":")[-1])
+    tg_id = query.from_user.id
+
+    from app.redis_client import get_redis, key_activity_edit
+    r = await get_redis()
+    await r.set(
+        key_activity_edit(tg_id),
+        _json.dumps({"activity_id": activity_id, "step": "name"}),
+        ex=_ACTIVITY_EDIT_TTL,
+    )
+    await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text(
+        "Enter the *Activity Name* for this activity:\n\n"
+        "_Example: 100 Km Ride_\n\n"
+        "Type /cancel to abort.",
+        parse_mode="Markdown",
+    )
+
+
+async def _handle_activity_edit_text(update: Update) -> bool:
+    """Handle free-text input for the activity name/description edit flow.
+
+    Returns True if the message was consumed by this flow, False otherwise.
+    """
+    from app.redis_client import get_redis, key_activity_edit
+    from app.strava.auth import get_valid_access_token
+    from app.strava.client import update_activity
+
+    tg_id = update.effective_user.id
+    r = await get_redis()
+    raw = await r.get(key_activity_edit(tg_id))
+    if not raw:
+        return False
+
+    draft = _json.loads(raw)
+    text  = update.message.text.strip()
+    step  = draft.get("step")
+
+    if step == "name":
+        draft["name"] = text
+        draft["step"] = "description"
+        await r.set(key_activity_edit(tg_id), _json.dumps(draft), ex=_ACTIVITY_EDIT_TTL)
+        await update.message.reply_text(
+            "Got it! Now enter the *Activity Description*:\n\n"
+            "_Example: It was great riding the Nandi BRM from Bangalore Randonneurs_\n\n"
+            "Type /skip to leave the description unchanged, or /cancel to abort.",
+            parse_mode="Markdown",
+        )
+        return True
+
+    if step == "description":
+        description = text
+        await r.delete(key_activity_edit(tg_id))
+        await _push_activity_update(update, draft["activity_id"], draft["name"], description)
+        return True
+
+    return False
+
+
+async def _push_activity_update(
+    update: Update,
+    activity_id: int,
+    name: str,
+    description: str,
+) -> None:
+    """PUT the updated name+description to Strava and confirm to user."""
+    from app.strava.auth import get_valid_access_token
+    from app.strava.client import update_activity
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(User).where(User.telegram_user_id == update.effective_user.id)
+        )
+        user = result.scalar_one_or_none()
+        if not user or not user.strava_athlete_id:
+            await update.message.reply_text(
+                "Could not update — Strava account not connected. Use /connect."
+            )
+            return
+        try:
+            access_token = await get_valid_access_token(db, user)
+            await update_activity(
+                access_token,
+                activity_id=activity_id,
+                name=name,
+                description=description,
+            )
+            # Update local DB name too
+            act_result = await db.execute(
+                select(Activity).where(Activity.strava_activity_id == activity_id)
+            )
+            activity = act_result.scalar_one_or_none()
+            if activity:
+                activity.activity_name = name
+            await db.commit()
+        except Exception as exc:
+            logger.error("Failed to update Strava activity %s: %s", activity_id, exc)
+            await update.message.reply_text(
+                "❌ Could not update the activity on Strava. Please try again later."
+            )
+            return
+
+    await update.message.reply_text(
+        f"✅ *Activity updated on Strava!*\n\n"
+        f"Name: *{name}*\n"
+        f"Description: {description}",
+        parse_mode="Markdown",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Fallback handlers
 # ---------------------------------------------------------------------------
 
 async def handle_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Check activity edit flow first
+    if await _handle_activity_edit_text(update):
+        return
     # Check if user is mid-way through adding a goal
     if await _handle_goal_text_input(update):
         return

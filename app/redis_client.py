@@ -64,3 +64,8 @@ def key_rate_limit(telegram_user_id: int, command: str) -> str:
 def key_activity_seen(activity_id: int) -> str:
     """Deduplication key so we never broadcast the same activity twice."""
     return f"activity:seen:{activity_id}"
+
+
+def key_activity_edit(telegram_user_id: int) -> str:
+    """Draft key for the in-progress activity name/description edit flow."""
+    return f"activity:edit:{telegram_user_id}"
