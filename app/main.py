@@ -118,15 +118,20 @@ app.include_router(telegram_router, prefix="/telegram", tags=["telegram"])
 
 @app.get("/health", tags=["ops"], summary="Liveness probe")
 async def health():
-    """Return status of the web process, database, and Redis.
-
-    Used by Railway health checks and load balancers.
-    Returns HTTP 200 regardless of component status — callers inspect the
-    ``db`` field to detect degraded state.
-    """
+    """Return status of the web process, database, and Redis."""
     db_ok = await check_db_connection()
+
+    redis_ok = False
+    try:
+        r = await get_redis()
+        await r.ping()
+        redis_ok = True
+    except Exception:
+        pass
+
     return {
         "status": "ok",
         "db":     "ok" if db_ok else "error",
+        "redis":  "ok" if redis_ok else "error",
         "env":    settings.app_env,
     }

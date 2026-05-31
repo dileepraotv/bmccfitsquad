@@ -1161,20 +1161,31 @@ async def _push_activity_update(
 # ---------------------------------------------------------------------------
 
 async def handle_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Check activity edit flow first
-    if await _handle_activity_edit_text(update):
-        return
-    # Check if user is mid-way through adding a goal
-    if await _handle_goal_text_input(update):
-        return
     text = update.message.text.strip()
-    # Numeric input with no active draft — likely a timed-out goal entry
+
+    # Only hit Redis if the message could plausibly be a draft input.
+    # Activity edits expect free text (any length).
+    # Goal drafts expect a number.  Skip both Redis lookups for short
+    # non-numeric single words to avoid 2 wasted round-trips per message.
+    _is_numeric = False
     try:
         float(text.replace(",", "."))
-        is_numeric = True
+        _is_numeric = True
     except ValueError:
-        is_numeric = False
-    if is_numeric:
+        pass
+
+    # Check activity edit draft (any text could be a name/description)
+    if await _handle_activity_edit_text(update):
+        return
+
+    # Check goal draft (only relevant for numeric-looking input)
+    if _is_numeric and await _handle_goal_text_input(update):
+        return
+    # Still check goal draft for non-numeric in case user is mid-flow
+    if not _is_numeric and await _handle_goal_text_input(update):
+        return
+
+    if _is_numeric:
         await update.message.reply_text(
             "Were you adding a goal? Your session may have expired. "
             "Type /goals to start again."
