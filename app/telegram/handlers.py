@@ -249,8 +249,8 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     import asyncio
-    from app.tasks import _sync_user_activities_async
-    asyncio.ensure_future(_sync_user_activities_async(user_id=str(user.id)))
+    from app.tasks import sync_user_activities
+    asyncio.ensure_future(sync_user_activities(user_id=str(user.id)))
 
     await update.message.reply_text(
         "⏳ Sync started\\! Your stats will update shortly — this may take a minute for large accounts\\. "

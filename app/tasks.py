@@ -1,37 +1,32 @@
-"""Celery task definitions.
+"""Background task functions.
 
-All tasks execute async code via ``asyncio.run()``, which is safe in Celery
-workers because each worker process has no pre-existing event loop.
+Celery has been removed. All tasks run as asyncio coroutines directly inside
+the FastAPI process using asyncio.ensure_future() so they do not block the
+web server and require zero Redis broker polling.
 
-Telegram messages are sent directly through the Bot HTTP API (not through the
-PTB Application instance) so these tasks work in the Celery worker process
-independently of the FastAPI web process.
-
-Dispatch examples
------------------
+Usage
+-----
+    import asyncio
     from app.tasks import send_activity_notification, sync_user_activities
 
-    # After saving a new activity from Strava webhook:
-    send_activity_notification.delay(
+    # Fire-and-forget — returns immediately, runs in the background
+    asyncio.ensure_future(send_activity_notification(
         activity_data=strava_api_dict,
-        user_id=str(user.id),          # UUID string
-    )
-
-    # After a user connects Strava:
-    sync_user_activities.delay(user_id=str(user.id))
+        user_id=str(user.id),
+    ))
+    asyncio.ensure_future(sync_user_activities(user_id=str(user.id)))
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import and_, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from telegram import Bot as TelegramBot, InlineKeyboardButton, InlineKeyboardMarkup
 
-from app.celery_app import celery_app
 from app.config import get_settings
 from app.database import AsyncSessionLocal
 from app.models import Activity, Goal, GroupChat, User
@@ -47,46 +42,37 @@ settings = get_settings()
 # Task 1: send_activity_notification
 # ---------------------------------------------------------------------------
 
-@celery_app.task(
-    bind=True,
-    name="tasks.send_activity_notification",
-    max_retries=3,
-    default_retry_delay=30,
-)
-def send_activity_notification(
-    self,
+async def send_activity_notification(
     *,
     activity_data: dict,
     user_id: str,
+    _retry: int = 0,
 ) -> None:
-    """Format and broadcast a new Strava activity to all group chats.
+    """Format and send a new activity notification to the athlete and group chats.
 
-    This task is dispatched by the Strava webhook handler immediately after
-    the activity is saved to the database.
-
-    Args:
-        activity_data: Full Strava activity detail dict (Strava API format).
-                       Must contain at minimum: name, type, start_date,
-                       distance, moving_time, elapsed_time, total_elevation_gain.
-        user_id:       ``User.id`` as a UUID string — used to look up the
-                       athlete name and Telegram user ID from the database.
+    Runs in the background via asyncio.ensure_future — never blocks the
+    webhook handler.  Retries up to 3 times with exponential back-off.
     """
     try:
-        asyncio.run(
-            _send_activity_notification_async(
-                activity_data=activity_data,
-                user_id=user_id,
-            )
+        await _send_activity_notification_async(
+            activity_data=activity_data,
+            user_id=user_id,
         )
     except Exception as exc:
         logger.exception(
-            "send_activity_notification failed (attempt %s/%s) user_id=%s activity=%s",
-            self.request.retries + 1,
-            self.max_retries + 1,
+            "send_activity_notification failed (attempt %s/3) user_id=%s activity=%s",
+            _retry + 1,
             user_id,
             activity_data.get("id"),
         )
-        raise self.retry(exc=exc, countdown=30 * (2 ** self.request.retries))
+        if _retry < 2:
+            delay = 30 * (2 ** _retry)   # 30s, 60s
+            await asyncio.sleep(delay)
+            await send_activity_notification(
+                activity_data=activity_data,
+                user_id=user_id,
+                _retry=_retry + 1,
+            )
 
 
 async def _send_activity_notification_async(
@@ -94,16 +80,12 @@ async def _send_activity_notification_async(
     user_id: str,
 ) -> None:
     async with AsyncSessionLocal() as db:
-        # ------------------------------------------------------------------
-        # 1. Fetch user from DB to get telegram_user_id and strava_athlete_name
-        # ------------------------------------------------------------------
         user: User | None = await db.get(User, uuid.UUID(user_id))
-
         if user is None:
             logger.warning("send_activity_notification: user_id=%s not found", user_id)
             return
         if not user.is_active:
-            logger.info("send_activity_notification: user_id=%s is inactive — skipped", user_id)
+            logger.info("send_activity_notification: user_id=%s inactive — skipped", user_id)
             return
 
         athlete_name = (
@@ -112,30 +94,16 @@ async def _send_activity_notification_async(
             or f"Athlete {user.telegram_user_id}"
         )
 
-        # ------------------------------------------------------------------
-        # 2. Load all group chats with notifications enabled
-        # ------------------------------------------------------------------
         chats_result = await db.execute(
             select(GroupChat).where(GroupChat.notifications_enabled.is_(True))
         )
         group_chats: list[GroupChat] = chats_result.scalars().all()
 
-        # ------------------------------------------------------------------
-        # 3. Build goal summary lines for the footer
-        # ------------------------------------------------------------------
         goal_lines = await _build_goal_lines(db, user)
+        text = await format_activity_notification(
+            activity_data, athlete_name, goal_lines=goal_lines
+        )
 
-        # ------------------------------------------------------------------
-        # 4. Format the notification
-        # ------------------------------------------------------------------
-        text = await format_activity_notification(activity_data, athlete_name, goal_lines=goal_lines)
-
-        # ------------------------------------------------------------------
-        # 4. Send via Telegram Bot API directly (no PTB Application needed)
-        # ------------------------------------------------------------------
-        bot = TelegramBot(token=settings.telegram_bot_token)
-
-        # Inline button lets user update the activity name/description on Strava
         activity_id = activity_data.get("id")
         edit_markup = None
         if activity_id:
@@ -146,8 +114,9 @@ async def _send_activity_notification_async(
                 )
             ]])
 
-        # Always DM the athlete directly so they get a confirmation even if
-        # no group chats are configured yet.
+        bot = TelegramBot(token=settings.telegram_bot_token)
+
+        # DM the athlete
         try:
             async with bot:
                 await bot.send_message(
@@ -156,37 +125,23 @@ async def _send_activity_notification_async(
                     parse_mode="Markdown",
                     reply_markup=edit_markup,
                 )
-            logger.info(
-                "Activity notification DM sent to telegram_id=%s", user.telegram_user_id
-            )
+            logger.info("Activity DM sent to telegram_id=%s", user.telegram_user_id)
         except Exception as exc:
-            logger.error(
-                "Failed to DM user telegram_id=%s: %s", user.telegram_user_id, exc
-            )
+            logger.error("Failed to DM user telegram_id=%s: %s", user.telegram_user_id, exc)
 
-        # Also broadcast to any registered group chats
-        if not group_chats:
-            logger.info(
-                "No group chats configured — skipping group broadcast for user=%s",
-                user_id,
-            )
-            return
-
+        # Broadcast to group chats
         for chat in group_chats:
             try:
                 async with bot:
-                    await bot.send_message(chat_id=chat.id, text=text, parse_mode="Markdown")
+                    await bot.send_message(
+                        chat_id=chat.id, text=text, parse_mode="Markdown"
+                    )
                 logger.info(
-                    "Activity notification sent to group chat_id=%s user_id=%s",
-                    chat.id,
-                    user_id,
+                    "Activity notification sent to group chat_id=%s", chat.id
                 )
             except Exception as exc:
                 logger.error(
-                    "Failed to notify chat_id=%s for user_id=%s: %s",
-                    chat.id,
-                    user_id,
-                    exc,
+                    "Failed to notify chat_id=%s: %s", chat.id, exc
                 )
 
 
@@ -194,75 +149,56 @@ async def _send_activity_notification_async(
 # Task 2: sync_user_activities
 # ---------------------------------------------------------------------------
 
-@celery_app.task(
-    bind=True,
-    name="tasks.sync_user_activities",
-    max_retries=2,
-    default_retry_delay=60,
-)
-def sync_user_activities(self, *, user_id: str) -> None:
-    """Back-fill activity history for a newly connected user.
+async def sync_user_activities(
+    *,
+    user_id: str,
+    _retry: int = 0,
+) -> None:
+    """Back-fill full Strava activity history for a user.
 
-    Fetches all Strava activities since Jan 1 of the current year and upserts
-    them into the activities table.  Uses ``ON CONFLICT DO NOTHING`` so re-runs
-    are fully idempotent.
-
-    Triggered from the OAuth callback after a user successfully connects Strava.
-
-    Args:
-        user_id: ``User.id`` as a UUID string.
+    Idempotent — uses ON CONFLICT DO NOTHING.
+    Retries up to 2 times with exponential back-off on failure.
     """
     try:
-        asyncio.run(_sync_user_activities_async(user_id=user_id))
-    except Exception as exc:
+        await _sync_user_activities_async(user_id=user_id)
+    except Exception:
         logger.exception("sync_user_activities failed for user_id=%s", user_id)
-        raise self.retry(exc=exc, countdown=60 * (2 ** self.request.retries))
+        if _retry < 1:
+            delay = 60 * (2 ** _retry)   # 60s, 120s
+            await asyncio.sleep(delay)
+            await sync_user_activities(user_id=user_id, _retry=_retry + 1)
 
 
 async def _sync_user_activities_async(user_id: str) -> None:
     async with AsyncSessionLocal() as db:
-        # ------------------------------------------------------------------
-        # 1. Fetch user
-        # ------------------------------------------------------------------
         user: User | None = await db.get(User, uuid.UUID(user_id))
-
         if user is None:
             logger.warning("sync_user_activities: user_id=%s not found", user_id)
             return
         if not user.is_active or not user.strava_access_token:
             logger.warning(
-                "sync_user_activities: user_id=%s not active or not connected — skipping",
-                user_id,
+                "sync_user_activities: user_id=%s not active or not connected", user_id
             )
             return
 
-        # ------------------------------------------------------------------
-        # 2. Fetch ALL activities from Strava (no time bound — full history)
-        # ------------------------------------------------------------------
         access_token = await get_valid_access_token(db, user)
         activities = await fetch_activities(access_token)
 
         logger.info(
             "sync_user_activities: fetched %s activities for user_id=%s",
-            len(activities),
-            user_id,
+            len(activities), user_id,
         )
-
         if not activities:
             return
 
-        # ------------------------------------------------------------------
-        # 3. Upsert each activity — ON CONFLICT DO NOTHING is idempotent
-        # ------------------------------------------------------------------
         for data in activities:
             activity_date = _parse_strava_date(
                 data.get("start_date") or data.get("start_date_local")
             )
             is_indoor = (
                 bool(data.get("trainer", False))
-                or str(data.get("type", "")).startswith("Virtual")
+                or str(data.get("sport_type") or data.get("type", "")).startswith("Virtual")
             )
-
             stmt = (
                 pg_insert(Activity)
                 .values(
@@ -288,9 +224,8 @@ async def _sync_user_activities_async(user_id: str) -> None:
 
         await db.commit()
         logger.info(
-            "sync_user_activities: sync complete — %s activities processed for user_id=%s",
-            len(activities),
-            user_id,
+            "sync_user_activities: complete — %s activities for user_id=%s",
+            len(activities), user_id,
         )
 
 
@@ -318,15 +253,7 @@ def _parse_category_threshold(category: str) -> float:
 
 
 async def _build_goal_lines(db, user: User) -> list[str]:
-    """Return a list of formatted goal-status strings for the notification footer.
-
-    Example output lines:
-        "Goal 1: Run — 10 km — Status 3/10"
-        "Goal 2: Ride — 100 km — Status 17/50"
-    Returns an empty list if the user has no active goals.
-    """
-    from datetime import timedelta
-
+    """Return compact goal-status lines for the notification footer."""
     goals_res = await db.execute(
         select(Goal).where(Goal.user_id == user.id, Goal.is_active == True)  # noqa: E712
     )
@@ -339,13 +266,12 @@ async def _build_goal_lines(db, user: User) -> list[str]:
         start_dt = datetime(
             g.start_date.year, g.start_date.month, g.start_date.day, tzinfo=timezone.utc
         )
-        # end_date is inclusive — add 1 day for exclusive SQL upper bound
         end_dt = datetime(
             g.end_date.year, g.end_date.month, g.end_date.day, tzinfo=timezone.utc
         ) + timedelta(days=1)
 
-        act_types    = _SPORT_ACTIVITY_TYPES.get(g.activity_type, [g.activity_type])
-        threshold_m  = _parse_category_threshold(g.category)
+        act_types   = _SPORT_ACTIVITY_TYPES.get(g.activity_type, [g.activity_type])
+        threshold_m = _parse_category_threshold(g.category)
 
         count_result = await db.execute(
             select(func.count(Activity.id)).where(
@@ -365,20 +291,20 @@ async def _build_goal_lines(db, user: User) -> list[str]:
             "Ride": "🚴", "RideEndurance": "🚴",
             "Run": "🏃", "Walk": "🚶", "Swim": "🏊",
         }.get(g.activity_type, "🏅")
-        lines.append(f"{sport_emoji} {sport_label} {g.category} - {achieved}/{g.target_count}")
+        lines.append(
+            f"{sport_emoji} {sport_label} {g.category} - {achieved}/{g.target_count}"
+        )
 
     return lines
 
 
 def _parse_strava_date(date_str: str | None) -> datetime:
-    """Parse a Strava ISO 8601 string into a UTC-aware datetime."""
     if not date_str:
         return datetime.now(timezone.utc)
     return datetime.fromisoformat(date_str.rstrip("Z")).replace(tzinfo=timezone.utc)
 
 
 def _optional_float(value) -> float | None:
-    """Return float(value) or None if the value is falsy or unconvertible."""
     if value is None:
         return None
     try:

@@ -237,23 +237,14 @@ async def strava_oauth_callback(
 
     # ------------------------------------------------------------------
     # Kick off a background history sync
-    # Try Celery first; fall back to running the async function directly
-    # in a background FastAPI task so the OAuth redirect returns fast.
+    # Fire full history sync in the background — returns immediately
     # ------------------------------------------------------------------
-    from app.tasks import _sync_user_activities_async
     import asyncio
+    from app.tasks import sync_user_activities
 
     user_id_str = str(user.id)
-
-    try:
-        from app.tasks import sync_user_activities
-        sync_user_activities.delay(user_id=user_id_str)
-        logger.info("History sync dispatched to Celery for user_id=%s", user_id_str)
-    except Exception:
-        logger.warning(
-            "Celery not available — running history sync inline for user_id=%s", user_id_str
-        )
-        asyncio.ensure_future(_sync_user_activities_async(user_id=user_id_str))
+    asyncio.ensure_future(sync_user_activities(user_id=user_id_str))
+    logger.info("History sync scheduled for user_id=%s", user_id_str)
 
     # ------------------------------------------------------------------
     # Notify the user in Telegram
@@ -406,15 +397,18 @@ async def _handle_activity_created(db: AsyncSession, owner_id: int, activity_id:
     await db.flush()
 
     # ------------------------------------------------------------------
-    # 6. Dispatch the notification Celery task
+    # 6. Fire notification in the background (no broker, no Redis)
     # ------------------------------------------------------------------
+    import asyncio
     from app.tasks import send_activity_notification
-    send_activity_notification.delay(
-        activity_data=activity_data,
-        user_id=str(user.id),
+    asyncio.ensure_future(
+        send_activity_notification(
+            activity_data=activity_data,
+            user_id=str(user.id),
+        )
     )
     logger.info(
-        "send_activity_notification dispatched: strava_id=%s user_id=%s",
+        "send_activity_notification scheduled: strava_id=%s user_id=%s",
         activity_id, user.id,
     )
 
