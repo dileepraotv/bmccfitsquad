@@ -62,13 +62,22 @@ TimeFrame = Literal[
     "all_time", "year_to_date", "previous_year", "current_month", "previous_month"
 ]
 
-# Strava activity_type strings that map to each logical sport
+# Strava activity_type strings that map to each logical sport.
+# Includes all sport_type values Strava may return (the newer sport_type field
+# is used for storage; the legacy "type" values are kept for backwards compat).
 _SPORT_ACTIVITY_TYPES: dict[str, list[str]] = {
-    "Ride":          ["Ride", "VirtualRide"],
-    "RideEndurance": ["Ride", "VirtualRide"],
-    "Run":           ["Run", "VirtualRun"],
-    "Walk":          ["Walk", "Hike"],
-    "Swim":          ["Swim", "OpenWaterSwim"],
+    "Ride": [
+        "Ride", "VirtualRide", "EBikeRide", "GravelRide",
+        "MountainBikeRide", "EMountainBikeRide", "Handcycle",
+        "Velomobile",
+    ],
+    "RideEndurance": [
+        "Ride", "VirtualRide", "EBikeRide", "GravelRide",
+        "MountainBikeRide", "EMountainBikeRide",
+    ],
+    "Run":  ["Run", "VirtualRun", "TrailRun"],
+    "Walk": ["Walk", "Hike"],
+    "Swim": ["Swim", "OpenWaterSwim"],
 }
 
 _TIME_FRAME_LABELS: dict[str, str] = {

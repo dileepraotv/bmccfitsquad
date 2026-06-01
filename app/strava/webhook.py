@@ -32,7 +32,7 @@ from app.strava.auth import (
     save_tokens,
     validate_oauth_state,
 )
-from app.strava.client import fetch_activity_detail
+from app.strava.client import fetch_activity_detail, view_webhook_subscription
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -72,6 +72,35 @@ async def strava_webhook_verify(
         )
     logger.info("Strava webhook challenge verified successfully")
     return {"hub.challenge": hub_challenge}
+
+
+# ---------------------------------------------------------------------------
+# Webhook subscription status — GET /strava/webhook/status
+# ---------------------------------------------------------------------------
+
+@router.get("/webhook/status", summary="Check active Strava webhook subscription")
+async def strava_webhook_status():
+    """Return the active Strava webhook subscription(s) for this app.
+
+    Useful to verify that the subscription is pointing to the correct callback
+    URL after a service URL change or Railway redeploy.
+    """
+    try:
+        subscriptions = await view_webhook_subscription()
+    except Exception as exc:
+        logger.error("Failed to fetch webhook subscriptions: %s", exc)
+        return {"status": "error", "detail": str(exc), "subscriptions": []}
+
+    expected_url = settings.strava_webhook_callback_url
+    return {
+        "status": "ok",
+        "count": len(subscriptions),
+        "subscriptions": subscriptions,
+        "expected_callback_url": expected_url,
+        "webhook_registered": any(
+            s.get("callback_url") == expected_url for s in subscriptions
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -367,9 +396,10 @@ async def _handle_activity_created(db: AsyncSession, owner_id: int, activity_id:
     activity_date = _parse_strava_date(
         activity_data.get("start_date") or activity_data.get("start_date_local")
     )
+    _sport = str(activity_data.get("sport_type") or activity_data.get("type") or "")
     is_indoor = (
         bool(activity_data.get("trainer", False))
-        or str(activity_data.get("type", "")).startswith("Virtual")
+        or _sport.startswith("Virtual")
     )
 
     stmt = (

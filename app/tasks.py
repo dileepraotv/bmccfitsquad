@@ -234,11 +234,18 @@ async def _sync_user_activities_async(user_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 _SPORT_ACTIVITY_TYPES: dict[str, list[str]] = {
-    "Ride":          ["Ride", "VirtualRide"],
-    "RideEndurance": ["Ride", "VirtualRide"],
-    "Run":           ["Run", "VirtualRun"],
-    "Walk":          ["Walk", "Hike"],
-    "Swim":          ["Swim", "OpenWaterSwim"],
+    "Ride": [
+        "Ride", "VirtualRide", "EBikeRide", "GravelRide",
+        "MountainBikeRide", "EMountainBikeRide", "Handcycle",
+        "Velomobile",
+    ],
+    "RideEndurance": [
+        "Ride", "VirtualRide", "EBikeRide", "GravelRide",
+        "MountainBikeRide", "EMountainBikeRide",
+    ],
+    "Run":  ["Run", "VirtualRun", "TrailRun"],
+    "Walk": ["Walk", "Hike"],
+    "Swim": ["Swim", "OpenWaterSwim"],
 }
 
 

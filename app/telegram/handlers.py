@@ -996,6 +996,25 @@ async def _send_stats(query, sport: str, time_frame: str) -> None:
             await query.edit_message_text("Please /start first.")
             return
 
+        # Auto-sync if the user has no activities in the DB at all.
+        # This recovers gracefully when the DB was wiped, a new service was
+        # deployed, or the user connected Strava but never ran /sync.
+        activity_count_result = await db.execute(
+            select(func.count(Activity.id)).where(Activity.user_id == user.id)
+        )
+        total_activities = activity_count_result.scalar_one() or 0
+
+        if total_activities == 0 and user.strava_athlete_id:
+            import asyncio
+            from app.tasks import sync_user_activities
+            asyncio.ensure_future(sync_user_activities(user_id=str(user.id)))
+            await query.edit_message_text(
+                "⏳ No activity data found — syncing your Strava history now\\.\n\n"
+                "This may take a minute\\. Please use /stats again in a moment\\.",
+                parse_mode="MarkdownV2",
+            )
+            return
+
         try:
             stats = await calculate_stats(db, user.id, sport, time_frame)
         except Exception:
