@@ -118,20 +118,17 @@ app.include_router(telegram_router, prefix="/telegram", tags=["telegram"])
 
 @app.get("/health", tags=["ops"], summary="Liveness probe")
 async def health():
-    """Return status of the web process, database, and Redis."""
-    db_ok = await check_db_connection()
+    """Return status of the web process and database.
 
-    redis_ok = False
-    try:
-        r = await get_redis()
-        await r.ping()
-        redis_ok = True
-    except Exception:
-        pass
+    Redis is NOT pinged here — Railway calls this endpoint every ~10 s which
+    would generate thousands of Redis commands per day against the Upstash
+    free tier.  Redis is checked once at startup (lifespan) and its connection
+    is kept alive by the connection pool.
+    """
+    db_ok = await check_db_connection()
 
     return {
         "status": "ok",
         "db":     "ok" if db_ok else "error",
-        "redis":  "ok" if redis_ok else "error",
         "env":    settings.app_env,
     }
