@@ -21,13 +21,22 @@ def _build_redis_url() -> str:
 
 
 async def get_redis() -> aioredis.Redis:
-    """Return the shared Redis connection, initialising it on first call."""
+    """Return the shared Redis connection, initialising it on first call.
+
+    Pool is intentionally sized to 1 connection — the app only ever does
+    short serial GET/SET/DEL calls, never concurrent bursts.  A single
+    connection means one TLS handshake and zero idle keepalive PINGs beyond
+    the single connection's socket-level TCP keepalive.
+    """
     global _redis
     if _redis is None:
         url = _build_redis_url()
         kwargs: dict = {
             "encoding": "utf-8",
             "decode_responses": True,
+            # Single connection — eliminates per-connection PING keepalives
+            # that a larger pool would generate even with no traffic.
+            "max_connections": 1,
         }
         # Upstash uses a wildcard TLS cert that Python's ssl module rejects.
         # Disable certificate verification while keeping the connection encrypted.
