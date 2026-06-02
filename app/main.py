@@ -151,8 +151,8 @@ async def ping():
     return {"status": "ok"}
 
 
-# Cache DB health result for 30 s so platform health probes don't
-# hammer Postgres on every single check.
+# Cache DB health result for 30 s so Render's health probe doesn't
+# hammer Neon Postgres on every single check.
 _health_cache: dict = {"db": True, "ts": 0.0}
 _HEALTH_CACHE_TTL = 30.0   # seconds
 

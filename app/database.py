@@ -12,8 +12,9 @@ Alembic uses a *synchronous* connection for its autogenerate step; the
 
 URL normalisation
 -----------------
-Railway injects ``?sslmode=require`` into DATABASE_URL.  That is a libpq /
-psycopg2 parameter — asyncpg does not accept it and raises:
+Neon (and other hosted Postgres providers) inject ``?sslmode=require`` into
+DATABASE_URL.  That is a libpq / psycopg2 parameter — asyncpg does not accept
+it and raises:
 
     TypeError: connect() got an unexpected keyword argument 'sslmode'
 
@@ -70,8 +71,9 @@ def _async_url(raw: str) -> tuple[str, dict]:
         if sslmode in ("require", "verify-ca", "verify-full"):
             ctx = _ssl.create_default_context()
             if sslmode == "require":
-                # Railway's Postgres uses a self-signed cert — skip hostname
-                # verification while still encrypting the connection.
+                # Neon and most hosted providers use sslmode=require but serve
+                # certificates that may not pass strict hostname verification
+                # with asyncpg. Skip hostname check while keeping encryption.
                 ctx.check_hostname = False
                 ctx.verify_mode = _ssl.CERT_NONE
             connect_args["ssl"] = ctx
@@ -102,12 +104,12 @@ engine = create_async_engine(
     ASYNC_DATABASE_URL,
     connect_args=_CONNECT_ARGS,
     echo=not settings.is_production,  # log SQL in dev
-    # Railway Postgres free tier has a low connection limit (~20).
-    # Web + background tasks share this pool, so keep it small.
+    # Neon free tier allows 10 concurrent connections.
+    # Keep the pool small — web + background tasks share it.
     pool_size=3,
     max_overflow=2,     # absolute max = 5 connections
-    pool_pre_ping=True,               # recycle stale connections automatically
-    pool_recycle=1800,                # recycle after 30 min regardless
+    pool_pre_ping=True,  # validates connections before use — handles Render
+                         # wakeups and Neon's idle connection culling gracefully
 )
 
 AsyncSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
