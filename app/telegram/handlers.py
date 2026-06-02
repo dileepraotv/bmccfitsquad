@@ -356,7 +356,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await update.message.reply_text(
-        "📊 *Stats*\n\nChoose an activity type:",
+        "📊 *Stats*\n\nSelect the activity behind your progress:",
         parse_mode="Markdown",
         reply_markup=stats_sport_keyboard(),
     )
@@ -1039,7 +1039,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     elif data == "stats:menu":
         await query.edit_message_text(
-            "📊 *Stats*\n\nChoose an activity type:",
+            "📊 *Stats*\n\nSelect the activity behind your progress:",
             parse_mode="Markdown",
             reply_markup=stats_sport_keyboard(),
         )
