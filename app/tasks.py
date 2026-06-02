@@ -114,35 +114,31 @@ async def _send_activity_notification_async(
                 )
             ]])
 
+        # Reuse a single Bot session for all sends in this notification cycle
+        # to avoid per-message TLS handshake overhead.
         bot = TelegramBot(token=settings.telegram_bot_token)
-
-        # DM the athlete
-        try:
-            async with bot:
+        async with bot:
+            # DM the athlete
+            try:
                 await bot.send_message(
                     chat_id=user.telegram_user_id,
                     text=text,
                     parse_mode="Markdown",
                     reply_markup=edit_markup,
                 )
-            logger.info("Activity DM sent to telegram_id=%s", user.telegram_user_id)
-        except Exception as exc:
-            logger.error("Failed to DM user telegram_id=%s: %s", user.telegram_user_id, exc)
+                logger.info("Activity DM sent to telegram_id=%s", user.telegram_user_id)
+            except Exception as exc:
+                logger.error("Failed to DM user telegram_id=%s: %s", user.telegram_user_id, exc)
 
-        # Broadcast to group chats
-        for chat in group_chats:
-            try:
-                async with bot:
+            # Broadcast to group chats
+            for chat in group_chats:
+                try:
                     await bot.send_message(
                         chat_id=chat.id, text=text, parse_mode="Markdown"
                     )
-                logger.info(
-                    "Activity notification sent to group chat_id=%s", chat.id
-                )
-            except Exception as exc:
-                logger.error(
-                    "Failed to notify chat_id=%s: %s", chat.id, exc
-                )
+                    logger.info("Notification sent to group chat_id=%s", chat.id)
+                except Exception as exc:
+                    logger.error("Failed to notify chat_id=%s: %s", chat.id, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +166,12 @@ async def sync_user_activities(
 
 
 async def _sync_user_activities_async(user_id: str) -> None:
+    """Incrementally sync Strava activities for a user.
+
+    On the first sync (no activities in DB) fetches the full history.
+    On subsequent syncs fetches only activities since the most recent
+    stored date — dramatically reducing Strava API calls and memory usage.
+    """
     async with AsyncSessionLocal() as db:
         user: User | None = await db.get(User, uuid.UUID(user_id))
         if user is None:
@@ -181,8 +183,31 @@ async def _sync_user_activities_async(user_id: str) -> None:
             )
             return
 
+        # Determine how far back to fetch — incremental unless no data exists
+        latest_result = await db.execute(
+            select(Activity.activity_date)
+            .where(Activity.user_id == user.id)
+            .order_by(Activity.activity_date.desc())
+            .limit(1)
+        )
+        latest_row = latest_result.scalar_one_or_none()
+
+        if latest_row is not None:
+            # Fetch from 1 day before the latest stored activity to catch any
+            # edge cases where an activity was saved out of chronological order
+            after_ts = int(latest_row.timestamp()) - 86_400
+            logger.info(
+                "sync_user_activities: incremental from %s for user_id=%s",
+                latest_row.isoformat(), user_id,
+            )
+        else:
+            after_ts = None   # full history on first connect
+            logger.info(
+                "sync_user_activities: full history fetch for user_id=%s", user_id
+            )
+
         access_token = await get_valid_access_token(db, user)
-        activities = await fetch_activities(access_token)
+        activities = await fetch_activities(access_token, after=after_ts)
 
         logger.info(
             "sync_user_activities: fetched %s activities for user_id=%s",
@@ -224,7 +249,7 @@ async def _sync_user_activities_async(user_id: str) -> None:
 
         await db.commit()
         logger.info(
-            "sync_user_activities: complete — %s activities for user_id=%s",
+            "sync_user_activities: saved %s activities for user_id=%s",
             len(activities), user_id,
         )
 

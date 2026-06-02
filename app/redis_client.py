@@ -57,21 +57,13 @@ async def close_redis() -> None:
 # Convenience key helpers (centralise key naming to avoid typos)
 # ---------------------------------------------------------------------------
 
-def key_strava_token(telegram_user_id: int) -> str:
-    return f"strava:token:{telegram_user_id}"
-
-
 def key_oauth_state(state: str) -> str:
     """Short-lived key used to verify Strava OAuth state parameter."""
     return f"oauth:state:{state}"
 
 
-def key_rate_limit(telegram_user_id: int, command: str) -> str:
-    return f"ratelimit:{telegram_user_id}:{command}"
-
-
 def key_activity_seen(activity_id: int) -> str:
-    """Deduplication key so we never broadcast the same activity twice."""
+    """24-hour deduplication key — prevents double-processing webhook deliveries."""
     return f"activity:seen:{activity_id}"
 
 

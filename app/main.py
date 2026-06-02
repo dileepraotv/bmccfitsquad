@@ -21,6 +21,7 @@ Shutdown sequence
   2. Close the Redis connection pool
 """
 import logging
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -62,10 +63,27 @@ async def lifespan(app: FastAPI):
     logger.info("Redis connection ready")
 
     # 3. Telegram bot — initialise PTB Application and register webhook
-    #    set_webhook is called via Telegram's Bot API:
-    #    POST https://api.telegram.org/bot{TOKEN}/setWebhook
     await setup_bot()
     logger.info("Telegram bot ready (webhook registered)")
+
+    # 4. Verify Strava webhook subscription points to this deployment
+    try:
+        from app.strava.client import view_webhook_subscription
+        subs = await view_webhook_subscription()
+        expected = settings.strava_webhook_callback_url
+        registered = any(s.get("callback_url") == expected for s in subs)
+        if registered:
+            logger.info("Strava webhook subscription OK: %s", expected)
+        else:
+            logger.warning(
+                "Strava webhook subscription MISMATCH or missing. "
+                "Expected callback_url=%s but found: %s. "
+                "Run scripts/register_strava_webhook.py to fix.",
+                expected,
+                [s.get("callback_url") for s in subs],
+            )
+    except Exception as exc:
+        logger.warning("Could not verify Strava webhook subscription: %s", exc)
 
     yield
 
@@ -116,19 +134,28 @@ app.include_router(telegram_router, prefix="/telegram", tags=["telegram"])
 # Health check
 # ---------------------------------------------------------------------------
 
+# Cache DB health result for 30 s so Railway's ~10 s probe interval doesn't
+# hammer Postgres with a SELECT 1 on every single probe.
+_health_cache: dict = {"db": True, "ts": 0.0}
+_HEALTH_CACHE_TTL = 30.0   # seconds
+
+
 @app.get("/health", tags=["ops"], summary="Liveness probe")
 async def health():
-    """Return status of the web process and database.
+    """Return process health with a cached DB check.
 
-    Redis is NOT pinged here — Railway calls this endpoint every ~10 s which
-    would generate thousands of Redis commands per day against the Upstash
-    free tier.  Redis is checked once at startup (lifespan) and its connection
-    is kept alive by the connection pool.
+    Railway probes this endpoint every ~10 s.  We cache the DB connectivity
+    result for 30 s so we generate at most ~2,880 DB pings/day instead of
+    ~8,640.  Redis is NOT checked here — it was verified at startup and its
+    single connection is maintained by the pool.
     """
-    db_ok = await check_db_connection()
+    now = time.monotonic()
+    if now - _health_cache["ts"] > _HEALTH_CACHE_TTL:
+        _health_cache["db"] = await check_db_connection()
+        _health_cache["ts"] = now
 
     return {
         "status": "ok",
-        "db":     "ok" if db_ok else "error",
+        "db":     "ok" if _health_cache["db"] else "error",
         "env":    settings.app_env,
     }

@@ -6,7 +6,7 @@ Strava webhook protocol
    hub.challenge; we echo it back to confirm ownership.
 2. Events: Strava POSTs JSON to the callback URL within seconds of each event.
    We MUST respond with HTTP 200 within 2 seconds — all heavy work is
-   dispatched to Celery immediately.
+   dispatched via asyncio.ensure_future so the HTTP response returns instantly.
 
 OAuth callback
 --------------
@@ -20,10 +20,9 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.database import get_db
+from app.database import AsyncSessionLocal, get_db
 from app.models import Activity, User
 from app.redis_client import get_redis, key_activity_seen
 from app.strava.auth import (
@@ -112,37 +111,40 @@ async def strava_webhook_status():
     status_code=status.HTTP_200_OK,
     summary="Receive Strava activity events",
 )
-async def strava_webhook_event(request: Request, db: AsyncSession = Depends(get_db)):
-    """Receive a Strava event, deduplicate, and dispatch to a Celery worker.
+async def strava_webhook_event(request: Request):
+    """Receive a Strava event and ack within Strava's 2-second window.
 
-    Strava expects HTTP 200 within 2 seconds — we ack immediately and process
-    asynchronously.  Supported event types:
+    All processing is dispatched immediately via asyncio.ensure_future so
+    the HTTP 200 is returned before any DB or Strava API work begins.
 
+    Supported event types:
     - ``activity / create``  → fetch detail, store, send Telegram notification
     - ``activity / update``  → update the stored Activity row
     - ``activity / delete``  → remove the Activity row
     - ``athlete / update``   → handle deauthorisation
     """
+    import asyncio
     payload = await request.json()
     logger.debug("Strava webhook payload received: %s", payload)
 
-    aspect_type: str = payload.get("aspect_type", "")   # create / update / delete
-    object_type: str = payload.get("object_type", "")   # activity / athlete
+    aspect_type: str = payload.get("aspect_type", "")
+    object_type: str = payload.get("object_type", "")
     object_id: int = int(payload.get("object_id", 0))
     owner_id: int = int(payload.get("owner_id", 0))
     updates: dict = payload.get("updates", {})
 
+    # Dispatch all work as fire-and-forget — never block the 200 response
     if object_type == "activity":
         if aspect_type == "create":
-            await _handle_activity_created(db, owner_id=owner_id, activity_id=object_id)
+            asyncio.ensure_future(_handle_activity_created(owner_id=owner_id, activity_id=object_id))
         elif aspect_type == "update":
-            await _handle_activity_updated(db, activity_id=object_id, updates=updates)
+            asyncio.ensure_future(_handle_activity_updated(activity_id=object_id, updates=updates))
         elif aspect_type == "delete":
-            await _handle_activity_deleted(db, activity_id=object_id)
+            asyncio.ensure_future(_handle_activity_deleted(activity_id=object_id))
     elif object_type == "athlete" and aspect_type == "update":
-        await _handle_athlete_updated(db, athlete_id=owner_id, updates=updates)
+        asyncio.ensure_future(_handle_athlete_updated(athlete_id=owner_id, updates=updates))
 
-    # Always return 200 quickly — Strava will retry on any other status code
+    # Always return 200 immediately — Strava will retry on any other status
     return {"status": "ok"}
 
 
@@ -319,223 +321,224 @@ async def strava_oauth_callback(
 # Internal event handlers
 # ---------------------------------------------------------------------------
 
-async def _handle_activity_created(db: AsyncSession, owner_id: int, activity_id: int) -> None:
-    """Fetch, persist, then dispatch a Celery notification task for a new activity.
+async def _handle_activity_created(owner_id: int, activity_id: int) -> None:
+    """Fetch, persist, and notify for a new Strava activity.
 
-    Pipeline (all async, keeps total latency well under Strava's 2-second limit):
-      1. Redis SETNX dedup  — set early so Strava retries are silently dropped
-      2. User lookup        — abort if the athlete isn't in our DB
+    Runs fully in the background via asyncio.ensure_future — the webhook
+    handler has already returned HTTP 200 before this executes.
+
+    Pipeline:
+      1. Redis SETNX dedup  — drops duplicate deliveries from Strava
+      2. User lookup        — abort if athlete not in our DB
       3. Token refresh      — transparent, uses cached token when possible
-      4. Strava API fetch   — full activity detail (~200–400 ms)
-      5. DB upsert          — ON CONFLICT DO NOTHING for safety
-      6. Celery dispatch    — send_activity_notification.delay(...)
+      4. Strava API fetch   — full activity detail
+      5. DB upsert          — ON CONFLICT DO NOTHING
+      6. Notification       — DM athlete + group chats
     """
-    # ------------------------------------------------------------------
-    # 1. Dedup — set the key before any network calls so that concurrent
-    #    Strava retries are ignored even if this handler is still running
-    # ------------------------------------------------------------------
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from app.tasks import send_activity_notification
+
+    # 1. Dedup
     redis = await get_redis()
     dedup_key = key_activity_seen(activity_id)
     is_new = await redis.set(dedup_key, "1", ex=_DEDUP_TTL_SECONDS, nx=True)
     if not is_new:
-        logger.info("Activity strava_id=%s already queued — duplicate ignored", activity_id)
+        logger.info("Activity strava_id=%s already processing — duplicate ignored", activity_id)
         return
 
-    # ------------------------------------------------------------------
-    # 2. Look up the user by their Strava athlete ID
-    # ------------------------------------------------------------------
-    result = await db.execute(
-        select(User).where(User.strava_athlete_id == owner_id)
-    )
-    user: User | None = result.scalar_one_or_none()
-
-    if user is None:
-        logger.warning(
-            "No user found for strava_athlete_id=%s — activity %s skipped",
-            owner_id, activity_id,
+    async with AsyncSessionLocal() as db:
+        # 2. User lookup
+        result = await db.execute(
+            select(User).where(User.strava_athlete_id == owner_id)
         )
-        await redis.delete(dedup_key)   # allow future re-processing if user registers later
-        return
+        user: User | None = result.scalar_one_or_none()
 
-    if not user.is_active:
-        logger.info(
-            "User telegram_id=%s is inactive — activity %s skipped",
-            user.telegram_user_id, activity_id,
+        if user is None:
+            logger.warning(
+                "No user for strava_athlete_id=%s — activity %s skipped",
+                owner_id, activity_id,
+            )
+            await redis.delete(dedup_key)  # allow re-processing if user registers later
+            return
+
+        if not user.is_active:
+            logger.info(
+                "User telegram_id=%s inactive — activity %s skipped",
+                user.telegram_user_id, activity_id,
+            )
+            await redis.delete(dedup_key)  # inactive users should not block dedup
+            return
+
+        # 3. Token
+        try:
+            access_token = await get_valid_access_token(db, user)
+        except ValueError as exc:
+            logger.warning(
+                "No access token for telegram_id=%s: %s — activity %s skipped",
+                user.telegram_user_id, exc, activity_id,
+            )
+            return
+
+        # 4. Fetch from Strava
+        try:
+            activity_data = await fetch_activity_detail(access_token, activity_id)
+        except Exception as exc:
+            logger.error("Strava fetch failed for activity_id=%s: %s", activity_id, exc)
+            await redis.delete(dedup_key)  # allow retry on next webhook delivery
+            return
+
+        # 5. Upsert
+        activity_date = _parse_strava_date(
+            activity_data.get("start_date") or activity_data.get("start_date_local")
         )
-        return
+        _sport = str(activity_data.get("sport_type") or activity_data.get("type") or "")
+        is_indoor = bool(activity_data.get("trainer", False)) or _sport.startswith("Virtual")
 
-    # ------------------------------------------------------------------
-    # 3. Obtain a valid (possibly refreshed) Strava access token
-    # ------------------------------------------------------------------
-    try:
-        access_token = await get_valid_access_token(db, user)
-    except ValueError as exc:
-        logger.warning(
-            "No access token for telegram_id=%s: %s — activity %s skipped",
-            user.telegram_user_id, exc, activity_id,
+        stmt = (
+            pg_insert(Activity)
+            .values(
+                strava_activity_id=activity_id,
+                user_id=user.id,
+                activity_name=activity_data.get("name") or "Unnamed Activity",
+                activity_type=activity_data.get("sport_type") or activity_data.get("type") or "Unknown",
+                activity_date=activity_date,
+                distance_meters=float(activity_data.get("distance") or 0),
+                moving_time_seconds=int(activity_data.get("moving_time") or 0),
+                elapsed_time_seconds=int(activity_data.get("elapsed_time") or 0),
+                elevation_gain=float(activity_data.get("total_elevation_gain") or 0),
+                average_speed=float(activity_data.get("average_speed") or 0),
+                max_speed=float(activity_data.get("max_speed") or 0),
+                average_heartrate=_optional_float(activity_data.get("average_heartrate")),
+                max_heartrate=_optional_float(activity_data.get("max_heartrate")),
+                calories=_optional_float(activity_data.get("calories")),
+                is_indoor=is_indoor,
+            )
+            .on_conflict_do_nothing(index_elements=["strava_activity_id"])
         )
-        return
+        await db.execute(stmt)
+        await db.commit()
 
-    # ------------------------------------------------------------------
-    # 4. Fetch full activity detail from the Strava API
-    # ------------------------------------------------------------------
-    try:
-        activity_data = await fetch_activity_detail(access_token, activity_id)
-    except Exception as exc:
-        logger.error(
-            "Strava API fetch failed for activity_id=%s: %s", activity_id, exc
-        )
-        await redis.delete(dedup_key)   # allow retry on next webhook delivery
-        raise
+        user_id_str = str(user.id)
 
-    # ------------------------------------------------------------------
-    # 5. Upsert the activity into the database
-    # ------------------------------------------------------------------
-    from sqlalchemy.dialects.postgresql import insert as pg_insert
-
-    activity_date = _parse_strava_date(
-        activity_data.get("start_date") or activity_data.get("start_date_local")
-    )
-    _sport = str(activity_data.get("sport_type") or activity_data.get("type") or "")
-    is_indoor = (
-        bool(activity_data.get("trainer", False))
-        or _sport.startswith("Virtual")
-    )
-
-    stmt = (
-        pg_insert(Activity)
-        .values(
-            strava_activity_id=activity_id,
-            user_id=user.id,
-            activity_name=activity_data.get("name") or "Unnamed Activity",
-            activity_type=activity_data.get("sport_type") or activity_data.get("type") or "Unknown",
-            activity_date=activity_date,
-            distance_meters=float(activity_data.get("distance") or 0),
-            moving_time_seconds=int(activity_data.get("moving_time") or 0),
-            elapsed_time_seconds=int(activity_data.get("elapsed_time") or 0),
-            elevation_gain=float(activity_data.get("total_elevation_gain") or 0),
-            average_speed=float(activity_data.get("average_speed") or 0),
-            max_speed=float(activity_data.get("max_speed") or 0),
-            average_heartrate=_optional_float(activity_data.get("average_heartrate")),
-            max_heartrate=_optional_float(activity_data.get("max_heartrate")),
-            calories=_optional_float(activity_data.get("calories")),
-            is_indoor=is_indoor,
-        )
-        .on_conflict_do_nothing(index_elements=["strava_activity_id"])
-    )
-    await db.execute(stmt)
-    await db.flush()
-
-    # ------------------------------------------------------------------
-    # 6. Fire notification in the background (no broker, no Redis)
-    # ------------------------------------------------------------------
+    # 6. Send notification (outside the DB session — uses its own session)
     import asyncio
-    from app.tasks import send_activity_notification
     asyncio.ensure_future(
-        send_activity_notification(
-            activity_data=activity_data,
-            user_id=str(user.id),
-        )
+        send_activity_notification(activity_data=activity_data, user_id=user_id_str)
     )
-    logger.info(
-        "send_activity_notification scheduled: strava_id=%s user_id=%s",
-        activity_id, user.id,
-    )
+    logger.info("Activity strava_id=%s saved; notification scheduled", activity_id)
 
 
-async def _handle_activity_updated(db: AsyncSession, activity_id: int, updates: dict) -> None:
-    """Apply an activity update from Strava to the local database row.
+async def _handle_activity_updated(activity_id: int, updates: dict) -> None:
+    """Apply a Strava activity update to the local DB row.
 
-    The ``updates`` dict keys mirror Strava field names:
-      - ``title``   → activity_name
-      - ``type``    → activity_type
-      - ``private`` → (ignored — we don't store privacy flag)
+    Re-fetches full detail from Strava when metric fields may have changed
+    (distance, time, elevation, HR) — the webhook payload only carries
+    title/type, which is insufficient for stats accuracy.
     """
     if not updates:
         return
 
-    result = await db.execute(
-        select(Activity).where(Activity.strava_activity_id == activity_id)
-    )
-    activity: Activity | None = result.scalar_one_or_none()
-    if activity is None:
-        logger.debug(
-            "Activity strava_id=%s not in DB — update event ignored", activity_id
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(Activity).where(Activity.strava_activity_id == activity_id)
         )
-        return
+        activity: Activity | None = result.scalar_one_or_none()
+        if activity is None:
+            logger.debug("Activity strava_id=%s not in DB — update ignored", activity_id)
+            return
 
-    if "title" in updates:
-        activity.activity_name = updates["title"]
-    if "type" in updates:
-        activity.activity_type = updates["type"]
+        # Always apply title/type from the payload immediately (fast path)
+        if "title" in updates:
+            activity.activity_name = updates["title"]
+        if "type" in updates or "sport_type" in updates:
+            activity.activity_type = (
+                updates.get("sport_type") or updates.get("type") or activity.activity_type
+            )
 
-    await db.flush()
-    logger.info("Activity strava_id=%s updated: %s", activity_id, updates)
+        # Re-fetch full metrics from Strava if the activity belongs to a connected user
+        user_result = await db.execute(select(User).where(User.id == activity.user_id))
+        user: User | None = user_result.scalar_one_or_none()
+        if user and user.strava_access_token:
+            try:
+                access_token = await get_valid_access_token(db, user)
+                detail = await fetch_activity_detail(access_token, activity_id)
+                activity.activity_name = detail.get("name") or activity.activity_name
+                activity.activity_type = detail.get("sport_type") or detail.get("type") or activity.activity_type
+                activity.distance_meters = float(detail.get("distance") or activity.distance_meters)
+                activity.moving_time_seconds = int(detail.get("moving_time") or activity.moving_time_seconds)
+                activity.elapsed_time_seconds = int(detail.get("elapsed_time") or activity.elapsed_time_seconds)
+                activity.elevation_gain = float(detail.get("total_elevation_gain") or activity.elevation_gain)
+                activity.average_speed = float(detail.get("average_speed") or activity.average_speed)
+                activity.max_speed = float(detail.get("max_speed") or activity.max_speed)
+                activity.average_heartrate = _optional_float(detail.get("average_heartrate")) or activity.average_heartrate
+                activity.max_heartrate = _optional_float(detail.get("max_heartrate")) or activity.max_heartrate
+                activity.calories = _optional_float(detail.get("calories")) or activity.calories
+                logger.info("Activity strava_id=%s fully refreshed from Strava", activity_id)
+            except Exception as exc:
+                logger.warning(
+                    "Could not re-fetch activity strava_id=%s — payload-only update applied: %s",
+                    activity_id, exc,
+                )
+
+        await db.commit()
+    logger.info("Activity strava_id=%s updated: %s", activity_id, list(updates.keys()))
 
 
-async def _handle_activity_deleted(db: AsyncSession, activity_id: int) -> None:
+async def _handle_activity_deleted(activity_id: int) -> None:
     """Remove a deleted Strava activity from the local database."""
-    result = await db.execute(
-        select(Activity).where(Activity.strava_activity_id == activity_id)
-    )
-    activity: Activity | None = result.scalar_one_or_none()
-    if activity is None:
-        logger.debug(
-            "Activity strava_id=%s not in DB — delete event ignored", activity_id
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(Activity).where(Activity.strava_activity_id == activity_id)
         )
-        return
+        activity: Activity | None = result.scalar_one_or_none()
+        if activity is None:
+            logger.debug("Activity strava_id=%s not in DB — delete ignored", activity_id)
+            return
 
-    await db.delete(activity)
-    await db.flush()
+        await db.delete(activity)
+        await db.commit()
 
-    # Clean up deduplication key so a re-upload of the same activity is processed fresh
+    # Clear dedup key so the same activity_id can be re-processed if re-uploaded
     redis = await get_redis()
     await redis.delete(key_activity_seen(activity_id))
+    logger.info("Activity strava_id=%s deleted", activity_id)
 
-    logger.info("Activity strava_id=%s deleted from DB", activity_id)
 
-
-async def _handle_athlete_updated(db: AsyncSession, athlete_id: int, updates: dict) -> None:
-    """Handle an athlete-level update event, primarily deauthorisation.
+async def _handle_athlete_updated(athlete_id: int, updates: dict) -> None:
+    """Handle athlete-level update events, primarily Strava deauthorisation.
 
     When a user revokes access in the Strava app, Strava sends:
         { "updates": { "authorized": "false" } }
-
-    We null out all Strava token fields so future calls fail gracefully.
     """
     authorized: str = updates.get("authorized", "true")
     if authorized != "false":
         return
 
-    result = await db.execute(
-        select(User).where(User.strava_athlete_id == athlete_id)
-    )
-    user: User | None = result.scalar_one_or_none()
-    if user is None:
-        logger.warning(
-            "Deauthorisation event for unknown strava_athlete_id=%s", athlete_id
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(User).where(User.strava_athlete_id == athlete_id)
         )
-        return
+        user: User | None = result.scalar_one_or_none()
+        if user is None:
+            logger.warning("Deauth event for unknown strava_athlete_id=%s", athlete_id)
+            return
 
-    # Null out tokens — we can't call the Strava API any more for this user
-    user.strava_access_token = None
-    user.strava_refresh_token = None
-    user.strava_token_expires_at = None
-    # Keep strava_athlete_id and strava_athlete_name for display purposes
-    await db.flush()
+        user.strava_access_token = None
+        user.strava_refresh_token = None
+        user.strava_token_expires_at = None
+        await db.commit()
+        telegram_user_id = user.telegram_user_id
 
     logger.info(
-        "Strava deauthorised for telegram_user_id=%s strava_athlete_id=%s",
-        user.telegram_user_id,
-        athlete_id,
+        "Strava deauthorised: telegram_user_id=%s strava_athlete_id=%s",
+        telegram_user_id, athlete_id,
     )
 
-    # Inform the user in Telegram
     try:
         from app.telegram.bot import get_application
         bot = get_application().bot
         await bot.send_message(
-            chat_id=user.telegram_user_id,
+            chat_id=telegram_user_id,
             text=(
                 "⚠️ Your Strava access has been revoked.\n\n"
                 "If this was unintentional, use /connect to re-link your account."
@@ -544,8 +547,7 @@ async def _handle_athlete_updated(db: AsyncSession, athlete_id: int, updates: di
     except Exception as exc:
         logger.warning(
             "Could not notify telegram_user_id=%s of deauthorisation: %s",
-            user.telegram_user_id,
-            exc,
+            telegram_user_id, exc,
         )
 
 

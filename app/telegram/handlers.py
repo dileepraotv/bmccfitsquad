@@ -1050,6 +1050,9 @@ async def _send_stats(query, sport: str, time_frame: str) -> None:
 
 
 async def _do_disconnect(query) -> None:
+    from app.strava.auth import deauthorize
+    from app.crypto import decrypt
+
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(User).where(User.telegram_user_id == query.from_user.id)
@@ -1058,6 +1061,15 @@ async def _do_disconnect(query) -> None:
         if not user:
             await query.edit_message_text("Account not found.")
             return
+
+        # Revoke Strava access before nulling local tokens
+        if user.strava_access_token:
+            try:
+                plaintext_token = decrypt(user.strava_access_token)
+                await deauthorize(plaintext_token)
+            except Exception as exc:
+                logger.warning("Strava deauthorize failed (continuing): %s", exc)
+
         user.strava_access_token    = None
         user.strava_refresh_token   = None
         user.strava_token_expires_at = None
