@@ -329,7 +329,7 @@ def _format_ride(s: dict) -> list[str]:
     return [
         f"Rides: {s['rides']}",
         f"Distance: {s['distance_km']:.2f} km",
-        f"Moving Time: {s['moving_time']} hours",
+        f"Moving Time: {s['moving_time']}",
         f"Elevation Gain: {s['elevation_m']:,} m",
         f"Biggest Ride: {s['biggest_ride_km']:.2f} km",
         f"50's: {s['fifties']}",
@@ -341,7 +341,7 @@ def _format_ride_endurance(s: dict) -> list[str]:
     return [
         f"Rides: {s['rides']}",
         f"Distance: {s['distance_km']:.2f} km",
-        f"Moving Time: {s['moving_time']} hours",
+        f"Moving Time: {s['moving_time']}",
         f"Elevation Gain: {s['elevation_m']:,} m",
         f"Biggest Ride: {s['biggest_ride_km']:.2f} km",
         f"200's: {s['two_hundreds']}",
@@ -359,8 +359,8 @@ def _format_run(s: dict) -> list[str]:
         f"Indoor Runs: {s['indoor_runs']}",
         f"Distance: {s['distance_km']:.2f} km",
         f"Indoor Distance: {s['indoor_distance_km']:.2f} km",
-        f"Moving Time: {s['moving_time']} hours",
-        f"Indoor Time: {s['indoor_time']} hours",
+        f"Moving Time: {s['moving_time']}",
+        f"Indoor Time: {s['indoor_time']}",
         f"Elevation Gain: {s['elevation_m']:,} m",
         f"Biggest Run: {s['biggest_run_km']:.2f} km",
         f"5 Km's: {s['fives']}",
@@ -372,11 +372,13 @@ def _format_run(s: dict) -> list[str]:
 
 
 def _format_swim(s: dict) -> list[str]:
+    distance_m = round(s['distance_km'] * 1000)
+    biggest_m = round(s['biggest_swim_km'] * 1000)
     return [
         f"Swims: {s['swims']}",
-        f"Distance: {s['distance_km']:.2f} km",
-        f"Moving Time: {s['moving_time']} hours",
-        f"Biggest Swim: {s['biggest_swim_km']:.2f} km",
+        f"Distance: {s['distance_km']:.2f} km ({distance_m:,} m)",
+        f"Moving Time: {s['moving_time']}",
+        f"Biggest Swim: {s['biggest_swim_km']:.2f} km ({biggest_m:,} m)",
         f"500's: {s['five_hundreds']}",
         f"1000's: {s['thousands']}",
         f"1500's: {s['fifteen_hundreds']}",
@@ -389,7 +391,7 @@ def _format_walk(s: dict) -> list[str]:
     return [
         f"Walks: {s['walks']}",
         f"Distance: {s['distance_km']:.2f} km",
-        f"Moving Time: {s['moving_time']} hours",
+        f"Moving Time: {s['moving_time']}",
         f"Elevation Gain: {s['elevation_m']:,} m",
         f"Biggest Walk: {s['biggest_walk_km']:.2f} km",
         f"2 Km's: {s['twos']}",

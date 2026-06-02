@@ -149,27 +149,61 @@ async def sync_user_activities(
     *,
     user_id: str,
     full: bool = False,
+    notify_telegram_id: int | None = None,
     _retry: int = 0,
 ) -> None:
     """Sync Strava activities for a user.
 
     Args:
-        full: When True, re-fetches the entire Strava history regardless of
-              what is already in the DB (use for /fullsync or first connect).
-              When False (default), only fetches activities since the latest
-              stored date — much faster for day-to-day use.
+        full:               When True, re-fetches the entire Strava history
+                            (use for /fullsync or first connect).
+        notify_telegram_id: If set, DM this Telegram user ID when the sync
+                            completes (or fails after all retries).
 
     Idempotent — uses ON CONFLICT DO NOTHING.
     Retries up to 2 times with exponential back-off on failure.
     """
     try:
         await _sync_user_activities_async(user_id=user_id, full=full)
+        if notify_telegram_id:
+            msg = (
+                "✅ *Full sync complete\\!* Your entire Strava history has been "
+                "rebuilt\\. Use /stats to see your updated numbers\\."
+                if full else
+                "✅ *Sync complete\\!* Use /stats to see your latest numbers\\."
+            )
+            try:
+                bot = TelegramBot(token=settings.telegram_bot_token)
+                async with bot:
+                    await bot.send_message(
+                        chat_id=notify_telegram_id,
+                        text=msg,
+                        parse_mode="MarkdownV2",
+                    )
+            except Exception:
+                logger.warning("sync completion DM failed for telegram_id=%s", notify_telegram_id)
     except Exception:
         logger.exception("sync_user_activities failed for user_id=%s", user_id)
         if _retry < 1:
             delay = 60 * (2 ** _retry)   # 60s, 120s
             await asyncio.sleep(delay)
-            await sync_user_activities(user_id=user_id, full=full, _retry=_retry + 1)
+            await sync_user_activities(
+                user_id=user_id,
+                full=full,
+                notify_telegram_id=notify_telegram_id,
+                _retry=_retry + 1,
+            )
+        elif notify_telegram_id:
+            try:
+                bot = TelegramBot(token=settings.telegram_bot_token)
+                async with bot:
+                    await bot.send_message(
+                        chat_id=notify_telegram_id,
+                        text="⚠️ Sync ran into an issue\\. Please try again in a moment\\.",
+                        parse_mode="MarkdownV2",
+                    )
+            except Exception:
+                logger.warning("sync failure DM failed for telegram_id=%s", notify_telegram_id)
 
 
 async def _sync_user_activities_async(user_id: str, full: bool = False) -> None:

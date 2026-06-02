@@ -172,10 +172,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if user.strava_athlete_id:
         athlete_name = user.strava_athlete_name or name
         await update.message.reply_text(
-            f"👋 Welcome *{name}*! Its great to have you back.\n\n"
-            f"Your Strava account is connected as *{athlete_name}*.\n\n"
-            f"Use the menu below or type /help to see all commands.",
-            parse_mode="Markdown",
+            f"👋 Welcome back, *{_escape_md(name)}*\\!\n\n"
+            f"Connected as *{_escape_md(athlete_name)}*\\.\n\n"
+            f"Use the menu below or type /help to see all commands\\.",
+            parse_mode="MarkdownV2",
             reply_markup=nav_keyboard(),
         )
         await update.message.reply_text(
@@ -288,11 +288,14 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     import asyncio
     from app.tasks import sync_user_activities
-    asyncio.ensure_future(sync_user_activities(user_id=str(user.id)))
+    asyncio.ensure_future(sync_user_activities(
+        user_id=str(user.id),
+        notify_telegram_id=update.effective_user.id,
+    ))
 
     await update.message.reply_text(
         "⏳ *Sync started\\!*\n\n"
-        "Fetching your latest Strava activities\\. Use /stats in a moment to see updated numbers\\.\n\n"
+        "Fetching your latest Strava activities\\. I'll message you when it's done\\.\n\n"
         "_If your stats still look off after syncing, use /fullsync to rebuild your full history\\._",
         parse_mode="MarkdownV2",
     )
@@ -322,14 +325,18 @@ async def cmd_fullsync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     import asyncio
     from app.tasks import sync_user_activities
-    asyncio.ensure_future(sync_user_activities(user_id=str(user.id), full=True))
+    asyncio.ensure_future(sync_user_activities(
+        user_id=str(user.id),
+        full=True,
+        notify_telegram_id=update.effective_user.id,
+    ))
 
     await update.message.reply_text(
         "🔄 *Full sync started\\!*\n\n"
         "Re\\-fetching your *entire* Strava history and removing any activities "
         "you've deleted on Strava\\.\n\n"
         "This may take a minute or two for large accounts\\. "
-        "Use /stats once it completes to see your corrected numbers\\.",
+        "I'll message you when it's done\\.",
         parse_mode="MarkdownV2",
     )
 
@@ -349,7 +356,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await update.message.reply_text(
-        "📊 *Your Stats*\n\nChoose an activity type to view your stats:",
+        "📊 *Stats*\n\nChoose an activity type:",
         parse_mode="Markdown",
         reply_markup=stats_sport_keyboard(),
     )
@@ -1032,7 +1039,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     elif data == "stats:menu":
         await query.edit_message_text(
-            "📊 *Your Stats*\n\nChoose an activity type to view your stats:",
+            "📊 *Stats*\n\nChoose an activity type:",
             parse_mode="Markdown",
             reply_markup=stats_sport_keyboard(),
         )

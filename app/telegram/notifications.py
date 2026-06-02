@@ -47,7 +47,7 @@ from datetime import datetime, timezone
 from telegram import Bot
 
 from app.models import Activity, User
-from app.utils import format_strava_date, meters_to_km, ms_to_kmh, seconds_to_hhmmss
+from app.utils import format_friendly_date, meters_to_km, ms_to_kmh, seconds_to_hhmmss
 
 logger = logging.getLogger(__name__)
 
@@ -116,11 +116,11 @@ async def format_activity_notification(
     # Header
     # ------------------------------------------------------------------
     lines: list[str] = [
-        f"{emoji} *Great work {first_name}! on your New Activity!*",
+        f"{emoji} *Nice one, {first_name} — new activity logged!*",
         _SEPARATOR,
-        f"Athlete Name: {athlete_name}",
+        f"Athlete: {athlete_name}",
         f"Activity: {activity_link}",
-        f"Activity Date: {format_strava_date(activity.get('start_date'))}",
+        f"Date: {format_friendly_date(activity.get('start_date'))}",
     ]
 
     # ------------------------------------------------------------------

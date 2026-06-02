@@ -109,6 +109,34 @@ def format_date(dt: datetime | None) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
+def format_friendly_date(date_input: str | datetime | None) -> str:
+    """Return a human-readable date string like ``Tue, 3 Jun 2026``.
+
+    Accepts a Strava ISO string (``"2026-06-03T07:30:00Z"``) or a datetime.
+    Returns ``"N/A"`` for falsy input.
+
+    Examples::
+
+        >>> format_friendly_date("2026-06-03T07:30:00Z")
+        'Tue, 3 Jun 2026'
+    """
+    if not date_input:
+        return "N/A"
+    if isinstance(date_input, str):
+        s = date_input
+        if s.endswith("Z"):
+            s = s[:-1]
+        elif s.endswith("+00:00"):
+            s = s[:-6]
+        try:
+            dt = datetime.fromisoformat(s).replace(tzinfo=timezone.utc)
+        except ValueError:
+            return str(date_input)
+    else:
+        dt = date_input
+    return dt.strftime("%a, %-d %b %Y")
+
+
 def format_strava_date(date_input: str | datetime | None) -> str:
     """Normalise a Strava date string or datetime to ``YYYY-MM-DDTHH:MM:SS.000Z``.
 
