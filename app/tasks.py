@@ -228,10 +228,13 @@ async def _sync_user_activities_async(user_id: str, full: bool = False) -> None:
             "sync_user_activities: fetched %s activities for user_id=%s",
             len(activities), user_id,
         )
-        if not activities:
-            return
 
+        # Upsert all activities returned by Strava
+        strava_ids: set[int] = set()
         for data in activities:
+            strava_id = int(data["id"])
+            strava_ids.add(strava_id)
+
             activity_date = _parse_strava_date(
                 data.get("start_date") or data.get("start_date_local")
             )
@@ -242,7 +245,7 @@ async def _sync_user_activities_async(user_id: str, full: bool = False) -> None:
             stmt = (
                 pg_insert(Activity)
                 .values(
-                    strava_activity_id=int(data["id"]),
+                    strava_activity_id=strava_id,
                     user_id=user.id,
                     activity_name=data.get("name") or "Unnamed Activity",
                     activity_type=data.get("sport_type") or data.get("type") or "Unknown",
@@ -262,10 +265,38 @@ async def _sync_user_activities_async(user_id: str, full: bool = False) -> None:
             )
             await db.execute(stmt)
 
+        # On a full sync, reconcile deletions — remove any DB rows whose
+        # strava_activity_id is no longer present in the API response.
+        # This catches activities deleted on Strava while the bot was offline
+        # or before the webhook subscription was active.
+        deleted_count = 0
+        if full and strava_ids:
+            db_ids_result = await db.execute(
+                select(Activity.strava_activity_id)
+                .where(Activity.user_id == user.id)
+            )
+            db_ids: set[int] = {row[0] for row in db_ids_result.fetchall()}
+            orphaned = db_ids - strava_ids
+            if orphaned:
+                from sqlalchemy import delete as sa_delete
+                await db.execute(
+                    sa_delete(Activity).where(
+                        and_(
+                            Activity.user_id == user.id,
+                            Activity.strava_activity_id.in_(orphaned),
+                        )
+                    )
+                )
+                deleted_count = len(orphaned)
+                logger.info(
+                    "sync_user_activities: removed %s stale activities for user_id=%s: %s",
+                    deleted_count, user_id, orphaned,
+                )
+
         await db.commit()
         logger.info(
-            "sync_user_activities: saved %s activities for user_id=%s",
-            len(activities), user_id,
+            "sync_user_activities: upserted=%s deleted=%s for user_id=%s",
+            len(activities), deleted_count, user_id,
         )
 
 

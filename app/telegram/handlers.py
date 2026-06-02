@@ -297,11 +297,10 @@ async def cmd_fullsync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     await update.message.reply_text(
         "🔄 *Full sync started\\!*\n\n"
-        "Re\\-fetching your *entire* Strava activity history\\. "
-        "This may take several minutes for large accounts\\.\n\n"
-        "Use /stats once it finishes to see your updated numbers\\.\n\n"
-        "_You only need this if your statistics look incorrect\\. "
-        "For day\\-to\\-day use, /sync is faster and sufficient\\._",
+        "Re\\-fetching your *entire* Strava history and removing any activities "
+        "you've deleted on Strava\\.\n\n"
+        "This may take a minute or two for large accounts\\. "
+        "Use /stats once it completes to see your corrected numbers\\.",
         parse_mode="MarkdownV2",
     )
 
