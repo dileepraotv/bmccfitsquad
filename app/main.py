@@ -2,7 +2,8 @@
 
 Routes
 ------
-  GET  /health              — liveness probe (DB + Redis status)
+  GET  /ping                — instant keep-alive (UptimeRobot pings this every 5 min)
+  GET  /health              — liveness probe with cached DB check
   GET  /strava/webhook      — Strava hub challenge verification
   POST /strava/webhook      — Strava activity / athlete events
   GET  /strava/callback     — OAuth redirect from Strava after user approval
@@ -131,22 +132,36 @@ app.include_router(telegram_router, prefix="/telegram", tags=["telegram"])
 
 
 # ---------------------------------------------------------------------------
-# Health check
+# Keep-alive + health endpoints
 # ---------------------------------------------------------------------------
+# Render free tier spins down after 15 min of inactivity.
+# UptimeRobot (free) is configured to ping /ping every 5 minutes — this
+# endpoint does zero DB/Redis work so it responds instantly even on a
+# cold-start path and does not consume any free-tier quota.
+#
+# /health does a real (cached) DB check for actual liveness monitoring.
 
-# Cache DB health result for 30 s so Railway's ~10 s probe interval doesn't
-# hammer Postgres with a SELECT 1 on every single probe.
+@app.get("/ping", tags=["ops"], summary="Keep-alive ping — zero DB/Redis touch")
+async def ping():
+    """Instant 200 response used by UptimeRobot to prevent Render sleep.
+
+    No database or Redis calls — returns immediately so the 5-minute
+    UptimeRobot ping never wakes a sleeping instance slowly.
+    """
+    return {"status": "ok"}
+
+
+# Cache DB health result for 30 s so platform health probes don't
+# hammer Postgres on every single check.
 _health_cache: dict = {"db": True, "ts": 0.0}
 _HEALTH_CACHE_TTL = 30.0   # seconds
 
 
-@app.get("/health", tags=["ops"], summary="Liveness probe")
+@app.get("/health", tags=["ops"], summary="Liveness probe with DB check")
 async def health():
-    """Return process health with a cached DB check.
+    """Return process + database health with a 30-second cached DB check.
 
-    Railway probes this endpoint every ~10 s.  We cache the DB connectivity
-    result for 30 s so we generate at most ~2,880 DB pings/day instead of
-    ~8,640.  Redis is NOT checked here — it was verified at startup and its
+    Redis is NOT checked here — it was verified at startup and its
     single connection is maintained by the pool.
     """
     now = time.monotonic()
