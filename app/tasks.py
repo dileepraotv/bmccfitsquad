@@ -148,29 +148,38 @@ async def _send_activity_notification_async(
 async def sync_user_activities(
     *,
     user_id: str,
+    full: bool = False,
     _retry: int = 0,
 ) -> None:
-    """Back-fill full Strava activity history for a user.
+    """Sync Strava activities for a user.
+
+    Args:
+        full: When True, re-fetches the entire Strava history regardless of
+              what is already in the DB (use for /fullsync or first connect).
+              When False (default), only fetches activities since the latest
+              stored date — much faster for day-to-day use.
 
     Idempotent — uses ON CONFLICT DO NOTHING.
     Retries up to 2 times with exponential back-off on failure.
     """
     try:
-        await _sync_user_activities_async(user_id=user_id)
+        await _sync_user_activities_async(user_id=user_id, full=full)
     except Exception:
         logger.exception("sync_user_activities failed for user_id=%s", user_id)
         if _retry < 1:
             delay = 60 * (2 ** _retry)   # 60s, 120s
             await asyncio.sleep(delay)
-            await sync_user_activities(user_id=user_id, _retry=_retry + 1)
+            await sync_user_activities(user_id=user_id, full=full, _retry=_retry + 1)
 
 
-async def _sync_user_activities_async(user_id: str) -> None:
-    """Incrementally sync Strava activities for a user.
+async def _sync_user_activities_async(user_id: str, full: bool = False) -> None:
+    """Sync Strava activities for a user.
 
-    On the first sync (no activities in DB) fetches the full history.
-    On subsequent syncs fetches only activities since the most recent
-    stored date — dramatically reducing Strava API calls and memory usage.
+    full=False (default / /sync): incremental — fetches only since the most
+    recent stored activity.  Fast and cheap on Strava API quota.
+
+    full=True (/fullsync or first connect): fetches entire history.
+    Use only when the user reports inaccurate statistics.
     """
     async with AsyncSessionLocal() as db:
         user: User | None = await db.get(User, uuid.UUID(user_id))
@@ -183,27 +192,33 @@ async def _sync_user_activities_async(user_id: str) -> None:
             )
             return
 
-        # Determine how far back to fetch — incremental unless no data exists
-        latest_result = await db.execute(
-            select(Activity.activity_date)
-            .where(Activity.user_id == user.id)
-            .order_by(Activity.activity_date.desc())
-            .limit(1)
-        )
-        latest_row = latest_result.scalar_one_or_none()
+        # Determine the `after` timestamp for Strava API pagination
+        after_ts: int | None = None
 
-        if latest_row is not None:
-            # Fetch from 1 day before the latest stored activity to catch any
-            # edge cases where an activity was saved out of chronological order
-            after_ts = int(latest_row.timestamp()) - 86_400
-            logger.info(
-                "sync_user_activities: incremental from %s for user_id=%s",
-                latest_row.isoformat(), user_id,
+        if not full:
+            latest_result = await db.execute(
+                select(Activity.activity_date)
+                .where(Activity.user_id == user.id)
+                .order_by(Activity.activity_date.desc())
+                .limit(1)
             )
+            latest_row = latest_result.scalar_one_or_none()
+
+            if latest_row is not None:
+                # Go back 1 day to catch activities saved slightly out of order
+                after_ts = int(latest_row.timestamp()) - 86_400
+                logger.info(
+                    "sync_user_activities: incremental from %s for user_id=%s",
+                    latest_row.isoformat(), user_id,
+                )
+            else:
+                # No data at all — force full even if not requested
+                logger.info(
+                    "sync_user_activities: no existing data, full fetch for user_id=%s", user_id
+                )
         else:
-            after_ts = None   # full history on first connect
             logger.info(
-                "sync_user_activities: full history fetch for user_id=%s", user_id
+                "sync_user_activities: FULL re-fetch requested for user_id=%s", user_id
             )
 
         access_token = await get_valid_access_token(db, user)

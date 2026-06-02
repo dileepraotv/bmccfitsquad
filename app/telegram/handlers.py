@@ -83,6 +83,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("connect",       cmd_connect,       filters=_priv))
     app.add_handler(CommandHandler("disconnect",    cmd_disconnect,    filters=_priv))
     app.add_handler(CommandHandler("sync",          cmd_sync,          filters=_priv))
+    app.add_handler(CommandHandler("fullsync",      cmd_fullsync,      filters=_priv))
     app.add_handler(CommandHandler("stats",         cmd_stats,         filters=_priv))
     app.add_handler(CommandHandler("goals",         cmd_goals,         filters=_priv))
     app.add_handler(CommandHandler("cancel",        cmd_cancel,        filters=_priv))
@@ -195,20 +196,24 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "*BMCC FitSquad — Available Commands*\n\n"
+        "*BMCC FitSquad — All Commands*\n\n"
         "🔗 *Strava*\n"
         "/connect — Link your Strava account\n"
         "/disconnect — Unlink your Strava account\n"
-        "/sync — Sync your full Strava activity history\n\n"
-        "📊 *Stats & Goals*\n"
-        "/stats — View activity stats by sport and period\n"
-        "/goals — Add, delete or check your fitness goals\n\n"
+        "/sync — Fetch latest activities \\(fast, day\\-to\\-day use\\)\n"
+        "/fullsync — Rebuild your full history \\(use only if stats look wrong\\)\n\n"
+        "📊 *Stats \\& Goals*\n"
+        "/stats — View activity stats by sport and time period\n"
+        "/goals — Set, delete or check your fitness goals\n\n"
         "🏆 *Group*\n"
         "/leaderboard — Monthly distance leaderboard\n\n"
         "💬 *Other*\n"
-        "/quote — Get a random motivational quote\n"
-        "/start — Show the welcome message\n"
-        "/help — Show this message\n\n"
+        "/quote — Random motivational quote\n"
+        "/cancel — Cancel any in\\-progress action\n"
+        "/start — Welcome message and main menu\n"
+        "/help — Show this list\n\n"
+        "💡 *Tip:* New activities sync automatically when you save them on Strava\\. "
+        "Use /sync only if a recent activity is missing\\.\n\n"
         "🌐 [www\\.beyondmiles\\.cc](http://www.beyondmiles.cc) \\| 📸 @beyondmilescc",
         parse_mode="MarkdownV2",
         disable_web_page_preview=True,
@@ -245,7 +250,7 @@ async def cmd_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Manually trigger a full Strava activity history sync."""
+    """Incremental sync — fetches only new activities since the last stored one."""
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(User).where(User.telegram_user_id == update.effective_user.id)
@@ -264,8 +269,39 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     asyncio.ensure_future(sync_user_activities(user_id=str(user.id)))
 
     await update.message.reply_text(
-        "⏳ Sync started\\! Your stats will update shortly — this may take a minute for large accounts\\. "
-        "Use /stats to check your numbers once it completes\\.",
+        "⏳ *Sync started\\!*\n\n"
+        "Fetching your latest Strava activities\\. Use /stats in a moment to see updated numbers\\.\n\n"
+        "_If your stats still look off after syncing, use /fullsync to rebuild your full history\\._",
+        parse_mode="MarkdownV2",
+    )
+
+
+async def cmd_fullsync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Force a complete re-fetch of the entire Strava activity history."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(User).where(User.telegram_user_id == update.effective_user.id)
+        )
+        user = result.scalar_one_or_none()
+
+    if not user or not user.strava_athlete_id:
+        await update.message.reply_text(
+            "You haven't connected your Strava account yet\\. Use /connect to get started\\.",
+            parse_mode="MarkdownV2",
+        )
+        return
+
+    import asyncio
+    from app.tasks import sync_user_activities
+    asyncio.ensure_future(sync_user_activities(user_id=str(user.id), full=True))
+
+    await update.message.reply_text(
+        "🔄 *Full sync started\\!*\n\n"
+        "Re\\-fetching your *entire* Strava activity history\\. "
+        "This may take several minutes for large accounts\\.\n\n"
+        "Use /stats once it finishes to see your updated numbers\\.\n\n"
+        "_You only need this if your statistics look incorrect\\. "
+        "For day\\-to\\-day use, /sync is faster and sufficient\\._",
         parse_mode="MarkdownV2",
     )
 
@@ -1025,7 +1061,7 @@ async def _send_stats(query, sport: str, time_frame: str) -> None:
         if total_activities == 0 and user.strava_athlete_id:
             import asyncio
             from app.tasks import sync_user_activities
-            asyncio.ensure_future(sync_user_activities(user_id=str(user.id)))
+            asyncio.ensure_future(sync_user_activities(user_id=str(user.id), full=True))
             await query.edit_message_text(
                 "⏳ No activity data found — syncing your Strava history now\\.\n\n"
                 "This may take a minute\\. Please use /stats again in a moment\\.",

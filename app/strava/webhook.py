@@ -274,8 +274,8 @@ async def strava_oauth_callback(
     from app.tasks import sync_user_activities
 
     user_id_str = str(user.id)
-    asyncio.ensure_future(sync_user_activities(user_id=user_id_str))
-    logger.info("History sync scheduled for user_id=%s", user_id_str)
+    asyncio.ensure_future(sync_user_activities(user_id=user_id_str, full=True))
+    logger.info("Full history sync scheduled for user_id=%s", user_id_str)
 
     # ------------------------------------------------------------------
     # Notify the user in Telegram

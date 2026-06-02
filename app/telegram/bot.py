@@ -107,12 +107,17 @@ async def setup_bot() -> None:
     # Register bot command menu (shown in the / menu inside Telegram)
     # ------------------------------------------------------------------
     await _application.bot.set_my_commands([
-        BotCommand("start",      "Welcome message and main menu"),
-        BotCommand("stats",      "View activity stats by sport and period"),
-        BotCommand("goals",      "Add, delete or check fitness goals"),
-        BotCommand("connect",    "Link your Strava account"),
-        BotCommand("sync",       "Sync your full Strava activity history"),
-        BotCommand("help",       "Show all available commands"),
+        BotCommand("start",        "Welcome message and main menu"),
+        BotCommand("stats",        "View activity stats by sport and period"),
+        BotCommand("goals",        "Set, delete or check your fitness goals"),
+        BotCommand("sync",         "Fetch latest activities (fast, day-to-day)"),
+        BotCommand("fullsync",     "Rebuild full history (use if stats look wrong)"),
+        BotCommand("connect",      "Link your Strava account"),
+        BotCommand("disconnect",   "Unlink your Strava account"),
+        BotCommand("leaderboard",  "Monthly distance leaderboard"),
+        BotCommand("quote",        "Random motivational quote"),
+        BotCommand("cancel",       "Cancel any in-progress action"),
+        BotCommand("help",         "Show all available commands"),
     ])
     logger.info("Telegram bot command menu registered")
 
