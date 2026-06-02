@@ -1,7 +1,0 @@
-# nixpacks reads .python-version (3.11) to select the interpreter and handles
-# pip installation internally — do NOT override [phases.install] here because
-# the Nix python311 package ships without pip and nixpacks' own provider is
-# the only reliable way to bootstrap it in this environment.
-
-[start]
-cmd = "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
