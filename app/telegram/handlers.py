@@ -159,7 +159,14 @@ def _escape_md(text: str) -> str:
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     from app.strava.auth import build_authorization_url, generate_oauth_state
 
-    user = await _get_or_create_user(update)
+    try:
+        user = await _get_or_create_user(update)
+    except Exception:
+        logger.exception("cmd_start: DB error")
+        await update.message.reply_text(
+            "Sorry, I couldn't reach the database right now. Please try again in a moment."
+        )
+        return
     name = update.effective_user.first_name or "there"
 
     if user.strava_athlete_id:
@@ -223,9 +230,17 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     from app.strava.auth import build_authorization_url, generate_oauth_state
 
-    await _get_or_create_user(update)
-    state = await generate_oauth_state(update.effective_user.id)
-    auth_url = build_authorization_url(state)
+    try:
+        await _get_or_create_user(update)
+        state = await generate_oauth_state(update.effective_user.id)
+        auth_url = build_authorization_url(state)
+    except Exception:
+        logger.exception("cmd_connect: DB or Redis error")
+        await update.message.reply_text(
+            "Sorry, I couldn't generate your Strava link right now. "
+            "Please try again in a moment."
+        )
+        return
 
     await update.message.reply_text(
         "Tap *Connect Strava* below to link your account\\.\n\n"
@@ -251,11 +266,18 @@ async def cmd_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Incremental sync — fetches only new activities since the last stored one."""
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(
-            select(User).where(User.telegram_user_id == update.effective_user.id)
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(User).where(User.telegram_user_id == update.effective_user.id)
+            )
+            user = result.scalar_one_or_none()
+    except Exception:
+        logger.exception("cmd_sync: DB error")
+        await update.message.reply_text(
+            "Sorry, I couldn't reach the database right now. Please try again in a moment."
         )
-        user = result.scalar_one_or_none()
+        return
 
     if not user or not user.strava_athlete_id:
         await update.message.reply_text(
@@ -278,11 +300,18 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_fullsync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Force a complete re-fetch of the entire Strava activity history."""
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(
-            select(User).where(User.telegram_user_id == update.effective_user.id)
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(User).where(User.telegram_user_id == update.effective_user.id)
+            )
+            user = result.scalar_one_or_none()
+    except Exception:
+        logger.exception("cmd_fullsync: DB error")
+        await update.message.reply_text(
+            "Sorry, I couldn't reach the database right now. Please try again in a moment."
         )
-        user = result.scalar_one_or_none()
+        return
 
     if not user or not user.strava_athlete_id:
         await update.message.reply_text(
@@ -1292,3 +1321,18 @@ async def handle_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.exception("Unhandled error for update %s", update, exc_info=context.error)
+    # Tell the user something went wrong instead of leaving them hanging.
+    if not isinstance(update, Update):
+        return
+    msg = (
+        update.message
+        or (update.callback_query and update.callback_query.message)
+    )
+    if msg:
+        try:
+            await msg.reply_text(
+                "Something went wrong on my end. Please try again in a moment.\n"
+                "If it keeps happening, the bot may be experiencing a service outage."
+            )
+        except Exception:
+            pass  # don't let error-handler itself raise
