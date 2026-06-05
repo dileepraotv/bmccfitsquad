@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import and_, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -41,6 +41,7 @@ from app.telegram.keyboards import (
     NAV_GOALS,
     NAV_HELP,
     NAV_STATS,
+    activity_edit_description_keyboard,
     confirm_keyboard,
     connect_strava_keyboard,
     main_menu_keyboard,
@@ -455,7 +456,13 @@ async def cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await r.delete(key_activity_edit(tg_id))
     _users_with_draft.discard(tg_id)
-    await _push_activity_update(update, draft["activity_id"], draft["name"], "")
+    await _push_activity_update(
+        telegram_user_id=tg_id,
+        reply_message=update.message,
+        activity_id=draft["activity_id"],
+        name=draft["name"],
+        description="",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1003,7 +1010,20 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.answer()
     data = query.data or ""
 
-    # Activity edit
+    # Activity edit — description step (must be before activity:edit:<id>)
+    if data == "activity:desc_skip":
+        await _handle_activity_desc_skip(query)
+        return
+    if data == "activity:desc_cancel":
+        await _handle_activity_desc_cancel(query)
+        return
+    if data == "activity:dismiss":
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        return
+
     if data.startswith("activity:edit:"):
         await _handle_activity_edit_start(query, data)
         return
@@ -1160,6 +1180,53 @@ async def _do_disconnect(query) -> None:
 _ACTIVITY_EDIT_TTL = 600  # 10 minutes
 
 
+async def _handle_activity_desc_skip(query) -> None:
+    """Inline 'Skip description' — same as /skip during description step."""
+    from app.redis_client import get_redis, key_activity_edit
+
+    tg_id = query.from_user.id
+    r = await get_redis()
+    raw = await r.get(key_activity_edit(tg_id))
+    if not raw:
+        await query.message.reply_text("Nothing to skip.")
+        return
+    draft = _json.loads(raw)
+    if draft.get("step") != "description":
+        await query.message.reply_text("Nothing to skip at this step.")
+        return
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await r.delete(key_activity_edit(tg_id))
+    _users_with_draft.discard(tg_id)
+    await _push_activity_update(
+        telegram_user_id=tg_id,
+        reply_message=query.message,
+        activity_id=draft["activity_id"],
+        name=draft["name"],
+        description="",
+    )
+
+
+async def _handle_activity_desc_cancel(query) -> None:
+    """Inline 'Cancel' during activity edit (any step with a draft)."""
+    from app.redis_client import get_redis, key_activity_edit
+
+    tg_id = query.from_user.id
+    r = await get_redis()
+    if not await r.get(key_activity_edit(tg_id)):
+        await query.message.reply_text("Nothing to cancel.")
+        return
+    await r.delete(key_activity_edit(tg_id))
+    _users_with_draft.discard(tg_id)
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await query.message.reply_text("Activity update cancelled.")
+
+
 async def _handle_activity_edit_start(query, data: str) -> None:
     """Callback: user tapped 'Update Activity' on a notification."""
     activity_id = int(data.split(":")[-1])
@@ -1193,8 +1260,6 @@ async def _handle_activity_edit_text(update: Update) -> bool:
         return False
 
     from app.redis_client import get_redis, key_activity_edit
-    from app.strava.auth import get_valid_access_token
-    from app.strava.client import update_activity
 
     r = await get_redis()
     raw = await r.get(key_activity_edit(tg_id))
@@ -1213,8 +1278,9 @@ async def _handle_activity_edit_text(update: Update) -> bool:
         await update.message.reply_text(
             "Got it! Now enter the *Activity Description*:\n\n"
             "_Example: It was great riding the Nandi BRM from Bangalore Randonneurs_\n\n"
-            "Type /skip to leave the description unchanged, or /cancel to abort.",
+            "Use the buttons below, or type /skip or /cancel.",
             parse_mode="Markdown",
+            reply_markup=activity_edit_description_keyboard(),
         )
         return True
 
@@ -1222,14 +1288,22 @@ async def _handle_activity_edit_text(update: Update) -> bool:
         description = text
         await r.delete(key_activity_edit(tg_id))
         _users_with_draft.discard(tg_id)
-        await _push_activity_update(update, draft["activity_id"], draft["name"], description)
+        await _push_activity_update(
+            telegram_user_id=tg_id,
+            reply_message=update.message,
+            activity_id=draft["activity_id"],
+            name=draft["name"],
+            description=description,
+        )
         return True
 
     return False
 
 
 async def _push_activity_update(
-    update: Update,
+    *,
+    telegram_user_id: int,
+    reply_message: Message,
     activity_id: int,
     name: str,
     description: str,
@@ -1240,11 +1314,11 @@ async def _push_activity_update(
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(
-            select(User).where(User.telegram_user_id == update.effective_user.id)
+            select(User).where(User.telegram_user_id == telegram_user_id)
         )
         user = result.scalar_one_or_none()
         if not user or not user.strava_athlete_id:
-            await update.message.reply_text(
+            await reply_message.reply_text(
                 "Could not update — Strava account not connected. Use /connect."
             )
             return
@@ -1270,15 +1344,16 @@ async def _push_activity_update(
             if isinstance(exc, httpx.HTTPStatusError):
                 detail = f" (HTTP {exc.response.status_code}: {exc.response.text[:200]})"
             logger.error("Failed to update Strava activity %s: %s%s", activity_id, exc, detail)
-            await update.message.reply_text(
+            await reply_message.reply_text(
                 f"❌ Could not update the activity on Strava.{detail or ' Please try again later.'}"
             )
             return
 
-    await update.message.reply_text(
+    desc_display = description if description else "_(unchanged)_"
+    await reply_message.reply_text(
         f"✅ *Activity updated on Strava!*\n\n"
         f"Name: *{name}*\n"
-        f"Description: {description}",
+        f"Description: {desc_display}",
         parse_mode="Markdown",
     )
 

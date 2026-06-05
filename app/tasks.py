@@ -111,7 +111,11 @@ async def _send_activity_notification_async(
                 InlineKeyboardButton(
                     "Update Activity",
                     callback_data=f"activity:edit:{activity_id}",
-                )
+                ),
+                InlineKeyboardButton(
+                    "Dismiss",
+                    callback_data="activity:dismiss",
+                ),
             ]])
 
         # Reuse a single Bot session for all sends in this notification cycle
