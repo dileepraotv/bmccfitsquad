@@ -94,6 +94,14 @@ def connect_strava_keyboard(auth_url: str) -> InlineKeyboardMarkup:
     ]])
 
 
+def activity_edit_description_keyboard() -> InlineKeyboardMarkup:
+    """Skip / Cancel while entering activity description (after name step)."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("Skip description", callback_data="activity:desc_skip"),
+        InlineKeyboardButton("Cancel", callback_data="activity:desc_cancel"),
+    ]])
+
+
 def activity_type_keyboard() -> InlineKeyboardMarkup:
     """Let the user pick an activity type when setting a goal."""
     return InlineKeyboardMarkup([
