@@ -2,7 +2,7 @@
 
 Routes
 ------
-  GET  /ping                — instant keep-alive (UptimeRobot pings this every 5 min)
+  GET|HEAD /ping            — instant keep-alive (UptimeRobot pings this every 5 min)
   GET  /health              — liveness probe with cached DB check
   GET  /strava/webhook      — Strava hub challenge verification
   POST /strava/webhook      — Strava activity / athlete events
@@ -141,7 +141,7 @@ app.include_router(telegram_router, prefix="/telegram", tags=["telegram"])
 #
 # /health does a real (cached) DB check for actual liveness monitoring.
 
-@app.get("/ping", tags=["ops"], summary="Keep-alive ping — zero DB/Redis touch")
+@app.api_route("/ping", methods=["GET", "HEAD"], tags=["ops"], summary="Keep-alive ping — zero DB/Redis touch")
 async def ping():
     """Instant 200 response used by UptimeRobot to prevent Render sleep.
 
