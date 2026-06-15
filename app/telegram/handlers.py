@@ -28,6 +28,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
+    ChatMemberHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -35,7 +36,7 @@ from telegram.ext import (
 )
 
 from app.database import AsyncSessionLocal
-from app.models import Activity, Goal, User
+from app.models import Activity, Goal, GroupChat, User
 from app.stats.calculator import calculate_stats, format_stats_message
 from app.telegram.keyboards import (
     NAV_GOALS,
@@ -94,6 +95,9 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("quote",         cmd_quote,         filters=_priv))
 
     app.add_handler(CallbackQueryHandler(handle_callback))
+
+    # Auto-register group chats when the bot is added to a group
+    app.add_handler(ChatMemberHandler(handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
 
     # Persistent nav bar — registered in group 0 BEFORE handle_unknown.
     # Within a single group PTB stops at the first matching handler, so these
@@ -1356,6 +1360,59 @@ async def _push_activity_update(
         f"Description: {desc_display}",
         parse_mode="Markdown",
     )
+
+
+# ---------------------------------------------------------------------------
+# Group chat registration
+# ---------------------------------------------------------------------------
+
+async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Auto-register or deactivate group chats as the bot is added/removed.
+
+    Fires whenever the bot's own membership status changes in any chat.
+    - Added to a group → upsert row in group_chats with notifications_enabled=True
+    - Removed from a group → set notifications_enabled=False
+    """
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    member = update.my_chat_member
+    if not member:
+        return
+
+    chat = member.chat
+    # Only care about group and supergroup chats
+    if chat.type not in ("group", "supergroup"):
+        return
+
+    new_status = member.new_chat_member.status  # "member", "administrator", "left", "kicked"
+    is_active = new_status in ("member", "administrator")
+
+    async with AsyncSessionLocal() as db:
+        if is_active:
+            stmt = (
+                pg_insert(GroupChat)
+                .values(
+                    id=chat.id,
+                    title=chat.title,
+                    notifications_enabled=True,
+                )
+                .on_conflict_do_update(
+                    index_elements=["id"],
+                    set_={"title": chat.title, "notifications_enabled": True},
+                )
+            )
+            await db.execute(stmt)
+            await db.commit()
+            logger.info("Group chat registered: chat_id=%s title=%r", chat.id, chat.title)
+        else:
+            result = await db.execute(
+                select(GroupChat).where(GroupChat.id == chat.id)
+            )
+            group = result.scalar_one_or_none()
+            if group:
+                group.notifications_enabled = False
+                await db.commit()
+            logger.info("Group chat deactivated: chat_id=%s", chat.id)
 
 
 # ---------------------------------------------------------------------------

@@ -338,16 +338,11 @@ async def _handle_activity_created(owner_id: int, activity_id: int) -> None:
     from sqlalchemy.dialects.postgresql import insert as pg_insert
     from app.tasks import send_activity_notification
 
-    # 1. Dedup
     redis = await get_redis()
     dedup_key = key_activity_seen(activity_id)
-    is_new = await redis.set(dedup_key, "1", ex=_DEDUP_TTL_SECONDS, nx=True)
-    if not is_new:
-        logger.info("Activity strava_id=%s already processing — duplicate ignored", activity_id)
-        return
 
     async with AsyncSessionLocal() as db:
-        # 2. User lookup
+        # 1. User lookup
         result = await db.execute(
             select(User).where(User.strava_athlete_id == owner_id)
         )
@@ -358,7 +353,6 @@ async def _handle_activity_created(owner_id: int, activity_id: int) -> None:
                 "No user for strava_athlete_id=%s — activity %s skipped",
                 owner_id, activity_id,
             )
-            await redis.delete(dedup_key)  # allow re-processing if user registers later
             return
 
         if not user.is_active:
@@ -366,10 +360,9 @@ async def _handle_activity_created(owner_id: int, activity_id: int) -> None:
                 "User telegram_id=%s inactive — activity %s skipped",
                 user.telegram_user_id, activity_id,
             )
-            await redis.delete(dedup_key)  # inactive users should not block dedup
             return
 
-        # 3. Token
+        # 2. Token
         try:
             access_token = await get_valid_access_token(db, user)
         except ValueError as exc:
@@ -379,12 +372,19 @@ async def _handle_activity_created(owner_id: int, activity_id: int) -> None:
             )
             return
 
-        # 4. Fetch from Strava
+        # 3. Fetch from Strava (do this before dedup so a cold-start fetch
+        #    failure doesn't permanently block retries via a stale dedup key)
         try:
             activity_data = await fetch_activity_detail(access_token, activity_id)
         except Exception as exc:
             logger.error("Strava fetch failed for activity_id=%s: %s", activity_id, exc)
-            await redis.delete(dedup_key)  # allow retry on next webhook delivery
+            return  # Strava will retry; no dedup key set so retry will proceed
+
+        # 4. Dedup — set only after a successful fetch so failures above are
+        #    always retryable. NX means concurrent deliveries are still safe.
+        is_new = await redis.set(dedup_key, "1", ex=_DEDUP_TTL_SECONDS, nx=True)
+        if not is_new:
+            logger.info("Activity strava_id=%s already processed — duplicate ignored", activity_id)
             return
 
         # 5. Upsert
