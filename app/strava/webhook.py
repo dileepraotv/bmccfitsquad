@@ -123,7 +123,7 @@ async def strava_webhook_event(request: Request):
     - ``activity / delete``  → remove the Activity row
     - ``athlete / update``   → handle deauthorisation
     """
-    import asyncio
+    from app.tasks import fire_and_forget
     payload = await request.json()
     logger.debug("Strava webhook payload received: %s", payload)
 
@@ -136,13 +136,13 @@ async def strava_webhook_event(request: Request):
     # Dispatch all work as fire-and-forget — never block the 200 response
     if object_type == "activity":
         if aspect_type == "create":
-            asyncio.ensure_future(_handle_activity_created(owner_id=owner_id, activity_id=object_id))
+            fire_and_forget(_handle_activity_created(owner_id=owner_id, activity_id=object_id))
         elif aspect_type == "update":
-            asyncio.ensure_future(_handle_activity_updated(activity_id=object_id, updates=updates))
+            fire_and_forget(_handle_activity_updated(activity_id=object_id, updates=updates))
         elif aspect_type == "delete":
-            asyncio.ensure_future(_handle_activity_deleted(activity_id=object_id))
+            fire_and_forget(_handle_activity_deleted(activity_id=object_id))
     elif object_type == "athlete" and aspect_type == "update":
-        asyncio.ensure_future(_handle_athlete_updated(athlete_id=owner_id, updates=updates))
+        fire_and_forget(_handle_athlete_updated(athlete_id=owner_id, updates=updates))
 
     # Always return 200 immediately — Strava will retry on any other status
     return {"status": "ok"}
@@ -270,11 +270,10 @@ async def strava_oauth_callback(
     # Kick off a background history sync
     # Fire full history sync in the background — returns immediately
     # ------------------------------------------------------------------
-    import asyncio
-    from app.tasks import sync_user_activities
+    from app.tasks import fire_and_forget, sync_user_activities
 
     user_id_str = str(user.id)
-    asyncio.ensure_future(sync_user_activities(user_id=user_id_str, full=True))
+    fire_and_forget(sync_user_activities(user_id=user_id_str, full=True))
     logger.info("Full history sync scheduled for user_id=%s", user_id_str)
 
     # ------------------------------------------------------------------
@@ -421,8 +420,8 @@ async def _handle_activity_created(owner_id: int, activity_id: int) -> None:
         user_id_str = str(user.id)
 
     # 6. Send notification (outside the DB session — uses its own session)
-    import asyncio
-    asyncio.ensure_future(
+    from app.tasks import fire_and_forget
+    fire_and_forget(
         send_activity_notification(activity_data=activity_data, user_id=user_id_str)
     )
     logger.info("Activity strava_id=%s saved; notification scheduled", activity_id)

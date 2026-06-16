@@ -37,6 +37,26 @@ from app.telegram.notifications import format_activity_notification
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+# ---------------------------------------------------------------------------
+# Task reference keeper — prevents GC of fire-and-forget tasks
+# ---------------------------------------------------------------------------
+# asyncio.ensure_future / create_task hold only a *weak* reference internally.
+# If nothing else holds a strong reference the task can be garbage-collected
+# before it runs, silently dropping work.  Store tasks here until they finish.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def fire_and_forget(coro) -> asyncio.Task:
+    """Schedule *coro* as a background task and keep a strong reference.
+
+    Use this everywhere instead of ``asyncio.ensure_future`` or
+    ``asyncio.create_task`` so tasks are never silently dropped by the GC.
+    """
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
 
 # ---------------------------------------------------------------------------
 # Task 1: send_activity_notification

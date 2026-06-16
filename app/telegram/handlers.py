@@ -291,9 +291,8 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    import asyncio
-    from app.tasks import sync_user_activities
-    asyncio.ensure_future(sync_user_activities(
+    from app.tasks import fire_and_forget, sync_user_activities
+    fire_and_forget(sync_user_activities(
         user_id=str(user.id),
         notify_telegram_id=update.effective_user.id,
     ))
@@ -328,9 +327,8 @@ async def cmd_fullsync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
-    import asyncio
-    from app.tasks import sync_user_activities
-    asyncio.ensure_future(sync_user_activities(
+    from app.tasks import fire_and_forget, sync_user_activities
+    fire_and_forget(sync_user_activities(
         user_id=str(user.id),
         full=True,
         notify_telegram_id=update.effective_user.id,
@@ -1118,9 +1116,8 @@ async def _send_stats(query, sport: str, time_frame: str) -> None:
         total_activities = activity_count_result.scalar_one() or 0
 
         if total_activities == 0 and user.strava_athlete_id:
-            import asyncio
-            from app.tasks import sync_user_activities
-            asyncio.ensure_future(sync_user_activities(user_id=str(user.id), full=True))
+            from app.tasks import fire_and_forget, sync_user_activities
+            fire_and_forget(sync_user_activities(user_id=str(user.id), full=True))
             await query.edit_message_text(
                 "⏳ No activity data found — syncing your Strava history now\\.\n\n"
                 "This may take a minute\\. Please use /stats again in a moment\\.",
