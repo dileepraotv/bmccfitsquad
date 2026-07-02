@@ -142,7 +142,7 @@ app.include_router(telegram_router, prefix="/telegram", tags=["telegram"])
 #
 # /health does a real (cached) DB check for actual liveness monitoring.
 
-@app.get("/cron/sync-all", tags=["ops"], summary="Catchup sync — finds activities missed by webhook")
+@app.api_route("/cron/sync-all", methods=["GET", "HEAD"], tags=["ops"], summary="Catchup sync — finds activities missed by webhook")
 async def cron_sync_all(secret: str = ""):
     """Called every 5 minutes by UptimeRobot as a reliability safety net.
 
