@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     # Encryption key for storing Strava tokens at rest (Fernet key, base64-encoded)
     encryption_key: str
 
+    # Cron endpoint secret — cron-job.org sends this as "Authorization: Bearer <secret>"
+    # to authenticate the /cron/sync-all keep-alive endpoint.
+    cron_secret: str = ""
+
     # Deployment
     app_env: str = "development"
     base_url: str  # Public HTTPS URL used to register webhooks, e.g. https://myapp.up.railway.app

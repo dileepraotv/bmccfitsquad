@@ -434,6 +434,144 @@ async def _build_goal_lines(db, user: User) -> list[str]:
     return lines
 
 
+# ---------------------------------------------------------------------------
+# Task 3: catchup_sync_all_users  (cron safety net)
+# ---------------------------------------------------------------------------
+
+# Must match webhook.py so both systems agree on dedup key lifetime.
+_DEDUP_TTL_SECONDS = 86_400  # 24 hours
+
+
+async def catchup_sync_all_users() -> dict:
+    """Sync the last 3 hours of Strava activities for every connected user.
+
+    This is the reliability safety net.  It is called every 30 minutes by
+    cron-job.org via GET /cron/sync-all and catches any activities that the
+    Strava webhook missed (e.g. service was sleeping on delivery, Render cold
+    start exceeded Strava's 2-second ack window, etc.).
+
+    Logic per activity:
+      1. Redis dedup key present → webhook already handled it → skip
+      2. Row exists in DB        → processed by an earlier cron run → skip
+      3. Neither                 → insert row + send Telegram notification
+
+    Returns a summary dict that is logged by the endpoint handler.
+    """
+    from app.redis_client import get_redis, key_activity_seen
+
+    users_processed = 0
+    new_activities = 0
+    errors = 0
+
+    # Look back 3 hours — generous enough to cover any retry window
+    cutoff_ts = int((datetime.now(timezone.utc) - timedelta(hours=3)).timestamp())
+
+    # Single query to get all active Strava-connected users
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(User).where(
+                User.is_active.is_(True),
+                User.strava_athlete_id.isnot(None),
+                User.strava_access_token.isnot(None),
+            )
+        )
+        users = result.scalars().all()
+
+    if not users:
+        logger.info("catchup_sync: no active connected users — nothing to do")
+        return {"users_processed": 0, "new_activities": 0, "errors": 0}
+
+    redis = await get_redis()
+    logger.info("catchup_sync: scanning %s user(s) for missed activities", len(users))
+
+    for user in users:
+        try:
+            # Refresh token inside its own session
+            async with AsyncSessionLocal() as db:
+                user_db = await db.get(User, user.id)
+                if not user_db:
+                    continue
+                access_token = await get_valid_access_token(db, user_db)
+                user_id_str = str(user_db.id)
+
+            activities = await fetch_activities(access_token, after=cutoff_ts)
+            users_processed += 1
+
+            for data in activities:
+                strava_id = int(data["id"])
+                dedup_key = key_activity_seen(strava_id)
+
+                # 1. Webhook already processed this activity
+                if await redis.exists(dedup_key):
+                    continue
+
+                # 2. Already in DB from a prior cron run (dedup key may have expired)
+                async with AsyncSessionLocal() as db:
+                    existing = await db.execute(
+                        select(Activity.id).where(
+                            Activity.strava_activity_id == strava_id
+                        )
+                    )
+                    if existing.scalar_one_or_none() is not None:
+                        continue
+
+                    # 3. Genuinely new — insert it
+                    activity_date = _parse_strava_date(
+                        data.get("start_date") or data.get("start_date_local")
+                    )
+                    is_indoor = (
+                        bool(data.get("trainer", False))
+                        or str(data.get("sport_type") or data.get("type", "")).startswith("Virtual")
+                    )
+                    stmt = (
+                        pg_insert(Activity)
+                        .values(
+                            strava_activity_id=strava_id,
+                            user_id=user.id,
+                            activity_name=data.get("name") or "Unnamed Activity",
+                            activity_type=data.get("sport_type") or data.get("type") or "Unknown",
+                            activity_date=activity_date,
+                            distance_meters=float(data.get("distance") or 0),
+                            moving_time_seconds=int(data.get("moving_time") or 0),
+                            elapsed_time_seconds=int(data.get("elapsed_time") or 0),
+                            elevation_gain=float(data.get("total_elevation_gain") or 0),
+                            average_speed=float(data.get("average_speed") or 0),
+                            max_speed=float(data.get("max_speed") or 0),
+                            average_heartrate=_optional_float(data.get("average_heartrate")),
+                            max_heartrate=_optional_float(data.get("max_heartrate")),
+                            calories=_optional_float(data.get("calories")),
+                            is_indoor=is_indoor,
+                        )
+                        .on_conflict_do_nothing(index_elements=["strava_activity_id"])
+                    )
+                    await db.execute(stmt)
+                    await db.commit()
+
+                # Mark as processed so any in-flight webhook retry is ignored
+                await redis.set(dedup_key, "1", ex=_DEDUP_TTL_SECONDS, nx=True)
+
+                # Send notification
+                fire_and_forget(send_activity_notification(
+                    activity_data=data,
+                    user_id=user_id_str,
+                ))
+                new_activities += 1
+                logger.info(
+                    "catchup_sync: notifying missed activity strava_id=%s user_id=%s",
+                    strava_id, user_id_str,
+                )
+
+        except Exception:
+            logger.exception("catchup_sync: error processing user_id=%s", user.id)
+            errors += 1
+
+    logger.info(
+        "catchup_sync complete — users=%s new_activities=%s errors=%s",
+        users_processed, new_activities, errors,
+    )
+    return {"users_processed": users_processed, "new_activities": new_activities, "errors": errors}
+
+
 def _parse_strava_date(date_str: str | None) -> datetime:
     if not date_str:
         return datetime.now(timezone.utc)

@@ -2,6 +2,7 @@
 
 Routes
 ------
+  GET      /cron/sync-all  — catchup sync for missed webhooks (cron-job.org, every 30 min)
   GET|HEAD /ping            — instant keep-alive (UptimeRobot pings this every 5 min)
   GET  /health              — liveness probe with cached DB check
   GET  /strava/webhook      — Strava hub challenge verification
@@ -25,7 +26,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
@@ -140,6 +141,27 @@ app.include_router(telegram_router, prefix="/telegram", tags=["telegram"])
 # cold-start path and does not consume any free-tier quota.
 #
 # /health does a real (cached) DB check for actual liveness monitoring.
+
+@app.get("/cron/sync-all", tags=["ops"], summary="Catchup sync — finds activities missed by webhook")
+async def cron_sync_all(request: Request):
+    """Called every 30 minutes by cron-job.org.
+
+    Scans the last 3 hours of Strava activity for every connected user and
+    sends notifications for anything not already processed by the webhook.
+    This is the reliability safety net — missed webhooks are picked up here
+    within 30 minutes regardless of why they were missed.
+
+    Protected by: Authorization: Bearer {CRON_SECRET}
+    """
+    from app.tasks import catchup_sync_all_users, fire_and_forget
+
+    auth = request.headers.get("Authorization", "")
+    if not settings.cron_secret or auth != f"Bearer {settings.cron_secret}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    fire_and_forget(catchup_sync_all_users())
+    return {"status": "scheduled"}
+
 
 @app.api_route("/ping", methods=["GET", "HEAD"], tags=["ops"], summary="Keep-alive ping — zero DB/Redis touch")
 async def ping():
