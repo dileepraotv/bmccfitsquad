@@ -26,7 +26,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
@@ -139,6 +139,33 @@ app.add_middleware(
 
 app.include_router(strava_router, prefix="/strava", tags=["strava"])
 app.include_router(telegram_router, prefix="/telegram", tags=["telegram"])
+
+# ---------------------------------------------------------------------------
+# /webhook  — top-level alias for the Strava webhook endpoints
+# ---------------------------------------------------------------------------
+# Strava subscription 359553 is registered at /webhook (not /strava/webhook).
+# These routes delegate directly to the same handlers so no re-registration
+# of the subscription is needed when switching base URL.
+
+from app.strava.webhook import strava_webhook_event, strava_webhook_verify  # noqa: E402
+
+
+@app.get("/webhook", tags=["strava"], include_in_schema=False)
+async def webhook_challenge_alias(
+    hub_mode: str = Query(alias="hub.mode"),
+    hub_verify_token: str = Query(alias="hub.verify_token"),
+    hub_challenge: str = Query(alias="hub.challenge"),
+):
+    return await strava_webhook_verify(
+        hub_mode=hub_mode,
+        hub_verify_token=hub_verify_token,
+        hub_challenge=hub_challenge,
+    )
+
+
+@app.post("/webhook", tags=["strava"], include_in_schema=False)
+async def webhook_event_alias(request: Request):
+    return await strava_webhook_event(request)
 
 
 # ---------------------------------------------------------------------------
