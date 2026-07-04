@@ -68,7 +68,16 @@ async def lifespan(app: FastAPI):
     await setup_bot()
     logger.info("Telegram bot ready (webhook registered)")
 
-    # 4. Verify Strava webhook subscription points to this deployment
+    # 4. Warn loudly if CRON_SECRET is not configured
+    if not settings.cron_secret:
+        logger.warning(
+            "CRON_SECRET env var is not set — /cron/sync-all will reject all requests. "
+            "Set CRON_SECRET in Render environment variables to enable the catchup sync."
+        )
+    else:
+        logger.info("Cron secret configured — /cron/sync-all is active")
+
+    # 5. Verify Strava webhook subscription points to this deployment
     try:
         from app.strava.client import view_webhook_subscription
         subs = await view_webhook_subscription()
@@ -142,6 +151,9 @@ app.include_router(telegram_router, prefix="/telegram", tags=["telegram"])
 #
 # /health does a real (cached) DB check for actual liveness monitoring.
 
+_cron_status: dict = {"last_run": None, "last_result": None, "run_count": 0}
+
+
 @app.api_route("/cron/sync-all", methods=["GET", "HEAD"], tags=["ops"], summary="Catchup sync — finds activities missed by webhook")
 async def cron_sync_all(secret: str = ""):
     """Called every 5 minutes by UptimeRobot as a reliability safety net.
@@ -153,13 +165,40 @@ async def cron_sync_all(secret: str = ""):
     Protected by: ?secret={CRON_SECRET} query parameter
     UptimeRobot URL: https://bmccfitsquad.onrender.com/cron/sync-all?secret=YOUR_SECRET
     """
+    import asyncio
     from app.tasks import catchup_sync_all_users, fire_and_forget
 
     if not settings.cron_secret or secret != settings.cron_secret:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    fire_and_forget(catchup_sync_all_users())
-    return {"status": "scheduled"}
+    _cron_status["last_run"] = time.time()
+    _cron_status["run_count"] += 1
+
+    async def _run_and_record():
+        result = await catchup_sync_all_users()
+        _cron_status["last_result"] = result
+
+    fire_and_forget(_run_and_record())
+    return {"status": "scheduled", "run_count": _cron_status["run_count"]}
+
+
+@app.get("/cron/status", tags=["ops"], summary="Check if cron sync is running correctly")
+async def cron_status():
+    """Public endpoint — shows when the cron last ran and what it found.
+
+    Use this to verify CRON_SECRET is set correctly in Render and that
+    UptimeRobot is successfully calling /cron/sync-all.
+
+    If last_run is None or very old, CRON_SECRET is likely missing or wrong.
+    """
+    last_run = _cron_status["last_run"]
+    return {
+        "cron_secret_configured": bool(settings.cron_secret),
+        "run_count": _cron_status["run_count"],
+        "last_run_ts": last_run,
+        "last_run_ago_seconds": round(time.time() - last_run) if last_run else None,
+        "last_result": _cron_status["last_result"],
+    }
 
 
 @app.api_route("/ping", methods=["GET", "HEAD"], tags=["ops"], summary="Keep-alive ping — zero DB/Redis touch")
