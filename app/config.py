@@ -49,8 +49,7 @@ class Settings(BaseSettings):
 
     @property
     def strava_webhook_callback_url(self) -> str:
-        # Strava subscription is registered at /webhook (top-level alias)
-        return f"{self.base_url}/webhook"
+        return f"{self.base_url}/strava/webhook"
 
 
 @lru_cache
