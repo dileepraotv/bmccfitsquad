@@ -175,31 +175,32 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     name = update.effective_user.first_name or "there"
 
     if user.strava_athlete_id:
+        # Returning connected user — single message, bottom nav only
         athlete_name = user.strava_athlete_name or name
         await update.message.reply_text(
             f"👋 Welcome back, *{_escape_md(name)}*\\!\n\n"
-            f"Connected as *{_escape_md(athlete_name)}*\\.\n\n"
-            f"Use the menu below or type /help to see all commands\\.",
+            f"Connected as *{_escape_md(athlete_name)}*\\.\n"
+            f"Use the buttons below or /help for all commands\\.",
             parse_mode="MarkdownV2",
             reply_markup=nav_keyboard(),
         )
-        await update.message.reply_text(
-            "What would you like to do?",
-            reply_markup=main_menu_keyboard(),
-        )
     else:
+        # New user — compact welcome + quick-reference guide + Connect button
         state = await generate_oauth_state(update.effective_user.id)
         auth_url = build_authorization_url(state)
         await update.message.reply_text(
-            "*Welcome to BMCC FitSquad\\!* 🚴🏃🏊🚶\n\n"
+            "*Welcome to BMCC FitSquad\\!* 🚴🏃🏊🚶\n"
             "_\"It's the Ride That Matters\"_\n\n"
-            "I help you track your Strava cycling, running, swimming, and walking activities, "
-            "along with your statistics and fitness goals\\.\n\n"
-            "To get started, connect your Strava account using the *Connect Strava* button below\\.\n\n"
-            "You can also use /help anytime to see all available commands and features\\.\n\n"
-            "Stay connected with BMCC:\n"
-            "🌐 [www\\.beyondmiles\\.cc](http://www.beyondmiles.cc)\n"
-            "📸 Instagram: @beyondmilescc",
+            "I track your Strava activities, stats, and fitness goals — "
+            "and post notifications to the group when you log a ride, run, swim, or walk\\.\n\n"
+            "*Here's what you can do once connected:*\n"
+            "📊 /stats — Activity stats by sport and period\n"
+            "🎯 /goals — Set and track distance goals\n"
+            "🏆 /leaderboard — Monthly group leaderboard\n"
+            "🔄 /sync — Pull latest activities from Strava\n"
+            "💬 /help — Full command reference\n\n"
+            "Tap *Connect Strava* below to get started\\.\n\n"
+            "🌐 [www\\.beyondmiles\\.cc](http://www.beyondmiles.cc) \\| 📸 @beyondmilescc",
             parse_mode="MarkdownV2",
             reply_markup=connect_strava_keyboard(auth_url),
             disable_web_page_preview=True,
@@ -359,7 +360,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await update.message.reply_text(
-        "📊 *Stats*\n\nSelect the activity behind your progress:",
+        "📊 *Stats* — Which sport?",
         parse_mode="Markdown",
         reply_markup=stats_sport_keyboard(),
     )
@@ -1061,7 +1062,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     elif data == "stats:menu":
         await query.edit_message_text(
-            "📊 *Stats*\n\nSelect the activity behind your progress:",
+            "📊 *Stats* — Which sport?",
             parse_mode="Markdown",
             reply_markup=stats_sport_keyboard(),
         )
@@ -1168,10 +1169,22 @@ async def _do_disconnect(query) -> None:
         user.strava_athlete_id      = None
         await db.commit()
 
-    await query.edit_message_text(
-        "✅ Your Strava account has been disconnected.\n"
-        "Use /connect any time to re-link it."
-    )
+    from app.strava.auth import build_authorization_url, generate_oauth_state
+    from app.telegram.keyboards import connect_strava_keyboard
+    try:
+        state = await generate_oauth_state(query.from_user.id)
+        auth_url = build_authorization_url(state)
+        await query.edit_message_text(
+            "✅ Strava disconnected\\.\n\n"
+            "Ready to reconnect whenever you are\\.",
+            parse_mode="MarkdownV2",
+            reply_markup=connect_strava_keyboard(auth_url),
+        )
+    except Exception:
+        await query.edit_message_text(
+            "✅ Your Strava account has been disconnected.\n"
+            "Use /connect any time to re-link it."
+        )
 
 
 # ---------------------------------------------------------------------------
