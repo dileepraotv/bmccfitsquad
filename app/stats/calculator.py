@@ -41,6 +41,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Activity
+from app.utils import SPORT_ACTIVITY_TYPES as _SPORT_ACTIVITY_TYPES
 from app.utils import meters_to_km, safe_round, seconds_to_hhmmss
 
 _QUOTES_PATH = pathlib.Path("data/quotes.txt")
@@ -62,23 +63,9 @@ TimeFrame = Literal[
     "all_time", "year_to_date", "previous_year", "current_month", "previous_month"
 ]
 
-# Strava activity_type strings that map to each logical sport.
-# Includes all sport_type values Strava may return (the newer sport_type field
-# is used for storage; the legacy "type" values are kept for backwards compat).
-_SPORT_ACTIVITY_TYPES: dict[str, list[str]] = {
-    "Ride": [
-        "Ride", "VirtualRide", "EBikeRide", "GravelRide",
-        "MountainBikeRide", "EMountainBikeRide", "Handcycle",
-        "Velomobile",
-    ],
-    "RideEndurance": [
-        "Ride", "VirtualRide", "EBikeRide", "GravelRide",
-        "MountainBikeRide", "EMountainBikeRide",
-    ],
-    "Run":  ["Run", "VirtualRun", "TrailRun"],
-    "Walk": ["Walk", "Hike"],
-    "Swim": ["Swim", "OpenWaterSwim"],
-}
+# Sport → Strava activity_type mapping now lives in app.utils.SPORT_ACTIVITY_TYPES
+# (imported above as _SPORT_ACTIVITY_TYPES) so stats, goals, and notification
+# goal-lines all count activities identically.
 
 _TIME_FRAME_LABELS: dict[str, str] = {
     "all_time":       "All Time",

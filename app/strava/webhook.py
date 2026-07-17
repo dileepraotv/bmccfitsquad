@@ -281,28 +281,22 @@ async def strava_oauth_callback(
     # ------------------------------------------------------------------
     try:
         from app.telegram.bot import get_application
-        from app.telegram.keyboards import main_menu_keyboard, nav_keyboard
+        from app.telegram.keyboards import nav_keyboard
         bot = get_application().bot
-        # First message: set the persistent nav bar at the bottom of the keyboard
+        # Single message — the persistent nav bar (Stats / Goals / Help) is
+        # the one top-level destination menu; no duplicate inline menu.
         await bot.send_message(
             chat_id=telegram_user_id,
             text=(
                 f"🎉 *Welcome, {athlete_firstname}\\!* 🚴🏃🏊🚶\n\n"
-                f"✅ Your Strava account has been successfully connected\\.\n\n"
-                f"You've taken a step in the right direction toward achieving your fitness goals\\!\n\n"
-                f"Here's how to get started:\n\n"
+                f"✅ Your Strava account is connected\\. I'm importing your activity "
+                f"history now — this can take a minute for a large history\\.\n\n"
                 f"📊 Use /stats to see your activity numbers\n"
                 f"🎯 Use /goals to set a new challenge\n"
                 f"❓ Use /help to explore all available features"
             ),
             parse_mode="MarkdownV2",
             reply_markup=nav_keyboard(),
-        )
-        # Second message: inline menu so they can tap straight into stats/goals
-        await bot.send_message(
-            chat_id=telegram_user_id,
-            text="What would you like to do first?",
-            reply_markup=main_menu_keyboard(),
         )
     except Exception as exc:
         # Non-fatal — the web response is more important
@@ -522,9 +516,15 @@ async def _handle_athlete_updated(athlete_id: int, updates: dict) -> None:
             logger.warning("Deauth event for unknown strava_athlete_id=%s", athlete_id)
             return
 
-        user.strava_access_token = None
-        user.strava_refresh_token = None
+        # Clear identity too — not just tokens — so is_strava_connected and
+        # every "are you connected?" check (/start, /sync, /stats, /goals)
+        # immediately reflect reality instead of showing a stale "Connected"
+        # state that can never actually sync again until they reconnect.
+        user.strava_access_token     = None
+        user.strava_refresh_token    = None
         user.strava_token_expires_at = None
+        user.strava_athlete_id       = None
+        user.strava_athlete_name     = None
         await db.commit()
         telegram_user_id = user.telegram_user_id
 

@@ -45,12 +45,12 @@ from app.telegram.keyboards import (
     activity_edit_description_keyboard,
     confirm_keyboard,
     connect_strava_keyboard,
-    main_menu_keyboard,
     nav_keyboard,
     stats_nav_keyboard,
     stats_period_keyboard,
     stats_sport_keyboard,
 )
+from app.utils import SPORT_ACTIVITY_TYPES as _SPORT_ACTIVITY_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -191,15 +191,16 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
             "*Welcome to BMCC FitSquad\\!* 🚴🏃🏊🚶\n"
             "_\"It's the Ride That Matters\"_\n\n"
-            "I track your Strava activities, stats, and fitness goals — "
-            "and post notifications to the group when you log a ride, run, swim, or walk\\.\n\n"
-            "*Here's what you can do once connected:*\n"
+            "*Connect once, and I'll take it from there:* automatic activity "
+            "notifications, always\\-current stats, and live goal progress — "
+            "every time you log a ride, run, swim, or walk on Strava\\.\n\n"
+            "Tap *Connect Strava* below to get started\\.\n\n"
+            "*Once you're connected, here's what's available:*\n"
             "📊 /stats — Activity stats by sport and period\n"
             "🎯 /goals — Set and track distance goals\n"
             "🏆 /leaderboard — Monthly group leaderboard\n"
             "🔄 /sync — Pull latest activities from Strava\n"
             "💬 /help — Full command reference\n\n"
-            "Tap *Connect Strava* below to get started\\.\n\n"
             "🌐 [www\\.beyondmiles\\.cc](http://www.beyondmiles.cc) \\| 📸 @beyondmilescc",
             parse_mode="MarkdownV2",
             reply_markup=connect_strava_keyboard(auth_url),
@@ -237,11 +238,30 @@ async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     from app.strava.auth import build_authorization_url, generate_oauth_state
 
     try:
-        await _get_or_create_user(update)
+        user = await _get_or_create_user(update)
+    except Exception:
+        logger.exception("cmd_connect: DB error")
+        await update.message.reply_text(
+            "Sorry, I couldn't reach the database right now. Please try again in a moment."
+        )
+        return
+
+    # Already connected — don't repeat first-time setup copy, and don't
+    # silently hand out a second OAuth link with no context.
+    if user.strava_athlete_id:
+        athlete_name = user.strava_athlete_name or "your Strava account"
+        await update.message.reply_text(
+            f"You're already connected as *{_escape_md(athlete_name)}*\\.\n\n"
+            f"Use /disconnect first if you want to link a different Strava account\\.",
+            parse_mode="MarkdownV2",
+        )
+        return
+
+    try:
         state = await generate_oauth_state(update.effective_user.id)
         auth_url = build_authorization_url(state)
     except Exception:
-        logger.exception("cmd_connect: DB or Redis error")
+        logger.exception("cmd_connect: Redis error")
         await update.message.reply_text(
             "Sorry, I couldn't generate your Strava link right now. "
             "Please try again in a moment."
@@ -485,13 +505,9 @@ import json as _json
 
 _SPORT_TYPE_MAP = {"Ride Endurance": "RideEndurance"}
 
-_SPORT_ACTIVITY_TYPES: dict[str, list[str]] = {
-    "Ride":          ["Ride", "VirtualRide"],
-    "RideEndurance": ["Ride", "VirtualRide"],
-    "Run":           ["Run", "VirtualRun"],
-    "Walk":          ["Walk", "Hike"],
-    "Swim":          ["Swim", "OpenWaterSwim"],
-}
+# Sport → Strava activity_type mapping now lives in app.utils.SPORT_ACTIVITY_TYPES
+# (imported above as _SPORT_ACTIVITY_TYPES) so goal progress always counts the
+# same activities as /stats and the notification goal-progress footer.
 
 def _parse_category_threshold(category: str) -> float:
     """Convert a stored category string to minimum metres for activity counting.
@@ -691,7 +707,7 @@ async def _handle_goal_callbacks(query, data: str) -> None:
         )
         return
 
-    if data in ("goal:back", "goal:exit"):
+    if data == "goal:back":
         await _clear_draft(tg_id)
         await _send_goals_menu(query, tg_id)
         return
@@ -705,6 +721,7 @@ async def _handle_goal_callbacks(query, data: str) -> None:
         return
 
     if data == "goal:exit":
+        await _clear_draft(tg_id)
         await query.edit_message_text("Goals closed. Tap /goals anytime to return.")
         return
 
@@ -778,7 +795,41 @@ async def _handle_goal_callbacks(query, data: str) -> None:
         )
         return
 
-    # ── Confirm delete ─────────────────────────────────────────────────────
+    # ── User tapped a goal in the delete list → show a confirmation screen
+    #    before touching the database. Tapping the list previously deleted
+    #    the goal immediately with no way back.
+    if data.startswith("goal:delete_pick:"):
+        goal_id = data[len("goal:delete_pick:"):]
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(Goal).where(Goal.id == _uuid_mod.UUID(goal_id))
+            )
+            goal = result.scalar_one_or_none()
+
+        if not goal:
+            await query.edit_message_text("Goal not found.")
+            return
+
+        sport_label = ("Ride Endurance"
+                       if goal.activity_type == "RideEndurance"
+                       else goal.activity_type)
+        target_word = "time" if goal.target_count == 1 else "times"
+        await query.edit_message_text(
+            f"Delete this goal?\n\n"
+            f"Sport: *{sport_label}*\n"
+            f"Goal: *{goal.category}*\n"
+            f"Target: *{goal.target_count} {target_word}*\n"
+            f"Window: {goal.start_date} → {goal.end_date}\n\n"
+            f"This can't be undone.",
+            parse_mode="Markdown",
+            reply_markup=confirm_keyboard(
+                confirm_data=f"goal:confirm_delete:{goal_id}",
+                cancel_data="goal:delete_menu",
+            ),
+        )
+        return
+
+    # ── Confirmed — actually delete ─────────────────────────────────────────
     if data.startswith("goal:confirm_delete:"):
         goal_id = data[len("goal:confirm_delete:"):]
         async with AsyncSessionLocal() as db:
@@ -912,7 +963,7 @@ async def _show_delete_menu(query) -> None:
         [InlineKeyboardButton(
             f"{'Ride Endurance' if g.activity_type == 'RideEndurance' else g.activity_type}"
             f" — {g.category} x{g.target_count} ({g.start_date} to {g.end_date})",
-            callback_data=f"goal:confirm_delete:{g.id}",
+            callback_data=f"goal:delete_pick:{g.id}",
         )]
         for g in goals
     ]
@@ -1086,10 +1137,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await _do_disconnect(query)
 
     elif data in ("disconnect:cancel", "cancel"):
-        await query.edit_message_text(
-            "Cancelled — your account is still connected.",
-            reply_markup=main_menu_keyboard(),
-        )
+        # No inline menu here — the persistent nav bar (Stats / Goals / Help)
+        # is already on screen and is the one top-level destination menu.
+        await query.edit_message_text("Cancelled — your account is still connected.")
 
     else:
         logger.warning("Unhandled callback data: %s", data)

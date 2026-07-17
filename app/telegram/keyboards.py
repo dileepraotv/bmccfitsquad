@@ -25,14 +25,6 @@ def nav_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def main_menu_keyboard() -> InlineKeyboardMarkup:
-    """Main menu shown after /start or when user is already connected."""
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Stats",  callback_data="stats:menu"),
-         InlineKeyboardButton("Goals",  callback_data="goal:menu")],
-    ])
-
-
 def stats_sport_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Ride",           callback_data="stats:sport:Ride"),

@@ -33,6 +33,7 @@ from app.models import Activity, Goal, GroupChat, User
 from app.strava.auth import get_valid_access_token
 from app.strava.client import fetch_activities
 from app.telegram.notifications import format_activity_notification
+from app.utils import SPORT_ACTIVITY_TYPES as _SPORT_ACTIVITY_TYPES
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -165,6 +166,15 @@ async def _send_activity_notification_async(
                     logger.error("Failed to notify chat_id=%s: %s", chat.id, exc)
 
 
+class _NotConnected(Exception):
+    """Raised internally when a user has no valid Strava connection to sync.
+
+    This is deliberately distinct from a real failure — it must never be
+    reported to the user as "sync complete" (nothing ran) nor trigger the
+    retry loop (retrying won't help until they reconnect).
+    """
+
+
 # ---------------------------------------------------------------------------
 # Task 2: sync_user_activities
 # ---------------------------------------------------------------------------
@@ -206,6 +216,26 @@ async def sync_user_activities(
                     )
             except Exception:
                 logger.warning("sync completion DM failed for telegram_id=%s", notify_telegram_id)
+    except _NotConnected:
+        # Nothing actually ran — never send a "success" message for this.
+        logger.info(
+            "sync_user_activities: user_id=%s has no valid Strava connection — skipped",
+            user_id,
+        )
+        if notify_telegram_id:
+            try:
+                bot = TelegramBot(token=settings.telegram_bot_token)
+                async with bot:
+                    await bot.send_message(
+                        chat_id=notify_telegram_id,
+                        text=(
+                            "⚠️ Your Strava connection isn't active\\. "
+                            "Use /connect to relink your account, then try again\\."
+                        ),
+                        parse_mode="MarkdownV2",
+                    )
+            except Exception:
+                logger.warning("sync not-connected DM failed for telegram_id=%s", notify_telegram_id)
     except Exception:
         logger.exception("sync_user_activities failed for user_id=%s", user_id)
         if _retry < 1:
@@ -238,17 +268,21 @@ async def _sync_user_activities_async(user_id: str, full: bool = False) -> None:
 
     full=True (/fullsync or first connect): fetches entire history.
     Use only when the user reports inaccurate statistics.
+
+    Raises:
+        _NotConnected: If the user doesn't exist, is inactive, or has no
+            valid Strava token — the caller must not report this as success.
     """
     async with AsyncSessionLocal() as db:
         user: User | None = await db.get(User, uuid.UUID(user_id))
         if user is None:
             logger.warning("sync_user_activities: user_id=%s not found", user_id)
-            return
+            raise _NotConnected()
         if not user.is_active or not user.strava_access_token:
             logger.warning(
                 "sync_user_activities: user_id=%s not active or not connected", user_id
             )
-            return
+            raise _NotConnected()
 
         # Determine the `after` timestamp for Strava API pagination
         after_ts: int | None = None
@@ -361,22 +395,6 @@ async def _sync_user_activities_async(user_id: str, full: bool = False) -> None:
 # ---------------------------------------------------------------------------
 # Shared utilities
 # ---------------------------------------------------------------------------
-
-_SPORT_ACTIVITY_TYPES: dict[str, list[str]] = {
-    "Ride": [
-        "Ride", "VirtualRide", "EBikeRide", "GravelRide",
-        "MountainBikeRide", "EMountainBikeRide", "Handcycle",
-        "Velomobile",
-    ],
-    "RideEndurance": [
-        "Ride", "VirtualRide", "EBikeRide", "GravelRide",
-        "MountainBikeRide", "EMountainBikeRide",
-    ],
-    "Run":  ["Run", "VirtualRun", "TrailRun"],
-    "Walk": ["Walk", "Hike"],
-    "Swim": ["Swim", "OpenWaterSwim"],
-}
-
 
 def _parse_category_threshold(category: str) -> float:
     try:

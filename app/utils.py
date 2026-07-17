@@ -17,6 +17,29 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+# ---------------------------------------------------------------------------
+# Sport taxonomy
+# ---------------------------------------------------------------------------
+# Single source of truth for which raw Strava activity_type / sport_type
+# values belong to each logical BMCC sport bucket. Stats, goal progress, and
+# notification goal-lines all import this so an activity counts the same way
+# everywhere in the product — a Gravel Ride must never count for /stats but
+# not for a Ride goal (or vice versa).
+SPORT_ACTIVITY_TYPES: dict[str, list[str]] = {
+    "Ride": [
+        "Ride", "VirtualRide", "EBikeRide", "GravelRide",
+        "MountainBikeRide", "EMountainBikeRide", "Handcycle",
+        "Velomobile",
+    ],
+    "RideEndurance": [
+        "Ride", "VirtualRide", "EBikeRide", "GravelRide",
+        "MountainBikeRide", "EMountainBikeRide",
+    ],
+    "Run":  ["Run", "VirtualRun", "TrailRun"],
+    "Walk": ["Walk", "Hike"],
+    "Swim": ["Swim", "OpenWaterSwim"],
+}
+
 
 # ---------------------------------------------------------------------------
 # Time
