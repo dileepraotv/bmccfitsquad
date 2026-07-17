@@ -39,13 +39,14 @@ def stats_sport_keyboard() -> InlineKeyboardMarkup:
 def stats_period_keyboard(sport: str) -> InlineKeyboardMarkup:
     s = sport
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("All Time",       callback_data=f"stats:period:{s}:all_time"),
-         InlineKeyboardButton("Year to Date",   callback_data=f"stats:period:{s}:year_to_date"),
-         InlineKeyboardButton("Previous Year",  callback_data=f"stats:period:{s}:previous_year")],
-        [InlineKeyboardButton("Current Month",  callback_data=f"stats:period:{s}:current_month"),
-         InlineKeyboardButton("Previous Month", callback_data=f"stats:period:{s}:previous_month")],
-        [InlineKeyboardButton("Back",           callback_data="stats:menu"),
-         InlineKeyboardButton("Exit",           callback_data="stats:exit")],
+        [InlineKeyboardButton("This Week",  callback_data=f"stats:period:{s}:this_week"),
+         InlineKeyboardButton("This Month", callback_data=f"stats:period:{s}:current_month"),
+         InlineKeyboardButton("This Year",  callback_data=f"stats:period:{s}:year_to_date")],
+        [InlineKeyboardButton("All Time",   callback_data=f"stats:period:{s}:all_time"),
+         InlineKeyboardButton("Last Month", callback_data=f"stats:period:{s}:previous_month"),
+         InlineKeyboardButton("Last Year",  callback_data=f"stats:period:{s}:previous_year")],
+        [InlineKeyboardButton("Back",       callback_data="stats:menu"),
+         InlineKeyboardButton("Exit",       callback_data="stats:exit")],
     ])
 
 

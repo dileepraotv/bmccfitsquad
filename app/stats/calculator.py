@@ -16,10 +16,11 @@ Sport types accepted
 Time frames accepted
 --------------------
   "all_time"        All stored activities for the user
-  "year_to_date"    1 Jan of current year → now (UTC)
-  "previous_year"   1 Jan → 31 Dec of the previous calendar year
-  "current_month"   1st of current month → now (UTC)
-  "previous_month"  1st → last day of the previous calendar month
+  "this_week"       Monday 00:00 of the current week → now (UTC)
+  "year_to_date"    1 Jan of current year → now (UTC)  [shown as "This Year"]
+  "previous_year"   1 Jan → 31 Dec of the previous calendar year  [shown as "Last Year"]
+  "current_month"   1st of current month → now (UTC)  [shown as "This Month"]
+  "previous_month"  1st → last day of the previous calendar month  [shown as "Last Month"]
 
 Units
 -----
@@ -34,7 +35,7 @@ from __future__ import annotations
 import pathlib
 import random
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from sqlalchemy import and_, select
@@ -60,7 +61,8 @@ def _random_quote() -> str:
 
 SportType = Literal["Ride", "RideEndurance", "Run", "Walk", "Swim"]
 TimeFrame = Literal[
-    "all_time", "year_to_date", "previous_year", "current_month", "previous_month"
+    "all_time", "this_week", "year_to_date", "previous_year",
+    "current_month", "previous_month",
 ]
 
 # Sport → Strava activity_type mapping now lives in app.utils.SPORT_ACTIVITY_TYPES
@@ -69,10 +71,11 @@ TimeFrame = Literal[
 
 _TIME_FRAME_LABELS: dict[str, str] = {
     "all_time":       "All Time",
-    "year_to_date":   "Year to Date",
-    "previous_year":  "Previous Year",
-    "current_month":  "Current Month",
-    "previous_month": "Previous Month",
+    "this_week":      "This Week",
+    "year_to_date":   "This Year",
+    "previous_year":  "Last Year",
+    "current_month":  "This Month",
+    "previous_month": "Last Month",
 }
 
 _SPORT_LABELS: dict[str, str] = {
@@ -401,6 +404,12 @@ def _time_frame_bounds(time_frame: str) -> tuple[datetime | None, datetime | Non
 
     if time_frame == "all_time":
         return None, None
+
+    if time_frame == "this_week":
+        # Monday 00:00 UTC of the current week → now.
+        today = now.date()
+        monday = today - timedelta(days=today.weekday())
+        return datetime(monday.year, monday.month, monday.day, tzinfo=timezone.utc), None
 
     if time_frame == "year_to_date":
         return datetime(now.year, 1, 1, tzinfo=timezone.utc), None
