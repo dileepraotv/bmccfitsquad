@@ -13,29 +13,24 @@ Public API
 
 Template anatomy
 ----------------
-  {emoji} New Activity!
-
-  Athlete Name: …
+  {emoji} {greeting}, {first_name} — new activity logged!
+  ─────────────────
+  Athlete: …
   Activity: …
-  Activity Date: YYYY-MM-DDTHH:MM:SS.000Z
-  Activity Type: …
+  Date: Sat, 18 Jul 2026
 
   Distance: … km
-  Moving Time: HH:MM:SS
-  Elapsed Time: HH:MM:SS
-  Calories: …
   Avg Speed: … km/h
-  Max Speed: … km/h
-
-  Elevation Gain: … meters
-  Avg HR: … bpm          ← omitted if no HR data
-  Max HR: … bpm          ← omitted if no HR data
+  Elevation Gain: … m
 
   ─────────────────
-  {club_message}
-  💬 "{random quote}"
+  🎯 Goal Progress
+  …
 
-  Click /stats to check your updated stats
+  ─────────────────
+  "{random quote}"
+
+  Beyond Miles - Beyond Limits
 """
 from __future__ import annotations
 
@@ -47,7 +42,7 @@ from datetime import datetime, timezone
 from telegram import Bot
 
 from app.models import Activity, User
-from app.utils import format_friendly_date, meters_to_km, ms_to_kmh, seconds_to_hhmmss
+from app.utils import format_friendly_date, meters_to_km, ms_to_kmh
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +85,13 @@ _EMOJI: dict[str, str] = {
 }
 _DEFAULT_EMOJI = "🏅"
 
+# Rotated so the opener doesn't feel copy-pasted across consecutive posts.
+_GREETINGS: list[str] = ["Nice one", "Kudos to you", "Amazing", "Wow", "Great stuff"]
+
+
+def _random_greeting() -> str:
+    return random.choice(_GREETINGS)
+
 
 # ---------------------------------------------------------------------------
 # Primary public formatter
@@ -115,8 +117,9 @@ async def format_activity_notification(
     # ------------------------------------------------------------------
     # Header
     # ------------------------------------------------------------------
+    greeting = _random_greeting()
     lines: list[str] = [
-        f"{emoji} *Nice one, {first_name} — new activity logged!*",
+        f"{emoji} *{greeting}, {first_name} — new activity logged!*",
         _SEPARATOR,
         f"Athlete: {athlete_name}",
         f"Activity: {activity_link}",
@@ -124,32 +127,19 @@ async def format_activity_notification(
     ]
 
     # ------------------------------------------------------------------
-    # Metrics
+    # Metrics — kept intentionally short; the full breakdown is one tap
+    # away on Strava via the activity link above.
     # ------------------------------------------------------------------
     distance_km   = meters_to_km(activity.get("distance"))
-    moving_secs   = int(activity.get("moving_time")  or 0)
-    elapsed_secs  = int(activity.get("elapsed_time") or 0)
-    calories      = int(activity.get("calories")     or 0)
     avg_speed_kmh = ms_to_kmh(activity.get("average_speed"))
-    max_speed_kmh = ms_to_kmh(activity.get("max_speed"))
     elevation_m   = activity.get("total_elevation_gain") or 0
-    avg_hr        = activity.get("average_heartrate")
-    max_hr        = activity.get("max_heartrate")
 
     lines += [
         "",
         f"Distance: {distance_km:.2f} km",
-        f"Moving Time: {seconds_to_hhmmss(moving_secs)}",
-        f"Elapsed Time: {seconds_to_hhmmss(elapsed_secs)}",
-        f"Calories: {calories}",
         f"Avg Speed: {avg_speed_kmh:.2f} km/h",
-        f"Max Speed: {max_speed_kmh:.2f} km/h",
         f"Elevation Gain: {int(elevation_m)} m",
     ]
-    if avg_hr is not None:
-        lines.append(f"Avg HR: {int(avg_hr)} bpm")
-    if max_hr is not None:
-        lines.append(f"Max HR: {int(max_hr)} bpm")
 
     # ------------------------------------------------------------------
     # Goal progress section
