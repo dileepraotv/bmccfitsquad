@@ -19,9 +19,9 @@ Template anatomy
   Activity: …
   Date: Sat, 18 Jul 2026
 
-  Distance: … km
-  Avg Speed: … km/h
-  Elevation Gain: … m
+  Distance: … km            (Swim: … m)
+  Avg Speed: … km/h         (Swim: Pace … /100m, Moving Time HH:MM:SS)
+  Elevation Gain: … m       (Swim: Avg HR … bpm, omitted if no HR data)
 
   ─────────────────
   🎯 Goal Progress
@@ -42,7 +42,7 @@ from datetime import datetime, timezone
 from telegram import Bot
 
 from app.models import Activity, User
-from app.utils import format_friendly_date, meters_to_km, ms_to_kmh
+from app.utils import format_friendly_date, meters_to_km, ms_to_kmh, seconds_to_hhmmss
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +93,18 @@ def _random_greeting() -> str:
     return random.choice(_GREETINGS)
 
 
+_SWIM_TYPES = {"Swim", "OpenWaterSwim"}
+
+
+def _format_pace_per_100m(avg_speed_ms: float | int | None) -> str:
+    """Convert average speed (m/s) to a swim pace string like ``"01:45"`` per 100m."""
+    if not avg_speed_ms:
+        return "N/A"
+    pace_seconds = 100 / float(avg_speed_ms)
+    minutes, secs = divmod(round(pace_seconds), 60)
+    return f"{minutes:02d}:{secs:02d}"
+
+
 # ---------------------------------------------------------------------------
 # Primary public formatter
 # ---------------------------------------------------------------------------
@@ -128,18 +140,34 @@ async def format_activity_notification(
 
     # ------------------------------------------------------------------
     # Metrics — kept intentionally short; the full breakdown is one tap
-    # away on Strava via the activity link above.
+    # away on Strava via the activity link above. Swims get pace-focused
+    # metrics instead of speed/elevation, which don't mean much in water.
     # ------------------------------------------------------------------
-    distance_km   = meters_to_km(activity.get("distance"))
-    avg_speed_kmh = ms_to_kmh(activity.get("average_speed"))
-    elevation_m   = activity.get("total_elevation_gain") or 0
+    if activity_type in _SWIM_TYPES:
+        distance_m  = int(activity.get("distance") or 0)
+        pace        = _format_pace_per_100m(activity.get("average_speed"))
+        moving_secs = int(activity.get("moving_time") or 0)
+        avg_hr      = activity.get("average_heartrate")
 
-    lines += [
-        "",
-        f"Distance: {distance_km:.2f} km",
-        f"Avg Speed: {avg_speed_kmh:.2f} km/h",
-        f"Elevation Gain: {int(elevation_m)} m",
-    ]
+        lines += [
+            "",
+            f"Distance: {distance_m} m",
+            f"Pace: {pace} /100m",
+            f"Moving Time: {seconds_to_hhmmss(moving_secs)}",
+        ]
+        if avg_hr is not None:
+            lines.append(f"Avg HR: {int(avg_hr)} bpm")
+    else:
+        distance_km   = meters_to_km(activity.get("distance"))
+        avg_speed_kmh = ms_to_kmh(activity.get("average_speed"))
+        elevation_m   = activity.get("total_elevation_gain") or 0
+
+        lines += [
+            "",
+            f"Distance: {distance_km:.2f} km",
+            f"Avg Speed: {avg_speed_kmh:.2f} km/h",
+            f"Elevation Gain: {int(elevation_m)} m",
+        ]
 
     # ------------------------------------------------------------------
     # Goal progress section
