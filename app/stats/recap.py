@@ -542,30 +542,34 @@ def render_recap_card(data: dict) -> bytes:
     # --- Sport rows ------------------------------------------------------------
     row_height = 230
     icon_size = 100
+    # Gap below each divider line before the next row's content starts —
+    # without this, a label sits almost flush against the line above it.
+    row_top_pad = 26
     # Icon is vertically centered on the row's visual anchor (the big
     # number), not on the row's raw top edge — otherwise icons of
     # different silhouettes read as "off-center" against the text block.
-    icon_anchor_offset = 76
+    icon_anchor_offset = 54
 
     for sport in data["sports"]:
-        row_top = y
+        row_start = y
+        content_top = row_start + row_top_pad
         color = tuple(sport["color"])
-        icon_cy = row_top + icon_anchor_offset
+        icon_cy = content_top + icon_anchor_offset
         icon_box = (margin, icon_cy - icon_size / 2, margin + icon_size, icon_cy + icon_size / 2)
         _SPORT_ICONS[sport["key"]](draw, icon_box, color)
 
         text_x = margin + icon_size + 30
 
-        draw.text((text_x, row_top - 6), sport["label"], font=f_sport, fill=_LABEL_COLOR)
+        draw.text((text_x, content_top - 6), sport["label"], font=f_sport, fill=_LABEL_COLOR)
 
-        value_y = row_top + 36
+        value_y = content_top + 36
         draw.text((text_x, value_y), sport["value_text"], font=f_value, fill=_WHITE)
         value_w = draw.textlength(sport["value_text"], font=f_value)
         draw.text((text_x + value_w + 12, value_y + 30), sport["unit"], font=f_unit, fill=_GRAY)
 
         count_label = "activity" if sport["count"] == 1 else "activities"
         draw.text(
-            (text_x, row_top + 132), f"{sport['count']} {count_label}",
+            (text_x, content_top + 132), f"{sport['count']} {count_label}",
             font=f_count, fill=_GRAY,
         )
 
@@ -577,7 +581,7 @@ def render_recap_card(data: dict) -> bytes:
         pill_h = 60
         pill_x1 = W - margin
         pill_x0 = pill_x1 - pill_w
-        pill_y0 = row_top + (icon_size - pill_h) / 2 + 4
+        pill_y0 = content_top + (icon_size - pill_h) / 2 + 4
         pill_y1 = pill_y0 + pill_h
         draw.rounded_rectangle(
             [pill_x0, pill_y0, pill_x1, pill_y1], radius=pill_h / 2,
@@ -588,7 +592,7 @@ def render_recap_card(data: dict) -> bytes:
             font=f_trend, fill=trend_color,
         )
 
-        row_bottom = row_top + row_height
+        row_bottom = row_start + row_height
         if sport is not data["sports"][-1]:
             draw.line([(margin, row_bottom), (W - margin, row_bottom)], fill=_DIM_GRAY, width=1)
         y = row_bottom
@@ -596,17 +600,17 @@ def render_recap_card(data: dict) -> bytes:
     # --- Highlights ------------------------------------------------------------
     if data["highlights"]:
         draw.line([(margin, y), (W - margin, y)], fill=_DIM_GRAY, width=1)
-        y += 40
+        y += row_top_pad
         for line in data["highlights"]:
             draw.rounded_rectangle([margin, y + 6, margin + 8, y + 34], radius=4, fill=_GOLD)
             draw.text((margin + 26, y), line, font=f_highlight, fill=_GOLD)
             y += 48
-        y += 10
+        y += 6
     else:
-        y += 30
+        y += 20
 
     # --- BMCC crest + tagline ------------------------------------------------
-    y += 30
+    y += 20
     try:
         crest_size = 110
         logo = Image.open(_LOGO_PATH).convert("RGB")

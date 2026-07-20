@@ -241,6 +241,21 @@ async def cron_status():
     }
 
 
+@app.get("/version", tags=["ops"], summary="Deployed git commit — for confirming a deploy actually landed")
+async def version():
+    import subprocess
+    try:
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=".", stderr=subprocess.DEVNULL
+        ).decode().strip()
+        msg = subprocess.check_output(
+            ["git", "log", "-1", "--format=%s"], cwd=".", stderr=subprocess.DEVNULL
+        ).decode().strip()
+    except Exception as exc:
+        return {"error": str(exc)}
+    return {"commit": sha, "message": msg}
+
+
 @app.api_route("/ping", methods=["GET", "HEAD"], tags=["ops"], summary="Keep-alive ping — zero DB/Redis touch")
 async def ping():
     """Instant 200 response used by UptimeRobot to prevent Render sleep.
