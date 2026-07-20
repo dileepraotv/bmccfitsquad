@@ -117,7 +117,9 @@ async def setup_bot() -> None:
         BotCommand("disconnect",   "Unlink your Strava account"),
         BotCommand("leaderboard",  "Monthly distance leaderboard"),
         BotCommand("quote",        "Random motivational quote"),
+        BotCommand("notifications", "How activity notifications are managed"),
         BotCommand("cancel",       "Cancel any in-progress action"),
+        BotCommand("skip",         "Skip the current step in an in-progress action"),
         BotCommand("help",         "Show all available commands"),
     ])
     logger.info("Telegram bot command menu registered")
