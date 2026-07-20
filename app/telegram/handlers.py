@@ -47,6 +47,7 @@ from app.telegram.keyboards import (
     confirm_keyboard,
     connect_strava_keyboard,
     nav_keyboard,
+    recap_goal_prompt_keyboard,
     stats_nav_keyboard,
     stats_period_keyboard,
     stats_sport_keyboard,
@@ -94,6 +95,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("leaderboard",   cmd_leaderboard,   filters=_priv))
     app.add_handler(CommandHandler("notifications", cmd_notifications, filters=_priv))
     app.add_handler(CommandHandler("quote",         cmd_quote,         filters=_priv))
+    app.add_handler(CommandHandler("recap",         cmd_recap,         filters=_priv))
 
     app.add_handler(CallbackQueryHandler(handle_callback))
 
@@ -219,7 +221,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/fullsync — Rebuild your full history \\(use only if stats look wrong\\)\n\n"
         "📊 *Stats \\& Goals*\n"
         "/stats — View activity stats by sport and time period\n"
-        "/goals — Set, delete or check your fitness goals\n\n"
+        "/goals — Set, delete or check your fitness goals\n"
+        "/recap — Your most recently completed month, recapped\n\n"
         "🏆 *Group*\n"
         "/leaderboard — Monthly distance leaderboard\n\n"
         "💬 *Other*\n"
@@ -433,6 +436,50 @@ async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         lines.append(f"{medal} {name} — *{km} km*")
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def cmd_recap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Manually trigger the monthly recap card for the most recently
+    completed calendar month (the scheduled version fires automatically
+    at 20:00 IST on the last day of each month for every connected user)."""
+    from app.stats.recap import (
+        build_recap_caption,
+        compute_monthly_recap,
+        most_recently_completed_month,
+        render_recap_card,
+    )
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(User).where(User.telegram_user_id == update.effective_user.id)
+        )
+        user = result.scalar_one_or_none()
+
+        if not user or not user.strava_athlete_id:
+            await update.message.reply_text(
+                "You haven't connected your Strava account yet\\.\nUse /connect to get started\\.",
+                parse_mode="MarkdownV2",
+            )
+            return
+
+        await update.message.reply_text("⏳ Building your recap...")
+
+        year, month = most_recently_completed_month()
+        try:
+            data = await compute_monthly_recap(db, user, year, month)
+            image_bytes = render_recap_card(data)
+        except Exception:
+            logger.exception("cmd_recap failed for telegram_id=%s", update.effective_user.id)
+            await update.message.reply_text(
+                "Sorry, I couldn't put your recap together just now. Please try again shortly."
+            )
+            return
+
+    first_name = user.telegram_first_name or "there"
+    caption = build_recap_caption(data, first_name)
+
+    await update.message.reply_photo(photo=image_bytes)
+    await update.message.reply_text(caption, reply_markup=recap_goal_prompt_keyboard())
 
 
 async def cmd_notifications(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1084,6 +1131,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if data.startswith("activity:edit:"):
         await _handle_activity_edit_start(query, data)
+        return
+
+    if data == "recap:dismiss":
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
         return
 
     # Goals

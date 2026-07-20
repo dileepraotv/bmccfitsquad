@@ -178,7 +178,12 @@ async def webhook_event_alias(request: Request):
 #
 # /health does a real (cached) DB check for actual liveness monitoring.
 
-_cron_status: dict = {"last_run": None, "last_result": None, "run_count": 0}
+_cron_status: dict = {
+    "last_run": None,
+    "last_result": None,
+    "run_count": 0,
+    "last_recap_result": None,
+}
 
 
 @app.api_route("/cron/sync-all", methods=["GET", "HEAD"], tags=["ops"], summary="Catchup sync — finds activities missed by webhook")
@@ -193,7 +198,7 @@ async def cron_sync_all(secret: str = ""):
     UptimeRobot URL: https://bmccfitsquad.onrender.com/cron/sync-all?secret=YOUR_SECRET
     """
     import asyncio
-    from app.tasks import catchup_sync_all_users, fire_and_forget
+    from app.tasks import catchup_sync_all_users, fire_and_forget, maybe_send_monthly_recaps
 
     if not settings.cron_secret or secret != settings.cron_secret:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -205,7 +210,14 @@ async def cron_sync_all(secret: str = ""):
         result = await catchup_sync_all_users()
         _cron_status["last_result"] = result
 
+    async def _run_monthly_recap():
+        result = await maybe_send_monthly_recaps()
+        _cron_status["last_recap_result"] = result
+
     fire_and_forget(_run_and_record())
+    # Piggybacks on this same ping — no-ops on every tick except once, at
+    # 20:00 IST on the last day of the month (see maybe_send_monthly_recaps).
+    fire_and_forget(_run_monthly_recap())
     return {"status": "scheduled", "run_count": _cron_status["run_count"]}
 
 
@@ -225,6 +237,7 @@ async def cron_status():
         "last_run_ts": last_run,
         "last_run_ago_seconds": round(time.time() - last_run) if last_run else None,
         "last_result": _cron_status["last_result"],
+        "last_recap_result": _cron_status["last_recap_result"],
     }
 
 

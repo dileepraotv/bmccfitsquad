@@ -590,6 +590,80 @@ async def catchup_sync_all_users() -> dict:
     return {"users_processed": users_processed, "new_activities": new_activities, "errors": errors}
 
 
+# ---------------------------------------------------------------------------
+# Task 4: maybe_send_monthly_recaps  (scheduled monthly recap, per user)
+# ---------------------------------------------------------------------------
+# Piggybacks on the same /cron/sync-all ping that already runs every few
+# minutes — no separate scheduler/cron registration needed. Fires once,
+# guarded by a Redis key, the first time this is called at/after 20:00 IST
+# on the last calendar day of the month (28/29/30/31 handled via
+# calendar.monthrange, so no month-length special-casing is needed).
+
+_IST = timezone(timedelta(hours=5, minutes=30))
+_RECAP_HOUR_IST = 20
+
+
+async def maybe_send_monthly_recaps() -> dict:
+    """Check whether it's time for the monthly recap and send it to every
+    connected user if so. Safe to call on every cron tick — a Redis flag
+    ensures it only actually sends once per calendar month."""
+    import calendar as _calendar
+
+    from app.redis_client import get_redis
+    from app.stats.recap import (
+        build_recap_caption,
+        compute_monthly_recap,
+        render_recap_card,
+    )
+
+    now_ist = datetime.now(_IST)
+    last_day = _calendar.monthrange(now_ist.year, now_ist.month)[1]
+    if now_ist.day != last_day or now_ist.hour < _RECAP_HOUR_IST:
+        return {"skipped": True, "reason": "not yet"}
+
+    redis = await get_redis()
+    dedup_key = f"recap:sent:{now_ist.year}-{now_ist.month:02d}"
+    if not await redis.set(dedup_key, "1", ex=40 * 86_400, nx=True):
+        return {"skipped": True, "reason": "already sent this month"}
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(User).where(
+                User.is_active.is_(True),
+                User.strava_athlete_id.isnot(None),
+            )
+        )
+        users = result.scalars().all()
+
+    logger.info("monthly_recap: sending to %s connected user(s)", len(users))
+
+    sent, errors = 0, 0
+    bot = TelegramBot(token=settings.telegram_bot_token)
+    async with bot:
+        for user in users:
+            try:
+                async with AsyncSessionLocal() as db:
+                    data = await compute_monthly_recap(db, user, now_ist.year, now_ist.month)
+                image_bytes = render_recap_card(data)
+                caption = build_recap_caption(data, user.telegram_first_name or "there")
+
+                from app.telegram.keyboards import recap_goal_prompt_keyboard
+
+                await bot.send_photo(chat_id=user.telegram_user_id, photo=image_bytes)
+                await bot.send_message(
+                    chat_id=user.telegram_user_id,
+                    text=caption,
+                    reply_markup=recap_goal_prompt_keyboard(),
+                )
+                sent += 1
+            except Exception:
+                logger.exception("monthly_recap: failed for telegram_id=%s", user.telegram_user_id)
+                errors += 1
+
+    logger.info("monthly_recap complete — sent=%s errors=%s", sent, errors)
+    return {"skipped": False, "sent": sent, "errors": errors}
+
+
 def _parse_strava_date(date_str: str | None) -> datetime:
     if not date_str:
         return datetime.now(timezone.utc)
