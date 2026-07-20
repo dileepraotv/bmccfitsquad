@@ -70,3 +70,13 @@ def key_activity_seen(activity_id: int) -> str:
 def key_activity_edit(telegram_user_id: int) -> str:
     """Draft key for the in-progress activity name/description edit flow."""
     return f"activity:edit:{telegram_user_id}"
+
+
+def key_recap_image(user_id, year: int, month: int) -> str:
+    """Cached recap card PNG (base64-encoded) for one user + calendar month."""
+    return f"recap:image:{user_id}:{year}-{month:02d}"
+
+
+def key_recap_caption(user_id, year: int, month: int) -> str:
+    """Cached recap caption text for one user + calendar month."""
+    return f"recap:caption:{user_id}:{year}-{month:02d}"

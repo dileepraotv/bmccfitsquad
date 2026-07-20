@@ -442,12 +442,7 @@ async def cmd_recap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Manually trigger the monthly recap card for the most recently
     completed calendar month (the scheduled version fires automatically
     at 20:00 IST on the last day of each month for every connected user)."""
-    from app.stats.recap import (
-        build_recap_caption,
-        compute_monthly_recap,
-        most_recently_completed_month,
-        render_recap_card,
-    )
+    from app.stats.recap import get_or_build_recap, most_recently_completed_month
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(
@@ -466,17 +461,13 @@ async def cmd_recap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         year, month = most_recently_completed_month()
         try:
-            data = await compute_monthly_recap(db, user, year, month)
-            image_bytes = render_recap_card(data)
+            image_bytes, caption = await get_or_build_recap(db, user, year, month)
         except Exception:
             logger.exception("cmd_recap failed for telegram_id=%s", update.effective_user.id)
             await update.message.reply_text(
                 "Sorry, I couldn't put your recap together just now. Please try again shortly."
             )
             return
-
-    first_name = user.telegram_first_name or "there"
-    caption = build_recap_caption(data, first_name)
 
     await update.message.reply_photo(photo=image_bytes)
     await update.message.reply_text(caption, reply_markup=recap_goal_prompt_keyboard())

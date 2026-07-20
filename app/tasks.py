@@ -610,11 +610,7 @@ async def maybe_send_monthly_recaps() -> dict:
     import calendar as _calendar
 
     from app.redis_client import get_redis
-    from app.stats.recap import (
-        build_recap_caption,
-        compute_monthly_recap,
-        render_recap_card,
-    )
+    from app.stats.recap import get_or_build_recap
 
     now_ist = datetime.now(_IST)
     last_day = _calendar.monthrange(now_ist.year, now_ist.month)[1]
@@ -643,9 +639,9 @@ async def maybe_send_monthly_recaps() -> dict:
         for user in users:
             try:
                 async with AsyncSessionLocal() as db:
-                    data = await compute_monthly_recap(db, user, now_ist.year, now_ist.month)
-                image_bytes = render_recap_card(data)
-                caption = build_recap_caption(data, user.telegram_first_name or "there")
+                    image_bytes, caption = await get_or_build_recap(
+                        db, user, now_ist.year, now_ist.month
+                    )
 
                 from app.telegram.keyboards import recap_goal_prompt_keyboard
 

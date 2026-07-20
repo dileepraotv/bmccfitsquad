@@ -20,8 +20,10 @@ Public API
 """
 from __future__ import annotations
 
+import base64
 import calendar
 import io
+import logging
 import pathlib
 from datetime import datetime, timedelta, timezone
 
@@ -30,6 +32,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Activity, User
 from app.utils import SPORT_ACTIVITY_TYPES as _SPORT_ACTIVITY_TYPES
+
+logger = logging.getLogger(__name__)
+
+# A completed month's data never changes, so once rendered it's cached for
+# the rest of that month (and a bit beyond, to comfortably cover the whole
+# window during which /recap could reasonably still target it).
+_RECAP_CACHE_TTL_SECONDS = 60 * 86_400
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -136,6 +145,41 @@ def build_recap_caption(data: dict, first_name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Cached fetch — a completed month's card never changes once generated, so
+# repeat requests (manual /recap re-runs, the scheduled send picking up a
+# month a user already peeked at) reuse the same render instead of paying
+# the DB + Pillow cost again.
+# ---------------------------------------------------------------------------
+
+async def get_or_build_recap(db: AsyncSession, user: User, year: int, month: int) -> tuple[bytes, str]:
+    """Return (image_png_bytes, caption_text) for this user + month, using
+    the Redis cache when available and populating it otherwise."""
+    from app.redis_client import get_redis, key_recap_caption, key_recap_image
+
+    redis = await get_redis()
+    img_key, cap_key = key_recap_image(user.id, year, month), key_recap_caption(user.id, year, month)
+
+    cached_img_b64, cached_caption = await redis.get(img_key), await redis.get(cap_key)
+    if cached_img_b64 and cached_caption:
+        try:
+            return base64.b64decode(cached_img_b64), cached_caption
+        except Exception:
+            logger.warning("recap cache: corrupt cached image for %s — regenerating", img_key)
+
+    data = await compute_monthly_recap(db, user, year, month)
+    image_bytes = render_recap_card(data)
+    caption = build_recap_caption(data, user.telegram_first_name or "there")
+
+    try:
+        await redis.set(img_key, base64.b64encode(image_bytes).decode("ascii"), ex=_RECAP_CACHE_TTL_SECONDS)
+        await redis.set(cap_key, caption, ex=_RECAP_CACHE_TTL_SECONDS)
+    except Exception:
+        logger.warning("recap cache: failed to write cache for %s", img_key)
+
+    return image_bytes, caption
+
+
+# ---------------------------------------------------------------------------
 # Data aggregation
 # ---------------------------------------------------------------------------
 
@@ -172,6 +216,20 @@ async def _sport_best_before(db: AsyncSession, user_id, sport: str, before: date
         )
     )
     return float(result.scalar_one() or 0.0)
+
+
+async def _distinct_active_days(db: AsyncSession, user_id, start: datetime, end: datetime) -> int:
+    """Count of distinct calendar dates with at least one activity of any
+    type (not just Ride/Run/Walk/Swim) in [start, end)."""
+    result = await db.execute(
+        select(func.count(func.distinct(func.date(Activity.activity_date))))
+        .where(
+            Activity.user_id == user_id,
+            Activity.activity_date >= start,
+            Activity.activity_date < end,
+        )
+    )
+    return int(result.scalar_one() or 0)
 
 
 async def _current_streak_days(db: AsyncSession, user_id, as_of_end: datetime) -> int:
@@ -277,6 +335,10 @@ async def compute_monthly_recap(db: AsyncSession, user: User, year: int, month: 
     if streak >= _MIN_STREAK_TO_SHOW:
         highlights.append(f"{streak}-day activity streak")
 
+    days_in_month = (end - start).days
+    active_days = await _distinct_active_days(db, user.id, start, end)
+    rest_days = max(0, days_in_month - active_days)
+
     month_label = f"{calendar.month_name[month]} {year}"
     prev_month_abbr = calendar.month_abbr[prev_month]
     # Fill in "vs <month>" only for badges that carry a real percentage —
@@ -294,6 +356,8 @@ async def compute_monthly_recap(db: AsyncSession, user: User, year: int, month: 
         "highlights": highlights,
         "total_activities": total_activities,
         "top_sport_label": top_sport_label,
+        "active_days": active_days,
+        "rest_days": rest_days,
     }
 
 
@@ -321,6 +385,88 @@ def _trend_rgb(color_key: str) -> tuple[int, int, int]:
     return {"up": _GREEN, "down": _RED, "flat": _GRAY, "new": _GRAY}.get(color_key, _GRAY)
 
 
+# ---------------------------------------------------------------------------
+# Sport icons — simple single-stroke line art, drawn directly (no external
+# icon assets / emoji font dependency needed).
+# ---------------------------------------------------------------------------
+
+def _icon_bike(draw, box, color, w=5):
+    x0, y0, x1, y1 = box
+    h, wd = y1 - y0, x1 - x0
+    cy = y0 + h * 0.68
+    r = h * 0.20
+    x1c, x2c = x0 + wd * 0.22, x1 - wd * 0.22
+    bb = (x0 + wd * 0.48, cy)
+    seat = (x0 + wd * 0.36, y0 + h * 0.20)
+    bar = (x0 + wd * 0.78, y0 + h * 0.34)
+    draw.ellipse([x1c - r, cy - r, x1c + r, cy + r], outline=color, width=w)
+    draw.ellipse([x2c - r, cy - r, x2c + r, cy + r], outline=color, width=w)
+    draw.line([bb, seat], fill=color, width=w)
+    draw.line([bb, bar], fill=color, width=w)
+    draw.line([(x1c, cy), seat], fill=color, width=w)
+    draw.line([(x1c, cy), bb], fill=color, width=w)
+    draw.line([bar, (x2c, cy)], fill=color, width=w)
+    draw.line([(seat[0] - r * 0.5, seat[1]), (seat[0] + r * 0.5, seat[1])], fill=color, width=w)
+
+
+def _icon_shoe(draw, box, color, w=5):
+    x0, y0, x1, y1 = box
+    h, wd = y1 - y0, x1 - x0
+    sole_y = y0 + h * 0.78
+    pts = [
+        (x0 + wd * 0.08, sole_y),
+        (x0 + wd * 0.05, y0 + h * 0.55),
+        (x0 + wd * 0.20, y0 + h * 0.35),
+        (x0 + wd * 0.45, y0 + h * 0.32),
+        (x0 + wd * 0.55, y0 + h * 0.42),
+        (x1 - wd * 0.10, y0 + h * 0.50),
+        (x1 - wd * 0.03, y0 + h * 0.62),
+        (x1 - wd * 0.05, sole_y),
+    ]
+    draw.line(pts + [pts[0]], fill=color, width=w, joint="curve")
+    draw.line([(x0 + wd * 0.30, y0 + h * 0.34), (x0 + wd * 0.40, y0 + h * 0.50)], fill=color, width=max(2, w - 2))
+    draw.line([(x0 + wd * 0.42, y0 + h * 0.34), (x0 + wd * 0.52, y0 + h * 0.50)], fill=color, width=max(2, w - 2))
+
+
+def _icon_walker(draw, box, color, w=5):
+    x0, y0, x1, y1 = box
+    h, wd = y1 - y0, x1 - x0
+    cx = x0 + wd * 0.5
+    head_r = h * 0.10
+    head_c = (cx, y0 + h * 0.16)
+    draw.ellipse([head_c[0] - head_r, head_c[1] - head_r, head_c[0] + head_r, head_c[1] + head_r], outline=color, width=w)
+    neck = (cx, y0 + h * 0.26)
+    hip = (cx - wd * 0.03, y0 + h * 0.55)
+    draw.line([neck, hip], fill=color, width=w)
+    draw.line([hip, (x0 + wd * 0.20, y1 - h * 0.02)], fill=color, width=w)
+    draw.line([hip, (x1 - wd * 0.15, y0 + h * 0.72)], fill=color, width=w)
+    draw.line([(neck[0], neck[1] + h * 0.08), (x0 + wd * 0.15, y0 + h * 0.42)], fill=color, width=w)
+    draw.line([(neck[0], neck[1] + h * 0.08), (x1 - wd * 0.10, y0 + h * 0.55)], fill=color, width=w)
+
+
+def _icon_swimmer(draw, box, color, w=5):
+    x0, y0, x1, y1 = box
+    h, wd = y1 - y0, x1 - x0
+    cy = y0 + h * 0.35
+    head_r = h * 0.11
+    hx = x1 - wd * 0.30
+    draw.ellipse([hx - head_r, cy - head_r, hx + head_r, cy + head_r], outline=color, width=w)
+    draw.line([(hx - head_r, cy + head_r * 0.3), (x0 + wd * 0.12, cy + h * 0.14)], fill=color, width=w, joint="curve")
+    draw.line([(x0 + wd * 0.12, cy + h * 0.14), (x0 + wd * 0.0, cy - h * 0.02)], fill=color, width=w)
+    draw.line([(hx + head_r * 0.6, cy - h * 0.06), (x1 - wd * 0.0, cy - h * 0.22)], fill=color, width=w)
+    wave_y = y0 + h * 0.72
+    for row in range(2):
+        yy = wave_y + row * h * 0.14
+        for i in range(3):
+            xx = x0 + wd * 0.05 + i * wd * 0.32
+            bbox = [xx, yy - h * 0.045, xx + wd * 0.30, yy + h * 0.045]
+            start, end = (200, 340) if i % 2 == 0 else (20, 160)
+            draw.arc(bbox, start, end, fill=color, width=max(3, w - 2))
+
+
+_SPORT_ICONS = {"Ride": _icon_bike, "Run": _icon_shoe, "Walk": _icon_walker, "Swim": _icon_swimmer}
+
+
 def _draw_centered_text(draw, xy_center, text, font, fill, letter_spacing: int = 0):
     """Draw text horizontally centered at xy_center, optionally with extra
     letter-spacing (rendered by drawing each glyph separately)."""
@@ -338,119 +484,130 @@ def _draw_centered_text(draw, xy_center, text, font, fill, letter_spacing: int =
 
 
 def render_recap_card(data: dict) -> bytes:
-    """Render the recap dict into a PNG card. Returns raw PNG bytes."""
+    """Render the recap dict into a PNG card. Returns raw PNG bytes.
+
+    Drawn onto a generously tall canvas, then cropped to the actual content
+    height at the end — so the card is the same height regardless of how
+    many highlight lines there are, with no leftover empty space at the
+    bottom (and no risk of clipping when there are several highlights).
+    """
     from PIL import Image, ImageDraw
 
-    W, H = 1080, 1440
-    img = Image.new("RGB", (W, H), (0, 0, 0))
+    W, MAX_H = 1080, 2000
+    img = Image.new("RGB", (W, MAX_H), (0, 0, 0))
 
     # --- Faint BMCC crest watermark, centered ------------------------------
     try:
         logo = Image.open(_LOGO_PATH).convert("RGB")
         target = int(W * 0.8)
         logo = logo.resize((target, target))
-        logo = logo.point(lambda p: int(p * 0.10))  # dim to ~10% brightness
-        img.paste(logo, ((W - target) // 2, (H - target) // 2 - 40))
+        logo = logo.point(lambda p: int(p * 0.25))  # dim to ~25% brightness
+        img.paste(logo, ((W - target) // 2, 220))
     except (OSError, FileNotFoundError):
         pass
 
     draw = ImageDraw.Draw(img)
 
-    f_title    = _font(_FONT_BOLD, 42)
-    f_subtitle = _font(_FONT_REG, 32)
-    f_sport    = _font(_FONT_BOLD, 26)
-    f_value    = _font(_FONT_BOLD, 68)
-    f_unit     = _font(_FONT_REG, 30)
-    f_count    = _font(_FONT_REG, 24)
-    f_trend    = _font(_FONT_BOLD, 22)
+    f_title     = _font(_FONT_BOLD, 42)
+    f_subtitle  = _font(_FONT_REG, 32)
+    f_daysline  = _font(_FONT_REG, 26)
+    f_sport     = _font(_FONT_BOLD, 28)
+    f_value     = _font(_FONT_BOLD, 68)
+    f_unit      = _font(_FONT_REG, 30)
+    f_count     = _font(_FONT_REG, 24)
+    f_trend     = _font(_FONT_BOLD, 28)
     f_highlight = _font(_FONT_BOLD, 26)
-    f_tagline  = _font(_FONT_REG, 26)
+    f_tagline   = _font(_FONT_REG, 26)
 
     margin = 80
 
     # --- Header --------------------------------------------------------------
+    y = 70
     _draw_centered_text(
-        draw, (W / 2, 70), data["month_label"].upper() + " RECAP",
+        draw, (W / 2, y), data["month_label"].upper() + " RECAP",
         f_title, _WHITE, letter_spacing=6,
     )
+    y += 60
     _draw_centered_text(
-        draw, (W / 2, 130), _sanitize_for_font(data["athlete_name"]), f_subtitle, _GRAY,
+        draw, (W / 2, y), _sanitize_for_font(data["athlete_name"]), f_subtitle, _GRAY,
     )
+    y += 50
+    active, rest = data["active_days"], data["rest_days"]
+    _draw_centered_text(
+        draw, (W / 2, y),
+        f"{active} active day{'s' if active != 1 else ''}  \u00b7  "
+        f"{rest} rest day{'s' if rest != 1 else ''}",
+        f_daysline, _GOLD,
+    )
+    y += 70
 
     # --- Sport rows ------------------------------------------------------------
-    row_top = 240
     row_height = 230
-    badge_d = 90
+    icon_size = 96
 
     for sport in data["sports"]:
-        cy = row_top + badge_d // 2
-
-        # Accent circle badge with sport initial
+        row_top = y
         color = tuple(sport["color"])
-        draw.ellipse(
-            [margin, row_top, margin + badge_d, row_top + badge_d],
-            outline=color, width=3,
-        )
-        initial = sport["key"][0] if sport["key"] != "Run" else "Ru"
-        iw = draw.textlength(initial, font=f_sport)
-        draw.text(
-            (margin + badge_d / 2 - iw / 2, cy - 15),
-            initial, font=f_sport, fill=color,
-        )
+        icon_box = (margin, row_top, margin + icon_size, row_top + icon_size)
+        _SPORT_ICONS[sport["key"]](draw, icon_box, color)
 
-        text_x = margin + badge_d + 40
+        text_x = margin + icon_size + 34
 
         draw.text((text_x, row_top - 6), sport["label"], font=f_sport, fill=color)
 
-        value_y = row_top + 34
+        value_y = row_top + 36
         draw.text((text_x, value_y), sport["value_text"], font=f_value, fill=_WHITE)
         value_w = draw.textlength(sport["value_text"], font=f_value)
         draw.text((text_x + value_w + 12, value_y + 30), sport["unit"], font=f_unit, fill=_GRAY)
 
         count_label = "activity" if sport["count"] == 1 else "activities"
         draw.text(
-            (text_x, row_top + 130), f"{sport['count']} {count_label}",
+            (text_x, row_top + 132), f"{sport['count']} {count_label}",
             font=f_count, fill=_GRAY,
         )
 
-        # Trend pill, right-aligned
+        # Trend pill, right-aligned, vertically centered on the row
         trend_color = _trend_rgb(sport["trend_color"])
         arrow = {"up": "\u2191", "down": "\u2193", "flat": "\u2013", "new": "\u2013"}[sport["trend_color"]]
         pill_text = f"{arrow} {sport['trend_label']}"
-        pill_w = draw.textlength(pill_text, font=f_trend) + 40
-        pill_h = 46
+        pill_w = draw.textlength(pill_text, font=f_trend) + 48
+        pill_h = 60
         pill_x1 = W - margin
         pill_x0 = pill_x1 - pill_w
-        pill_y0 = row_top + 40
+        pill_y0 = row_top + (icon_size - pill_h) / 2 + 4
         pill_y1 = pill_y0 + pill_h
         draw.rounded_rectangle(
             [pill_x0, pill_y0, pill_x1, pill_y1], radius=pill_h / 2,
-            fill=(24, 24, 24), outline=(50, 50, 50), width=1,
+            fill=(24, 24, 24), outline=(55, 55, 55), width=1,
         )
         draw.text(
-            (pill_x0 + 20, pill_y0 + (pill_h - 22) / 2), pill_text,
+            (pill_x0 + 24, pill_y0 + (pill_h - 30) / 2 - 2), pill_text,
             font=f_trend, fill=trend_color,
         )
 
         row_bottom = row_top + row_height
         if sport is not data["sports"][-1]:
             draw.line([(margin, row_bottom), (W - margin, row_bottom)], fill=_DIM_GRAY, width=1)
-        row_top = row_bottom
+        y = row_bottom
 
     # --- Highlights ------------------------------------------------------------
     if data["highlights"]:
-        draw.line([(margin, row_top), (W - margin, row_top)], fill=_DIM_GRAY, width=1)
-        hy = row_top + 30
+        draw.line([(margin, y), (W - margin, y)], fill=_DIM_GRAY, width=1)
+        y += 40
         for line in data["highlights"]:
-            draw.rounded_rectangle([margin, hy + 6, margin + 8, hy + 34], radius=4, fill=_GOLD)
-            draw.text((margin + 26, hy), line, font=f_highlight, fill=_GOLD)
-            hy += 46
-        row_top = hy + 10
+            draw.rounded_rectangle([margin, y + 6, margin + 8, y + 34], radius=4, fill=_GOLD)
+            draw.text((margin + 26, y), line, font=f_highlight, fill=_GOLD)
+            y += 48
+        y += 10
     else:
-        row_top += 30
+        y += 30
 
     # --- Tagline -----------------------------------------------------------
-    _draw_centered_text(draw, (W / 2, H - 70), "Beyond Miles - Beyond Limits", f_tagline, _GOLD)
+    y += 40
+    _draw_centered_text(draw, (W / 2, y), "Beyond Miles - Beyond Limits", f_tagline, _GOLD)
+    y += 60
+
+    img = img.crop((0, 0, W, min(y, MAX_H)))
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
