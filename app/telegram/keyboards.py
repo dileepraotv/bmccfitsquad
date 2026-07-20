@@ -109,7 +109,7 @@ def activity_edit_description_keyboard() -> InlineKeyboardMarkup:
 def recap_goal_prompt_keyboard() -> InlineKeyboardMarkup:
     """Shown under the monthly recap caption, offering to set next month's goal."""
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton(_padded("🎯 Set a Goal", 21), callback_data="goal:add"),
+        InlineKeyboardButton(_padded("Set a Goal", 21), callback_data="goal:add"),
         InlineKeyboardButton(_padded("Not now", 21),       callback_data="recap:dismiss"),
     ]])
 

@@ -72,11 +72,17 @@ def key_activity_edit(telegram_user_id: int) -> str:
     return f"activity:edit:{telegram_user_id}"
 
 
+# Bump this whenever render_recap_card()'s visual output changes so stale
+# cached renders from before the change are transparently bypassed instead
+# of being served for up to the full 60-day cache TTL.
+_RECAP_CACHE_VERSION = 3
+
+
 def key_recap_image(user_id, year: int, month: int) -> str:
     """Cached recap card PNG (base64-encoded) for one user + calendar month."""
-    return f"recap:image:{user_id}:{year}-{month:02d}"
+    return f"recap:v{_RECAP_CACHE_VERSION}:image:{user_id}:{year}-{month:02d}"
 
 
 def key_recap_caption(user_id, year: int, month: int) -> str:
     """Cached recap caption text for one user + calendar month."""
-    return f"recap:caption:{user_id}:{year}-{month:02d}"
+    return f"recap:v{_RECAP_CACHE_VERSION}:caption:{user_id}:{year}-{month:02d}"

@@ -51,12 +51,17 @@ _RECAP_SPORTS: list[str] = ["Ride", "Run", "Walk", "Swim"]
 _SPORT_LABELS: dict[str, str] = {"Ride": "RIDE", "Run": "RUN", "Walk": "WALK", "Swim": "SWIM"}
 
 # (accent RGB, unit) per sport — Ride/Run/Walk in km, Swim in metres.
+# Muted palette to match the approved reference design (icons carry the
+# accent color; the sport label text stays a single uniform gold — see
+# _LABEL_COLOR — rather than repeating each accent on the text itself).
 _SPORT_STYLE: dict[str, dict] = {
-    "Ride": {"color": (212, 175, 55),  "unit": "km"},   # gold
-    "Run":  {"color": (255, 140, 66),  "unit": "km"},   # orange
-    "Walk": {"color": (124, 197, 118), "unit": "km"},   # green
-    "Swim": {"color": (79, 168, 232),  "unit": "m"},    # blue
+    "Ride": {"color": (196, 156, 92),  "unit": "km"},   # muted gold
+    "Run":  {"color": (196, 122, 76),  "unit": "km"},   # muted terracotta
+    "Walk": {"color": (116, 148, 92),  "unit": "km"},   # muted sage
+    "Swim": {"color": (76, 110, 158),  "unit": "m"},    # muted steel blue
 }
+
+_LABEL_COLOR = (204, 175, 133)  # uniform warm tan/gold for all sport labels
 
 _MIN_STREAK_TO_SHOW = 3  # days — shorter streaks aren't worth calling out
 
@@ -393,12 +398,12 @@ def _trend_rgb(color_key: str) -> tuple[int, int, int]:
 def _icon_bike(draw, box, color, w=5):
     x0, y0, x1, y1 = box
     h, wd = y1 - y0, x1 - x0
-    cy = y0 + h * 0.68
-    r = h * 0.20
-    x1c, x2c = x0 + wd * 0.22, x1 - wd * 0.22
-    bb = (x0 + wd * 0.48, cy)
-    seat = (x0 + wd * 0.36, y0 + h * 0.20)
-    bar = (x0 + wd * 0.78, y0 + h * 0.34)
+    cy = y0 + h * 0.66
+    r = h * 0.22
+    x1c, x2c = x0 + wd * 0.24, x1 - wd * 0.24
+    bb = (x0 + wd * 0.50, cy)
+    seat = (x0 + wd * 0.34, y0 + h * 0.18)
+    bar = (x0 + wd * 0.76, y0 + h * 0.32)
     draw.ellipse([x1c - r, cy - r, x1c + r, cy + r], outline=color, width=w)
     draw.ellipse([x2c - r, cy - r, x2c + r, cy + r], outline=color, width=w)
     draw.line([bb, seat], fill=color, width=w)
@@ -406,26 +411,30 @@ def _icon_bike(draw, box, color, w=5):
     draw.line([(x1c, cy), seat], fill=color, width=w)
     draw.line([(x1c, cy), bb], fill=color, width=w)
     draw.line([bar, (x2c, cy)], fill=color, width=w)
-    draw.line([(seat[0] - r * 0.5, seat[1]), (seat[0] + r * 0.5, seat[1])], fill=color, width=w)
+    draw.line([(seat[0] - r * 0.45, seat[1]), (seat[0] + r * 0.55, seat[1])], fill=color, width=w)
+    draw.ellipse(
+        [bb[0] - r * 0.22, bb[1] - r * 0.22, bb[0] + r * 0.22, bb[1] + r * 0.22],
+        outline=color, width=max(2, w - 2),
+    )
 
 
 def _icon_shoe(draw, box, color, w=5):
     x0, y0, x1, y1 = box
     h, wd = y1 - y0, x1 - x0
-    sole_y = y0 + h * 0.78
-    pts = [
-        (x0 + wd * 0.08, sole_y),
-        (x0 + wd * 0.05, y0 + h * 0.55),
-        (x0 + wd * 0.20, y0 + h * 0.35),
-        (x0 + wd * 0.45, y0 + h * 0.32),
-        (x0 + wd * 0.55, y0 + h * 0.42),
-        (x1 - wd * 0.10, y0 + h * 0.50),
-        (x1 - wd * 0.03, y0 + h * 0.62),
-        (x1 - wd * 0.05, sole_y),
+
+    def pt(px, py):
+        return (x0 + wd * px, y0 + h * py)
+
+    upper = [
+        pt(0.08, 0.72), pt(0.10, 0.36), pt(0.30, 0.20), pt(0.44, 0.36),
+        pt(0.68, 0.32), pt(0.95, 0.52), pt(0.86, 0.68), pt(0.55, 0.72),
     ]
-    draw.line(pts + [pts[0]], fill=color, width=w, joint="curve")
-    draw.line([(x0 + wd * 0.30, y0 + h * 0.34), (x0 + wd * 0.40, y0 + h * 0.50)], fill=color, width=max(2, w - 2))
-    draw.line([(x0 + wd * 0.42, y0 + h * 0.34), (x0 + wd * 0.52, y0 + h * 0.50)], fill=color, width=max(2, w - 2))
+    draw.line(upper + [upper[0]], fill=color, width=w, joint="curve")
+    sole = [pt(0.06, 0.72), pt(0.06, 0.86), pt(0.90, 0.86), pt(0.97, 0.72)]
+    draw.line(sole, fill=color, width=w, joint="curve")
+    draw.line([pt(0.06, 0.79), pt(0.97, 0.79)], fill=color, width=max(2, w - 3))
+    draw.line([pt(0.32, 0.24), pt(0.40, 0.38)], fill=color, width=max(2, w - 2))
+    draw.line([pt(0.44, 0.26), pt(0.52, 0.40)], fill=color, width=max(2, w - 2))
 
 
 def _icon_walker(draw, box, color, w=5):
@@ -495,17 +504,6 @@ def render_recap_card(data: dict) -> bytes:
 
     W, MAX_H = 1080, 2000
     img = Image.new("RGB", (W, MAX_H), (0, 0, 0))
-
-    # --- Faint BMCC crest watermark, centered ------------------------------
-    try:
-        logo = Image.open(_LOGO_PATH).convert("RGB")
-        target = int(W * 0.8)
-        logo = logo.resize((target, target))
-        logo = logo.point(lambda p: int(p * 0.25))  # dim to ~25% brightness
-        img.paste(logo, ((W - target) // 2, 220))
-    except (OSError, FileNotFoundError):
-        pass
-
     draw = ImageDraw.Draw(img)
 
     f_title     = _font(_FONT_BOLD, 42)
@@ -543,17 +541,22 @@ def render_recap_card(data: dict) -> bytes:
 
     # --- Sport rows ------------------------------------------------------------
     row_height = 230
-    icon_size = 96
+    icon_size = 100
+    # Icon is vertically centered on the row's visual anchor (the big
+    # number), not on the row's raw top edge — otherwise icons of
+    # different silhouettes read as "off-center" against the text block.
+    icon_anchor_offset = 76
 
     for sport in data["sports"]:
         row_top = y
         color = tuple(sport["color"])
-        icon_box = (margin, row_top, margin + icon_size, row_top + icon_size)
+        icon_cy = row_top + icon_anchor_offset
+        icon_box = (margin, icon_cy - icon_size / 2, margin + icon_size, icon_cy + icon_size / 2)
         _SPORT_ICONS[sport["key"]](draw, icon_box, color)
 
-        text_x = margin + icon_size + 34
+        text_x = margin + icon_size + 30
 
-        draw.text((text_x, row_top - 6), sport["label"], font=f_sport, fill=color)
+        draw.text((text_x, row_top - 6), sport["label"], font=f_sport, fill=_LABEL_COLOR)
 
         value_y = row_top + 36
         draw.text((text_x, value_y), sport["value_text"], font=f_value, fill=_WHITE)
@@ -602,8 +605,17 @@ def render_recap_card(data: dict) -> bytes:
     else:
         y += 30
 
-    # --- Tagline -----------------------------------------------------------
-    y += 40
+    # --- BMCC crest + tagline ------------------------------------------------
+    y += 30
+    try:
+        crest_size = 110
+        logo = Image.open(_LOGO_PATH).convert("RGB")
+        logo = logo.resize((crest_size, crest_size))
+        img.paste(logo, (int(W / 2 - crest_size / 2), int(y)))
+        y += crest_size + 20
+    except (OSError, FileNotFoundError):
+        pass
+
     _draw_centered_text(draw, (W / 2, y), "Beyond Miles - Beyond Limits", f_tagline, _GOLD)
     y += 60
 
