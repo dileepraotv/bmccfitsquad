@@ -67,6 +67,14 @@ _MIN_STREAK_TO_SHOW = 3  # days — shorter streaks aren't worth calling out
 
 _DATA_DIR   = pathlib.Path("data")
 _LOGO_PATH  = _DATA_DIR / "bmcc_logo.jpg"
+_CREST_PATH = _DATA_DIR / "bmcc_crest.png"
+_ICON_DIR   = _DATA_DIR / "icons"
+_ICON_PATHS = {
+    "Ride": _ICON_DIR / "ride.png",
+    "Run":  _ICON_DIR / "run.png",
+    "Walk": _ICON_DIR / "walk.png",
+    "Swim": _ICON_DIR / "swim.png",
+}
 _FONT_DIR   = _DATA_DIR / "fonts"
 _FONT_BOLD  = _FONT_DIR / "DejaVuSans-Bold.ttf"
 _FONT_REG   = _FONT_DIR / "DejaVuSans.ttf"
@@ -391,110 +399,39 @@ def _trend_rgb(color_key: str) -> tuple[int, int, int]:
 
 
 # ---------------------------------------------------------------------------
-# Sport icons — simple single-stroke line art, drawn directly (no external
-# icon assets / emoji font dependency needed).
+# Sport icons — bundled line-art PNGs (approved reference assets), keyed
+# onto a transparent alpha so they composite cleanly over the dark card
+# regardless of their own flat near-black/charcoal backdrop.
 # ---------------------------------------------------------------------------
 
-def _icon_bike(draw, box, color, w=5):
+def _load_art_rgba(path: pathlib.Path, max_size: int, midpoint: int = 40, ramp: int = 20):
+    """Load a flat-background line-art PNG and turn its backdrop transparent,
+    using luminosity thresholding (the source assets are two-tone: a dark
+    flat backdrop + bright line art, so a midpoint cut with a short
+    anti-aliasing ramp reproduces a clean cutout without any fringing)."""
+    from PIL import Image
+
+    img = Image.open(path).convert("RGB")
+    img.thumbnail((max_size, max_size), Image.LANCZOS)
+    lo, hi = max(0, midpoint - ramp), min(255, midpoint + ramp)
+    span = max(1, hi - lo)
+    lut = [0 if v <= lo else 255 if v >= hi else int((v - lo) * 255 / span) for v in range(256)]
+    alpha = img.convert("L").point(lut)
+    rgba = img.convert("RGBA")
+    rgba.putalpha(alpha)
+    return rgba
+
+
+def _paste_icon(img, sport_key: str, box) -> None:
+    """Paste the bundled icon for `sport_key` centered within `box`
+    (x0, y0, x1, y1), preserving its native aspect ratio."""
     x0, y0, x1, y1 = box
-    h, wd = y1 - y0, x1 - x0
-    cy = y0 + h * 0.66
-    r = h * 0.22
-    x1c, x2c = x0 + wd * 0.24, x1 - wd * 0.24
-    bb = (x0 + wd * 0.50, cy)
-    seat = (x0 + wd * 0.34, y0 + h * 0.18)
-    bar = (x0 + wd * 0.76, y0 + h * 0.32)
-    sw = max(2, w - 3)
-    for cx in (x1c, x2c):
-        draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=color, width=w)
-        draw.line([(cx - r * 0.66, cy - r * 0.66), (cx + r * 0.66, cy + r * 0.66)], fill=color, width=sw)
-        draw.line([(cx - r * 0.66, cy + r * 0.66), (cx + r * 0.66, cy - r * 0.66)], fill=color, width=sw)
-    draw.line([bb, seat], fill=color, width=w)
-    draw.line([bb, bar], fill=color, width=w)
-    draw.line([(x1c, cy), seat], fill=color, width=w)
-    draw.line([(x1c, cy), bb], fill=color, width=w)
-    draw.line([bar, (x2c, cy)], fill=color, width=w)
-    draw.line([(seat[0] - r * 0.45, seat[1]), (seat[0] + r * 0.55, seat[1])], fill=color, width=w)
-    # Drop handlebar: small curled hook at the far end instead of a bare tip.
-    hook_c = (bar[0] + wd * 0.06, bar[1] - h * 0.02)
-    draw.arc(
-        [hook_c[0] - r * 0.28, hook_c[1] - r * 0.28, hook_c[0] + r * 0.28, hook_c[1] + r * 0.28],
-        60, 300, fill=color, width=sw,
-    )
-    draw.line([bar, hook_c], fill=color, width=sw)
-    draw.ellipse(
-        [bb[0] - r * 0.22, bb[1] - r * 0.22, bb[0] + r * 0.22, bb[1] + r * 0.22],
-        outline=color, width=sw,
-    )
-
-
-def _icon_shoe(draw, box, color, w=5):
-    x0, y0, x1, y1 = box
-    h, wd = y1 - y0, x1 - x0
-
-    def pt(px, py):
-        return (x0 + wd * px, y0 + h * py)
-
-    upper = [
-        pt(0.08, 0.72), pt(0.09, 0.40), pt(0.16, 0.24), pt(0.26, 0.18),
-        pt(0.38, 0.30), pt(0.64, 0.28), pt(0.95, 0.52), pt(0.86, 0.68), pt(0.55, 0.72),
-    ]
-    draw.line(upper + [upper[0]], fill=color, width=w, joint="curve")
-    sole = [pt(0.06, 0.72), pt(0.06, 0.86), pt(0.90, 0.86), pt(0.97, 0.72)]
-    draw.line(sole, fill=color, width=w, joint="curve")
-    draw.line([pt(0.06, 0.79), pt(0.97, 0.79)], fill=color, width=max(2, w - 3))
-    # Heel tab: small notch standing up at the back of the ankle collar.
-    draw.line([pt(0.09, 0.40), pt(0.13, 0.24), pt(0.18, 0.20)], fill=color, width=max(2, w - 2), joint="curve")
-    # Laces: three parallel strokes across the tongue.
-    draw.line([pt(0.30, 0.24), pt(0.38, 0.38)], fill=color, width=max(2, w - 2))
-    draw.line([pt(0.40, 0.26), pt(0.48, 0.40)], fill=color, width=max(2, w - 2))
-    draw.line([pt(0.50, 0.28), pt(0.58, 0.42)], fill=color, width=max(2, w - 2))
-
-
-def _icon_walker(draw, box, color, w=5):
-    x0, y0, x1, y1 = box
-    h, wd = y1 - y0, x1 - x0
-    cx = x0 + wd * 0.5
-    head_r = h * 0.10
-    head_c = (cx, y0 + h * 0.16)
-    draw.ellipse([head_c[0] - head_r, head_c[1] - head_r, head_c[0] + head_r, head_c[1] + head_r], outline=color, width=w)
-    neck = (cx, y0 + h * 0.26)
-    hip = (cx - wd * 0.03, y0 + h * 0.55)
-    draw.line([neck, hip], fill=color, width=w)
-    # Front leg: bent at the knee, mid-stride.
-    knee_f = (x0 + wd * 0.30, y0 + h * 0.78)
-    draw.line([hip, knee_f, (x0 + wd * 0.18, y1 - h * 0.02)], fill=color, width=w, joint="curve")
-    # Back leg: trailing, straighter.
-    draw.line([hip, (x1 - wd * 0.15, y0 + h * 0.72)], fill=color, width=w)
-    # Front arm: bent at the elbow, swinging forward.
-    elbow_f = (x0 + wd * 0.22, y0 + h * 0.40)
-    draw.line([(neck[0], neck[1] + h * 0.08), elbow_f, (x0 + wd * 0.08, y0 + h * 0.50)], fill=color, width=w, joint="curve")
-    # Back arm: bent at the elbow, swinging back.
-    elbow_b = (x1 - wd * 0.08, y0 + h * 0.46)
-    draw.line([(neck[0], neck[1] + h * 0.08), elbow_b, (x1 - wd * 0.16, y0 + h * 0.62)], fill=color, width=w, joint="curve")
-
-
-def _icon_swimmer(draw, box, color, w=5):
-    x0, y0, x1, y1 = box
-    h, wd = y1 - y0, x1 - x0
-    cy = y0 + h * 0.35
-    head_r = h * 0.11
-    hx = x1 - wd * 0.30
-    draw.ellipse([hx - head_r, cy - head_r, hx + head_r, cy + head_r], outline=color, width=w)
-    draw.line([(hx - head_r, cy + head_r * 0.3), (x0 + wd * 0.12, cy + h * 0.14)], fill=color, width=w, joint="curve")
-    draw.line([(x0 + wd * 0.12, cy + h * 0.14), (x0 + wd * 0.0, cy - h * 0.02)], fill=color, width=w)
-    draw.line([(hx + head_r * 0.6, cy - h * 0.06), (x1 - wd * 0.0, cy - h * 0.22)], fill=color, width=w)
-    wave_y = y0 + h * 0.72
-    for row in range(2):
-        yy = wave_y + row * h * 0.14
-        for i in range(3):
-            xx = x0 + wd * 0.05 + i * wd * 0.32
-            bbox = [xx, yy - h * 0.045, xx + wd * 0.30, yy + h * 0.045]
-            start, end = (200, 340) if i % 2 == 0 else (20, 160)
-            draw.arc(bbox, start, end, fill=color, width=max(3, w - 2))
-
-
-_SPORT_ICONS = {"Ride": _icon_bike, "Run": _icon_shoe, "Walk": _icon_walker, "Swim": _icon_swimmer}
+    size = int(max(x1 - x0, y1 - y0))
+    icon = _load_art_rgba(_ICON_PATHS[sport_key], size)
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    px = int(cx - icon.width / 2)
+    py = int(cy - icon.height / 2)
+    img.paste(icon, (px, py), icon)
 
 
 def _draw_centered_text(draw, xy_center, text, font, fill, letter_spacing: int = 0):
@@ -574,10 +511,9 @@ def render_recap_card(data: dict) -> bytes:
     for sport in data["sports"]:
         row_start = y
         content_top = row_start + row_top_pad
-        color = tuple(sport["color"])
         icon_cy = content_top + icon_anchor_offset
         icon_box = (margin, icon_cy - icon_size / 2, margin + icon_size, icon_cy + icon_size / 2)
-        _SPORT_ICONS[sport["key"]](draw, icon_box, color)
+        _paste_icon(img, sport["key"], icon_box)
 
         text_x = margin + icon_size + 30
 
@@ -634,9 +570,8 @@ def render_recap_card(data: dict) -> bytes:
     y += 20
     try:
         crest_size = 110
-        logo = Image.open(_LOGO_PATH).convert("RGB")
-        logo = logo.resize((crest_size, crest_size))
-        img.paste(logo, (int(W / 2 - crest_size / 2), int(y)))
+        crest = _load_art_rgba(_CREST_PATH, crest_size, midpoint=100, ramp=40)
+        img.paste(crest, (int(W / 2 - crest.width / 2), int(y)), crest)
         y += crest_size + 20
     except (OSError, FileNotFoundError):
         pass
