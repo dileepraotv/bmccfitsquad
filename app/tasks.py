@@ -150,6 +150,7 @@ async def _send_activity_notification_async(
                     text=text,
                     parse_mode="Markdown",
                     reply_markup=edit_markup,
+                    disable_web_page_preview=True,
                 )
                 logger.info("Activity DM sent to telegram_id=%s", user.telegram_user_id)
             except Exception as exc:
@@ -159,7 +160,8 @@ async def _send_activity_notification_async(
             for chat in group_chats:
                 try:
                     await bot.send_message(
-                        chat_id=chat.id, text=text, parse_mode="Markdown"
+                        chat_id=chat.id, text=text, parse_mode="Markdown",
+                        disable_web_page_preview=True,
                     )
                     logger.info("Notification sent to group chat_id=%s", chat.id)
                 except Exception as exc:

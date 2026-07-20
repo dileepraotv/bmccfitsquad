@@ -239,7 +239,7 @@ async def send_activity_notification(
 
     for chat_id in chat_ids:
         try:
-            await bot.send_message(chat_id=chat_id, text=text)
+            await bot.send_message(chat_id=chat_id, text=text, disable_web_page_preview=True)
             logger.info(
                 "Notification sent: activity_id=%s chat_id=%s",
                 activity.strava_activity_id,
