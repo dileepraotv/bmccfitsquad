@@ -172,7 +172,7 @@ async def format_activity_notification(
     # ------------------------------------------------------------------
     # Goal progress section
     # ------------------------------------------------------------------
-    lines += ["", _SEPARATOR, "🎯 *Goal Progress*", ""]
+    lines += [_SEPARATOR, "🎯 *Goal Progress*", ""]
     if goal_lines:
         lines += goal_lines
     else:
