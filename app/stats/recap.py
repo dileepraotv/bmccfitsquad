@@ -40,6 +40,12 @@ logger = logging.getLogger(__name__)
 # window during which /recap could reasonably still target it).
 _RECAP_CACHE_TTL_SECONDS = 60 * 86_400
 
+# A preview of the *current, still in-progress* year (via /yearrecap before
+# 31 Dec) must expire quickly — long enough to avoid re-rendering on rapid
+# repeat taps, but nowhere near long enough to still be sitting in the
+# cache by the time the real, final send happens at year end.
+_YEARLY_PREVIEW_CACHE_TTL_SECONDS = 5 * 60
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -229,7 +235,15 @@ async def get_or_build_recap(db: AsyncSession, user: User, year: int, month: int
 
 async def get_or_build_yearly_recap(db: AsyncSession, user: User, year: int) -> tuple[bytes, str]:
     """Return (image_png_bytes, caption_text) for this user + year, using
-    the Redis cache when available and populating it otherwise."""
+    the Redis cache when available and populating it otherwise.
+
+    Unlike a calendar month, a year isn't "done changing" until it actually
+    ends — /yearrecap lets someone preview the current, still-in-progress
+    year, so that preview must not be cached with the same long TTL used
+    for a genuinely completed year. Otherwise an earlier manual preview
+    (e.g. in November) could still be sitting in the cache on 31 December
+    and get served — with stale, incomplete data — to the real scheduled
+    send that evening."""
     from app.redis_client import get_redis, key_yearly_recap_caption, key_yearly_recap_image
 
     redis = await get_redis()
@@ -246,9 +260,12 @@ async def get_or_build_yearly_recap(db: AsyncSession, user: User, year: int) -> 
     image_bytes = render_recap_card(data, bg_color=_BG_NAVY)
     caption = build_yearly_recap_caption(data, user.telegram_first_name or "there")
 
+    year_is_over = datetime.now(timezone.utc) >= datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+    ttl = _RECAP_CACHE_TTL_SECONDS if year_is_over else _YEARLY_PREVIEW_CACHE_TTL_SECONDS
+
     try:
-        await redis.set(img_key, base64.b64encode(image_bytes).decode("ascii"), ex=_RECAP_CACHE_TTL_SECONDS)
-        await redis.set(cap_key, caption, ex=_RECAP_CACHE_TTL_SECONDS)
+        await redis.set(img_key, base64.b64encode(image_bytes).decode("ascii"), ex=ttl)
+        await redis.set(cap_key, caption, ex=ttl)
     except Exception:
         logger.warning("recap cache: failed to write cache for %s", img_key)
 

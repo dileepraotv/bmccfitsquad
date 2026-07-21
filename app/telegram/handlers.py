@@ -96,6 +96,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("notifications", cmd_notifications, filters=_priv))
     app.add_handler(CommandHandler("quote",         cmd_quote,         filters=_priv))
     app.add_handler(CommandHandler("recap",         cmd_recap,         filters=_priv))
+    app.add_handler(CommandHandler("yearrecap",     cmd_yearrecap,     filters=_priv))
 
     app.add_handler(CallbackQueryHandler(handle_callback))
 
@@ -222,7 +223,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "📊 *Stats \\& Goals*\n"
         "/stats — View activity stats by sport and time period\n"
         "/goals — Set, delete or check your fitness goals\n"
-        "/recap — Your most recently completed month, recapped\n\n"
+        "/recap — Your most recently completed month, recapped\n"
+        "/yearrecap — Preview your year in review so far\n\n"
         "🏆 *Group*\n"
         "/leaderboard — Monthly distance leaderboard\n\n"
         "💬 *Other*\n"
@@ -468,6 +470,41 @@ async def cmd_recap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.exception("cmd_recap failed for telegram_id=%s", update.effective_user.id)
             await update.message.reply_text(
                 "Sorry, I couldn't put your recap together just now. Please try again shortly."
+            )
+            return
+
+    await update.message.reply_photo(photo=image_bytes)
+    await update.message.reply_text(caption, reply_markup=recap_goal_prompt_keyboard())
+
+
+async def cmd_yearrecap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Manually preview the yearly recap card for the current (in-progress)
+    year — useful to check the design before the scheduled version fires
+    automatically at 20:00 IST on 31 December with the full year's data."""
+    from app.stats.recap import get_or_build_yearly_recap
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(User).where(User.telegram_user_id == update.effective_user.id)
+        )
+        user = result.scalar_one_or_none()
+
+        if not user or not user.strava_athlete_id:
+            await update.message.reply_text(
+                "You haven't connected your Strava account yet\\.\nUse /connect to get started\\.",
+                parse_mode="MarkdownV2",
+            )
+            return
+
+        await update.message.reply_text("⏳ Building your year in review...")
+
+        year = datetime.now(timezone.utc).year
+        try:
+            image_bytes, caption = await get_or_build_yearly_recap(db, user, year)
+        except Exception:
+            logger.exception("cmd_yearrecap failed for telegram_id=%s", update.effective_user.id)
+            await update.message.reply_text(
+                "Sorry, I couldn't put your year in review together just now. Please try again shortly."
             )
             return
 
