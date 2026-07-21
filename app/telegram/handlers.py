@@ -22,7 +22,7 @@ import random
 import uuid as _uuid_mod
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, case, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.ext import (
@@ -202,7 +202,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "*Once you're connected, here's what's available:*\n"
             "📊 /stats — Activity stats by sport and period\n"
             "🎯 /goals — Set and track distance goals\n"
-            "🏆 /leaderboard — Monthly group leaderboard\n"
+            "🏆 /leaderboard — Monthly points leaderboard\n"
             "🔄 /sync — Pull latest activities from Strava\n"
             "💬 /help — Full command reference\n\n"
             "🌐 [www\\.beyondmiles\\.cc](http://www.beyondmiles.cc) \\| 📸 @beyondmilescc",
@@ -226,7 +226,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/recap — Your most recently completed month, recapped\n"
         "/yearrecap — Preview your year in review so far\n\n"
         "🏆 *Group*\n"
-        "/leaderboard — Monthly distance leaderboard\n\n"
+        "/leaderboard — Monthly points leaderboard \\(multi\\-sport bonus included\\)\n\n"
         "💬 *Other*\n"
         "/quote — Random motivational quote\n"
         "/notifications — How activity notifications are managed\n"
@@ -405,22 +405,40 @@ async def cmd_goals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _send_goals_menu(update.message, update.effective_user.id)
 
 
+# Point-based multiplier system: each sport's kilometre is worth a
+# different number of points (roughly proportional to average energy
+# expenditure, with Run as the 1x baseline), plus a bonus for members who
+# train across more sports rather than just one.
+_LEADERBOARD_SPORTS = ["Ride", "Run", "Walk", "Swim"]
+_POINTS_PER_KM = {"Run": 10, "Swim": 40, "Walk": 6, "Ride": 3}
+_MULTI_SPORT_BONUS_PCT = {1: 0, 2: 5, 3: 10, 4: 15}
+
+
+def _leaderboard_name(text: str, width: int) -> str:
+    """Truncate with an ellipsis so the monospace table stays aligned."""
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
 async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     async with AsyncSessionLocal() as db:
         now = datetime.now(timezone.utc)
         month_start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
 
+        sport_sums = [
+            func.sum(
+                case(
+                    (Activity.activity_type.in_(_SPORT_ACTIVITY_TYPES[sport]), Activity.distance_meters),
+                    else_=0.0,
+                )
+            ).label(f"{sport.lower()}_m")
+            for sport in _LEADERBOARD_SPORTS
+        ]
+
         rows = await db.execute(
-            select(
-                User.telegram_first_name,
-                User.strava_athlete_name,
-                func.sum(Activity.distance_meters).label("total_m"),
-            )
+            select(User.telegram_first_name, User.strava_athlete_name, *sport_sums)
             .join(Activity, Activity.user_id == User.id)
             .where(Activity.activity_date >= month_start)
             .group_by(User.id, User.telegram_first_name, User.strava_athlete_name)
-            .order_by(func.sum(Activity.distance_meters).desc())
-            .limit(10)
         )
         entries = rows.all()
 
@@ -431,15 +449,56 @@ async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
-    lines = ["🏆 *BMCC Leaderboard — This Month*\n"]
-    medals = ["🥇", "🥈", "🥉"]
-    for i, (first_name, athlete_name, total_m) in enumerate(entries):
-        medal = medals[i] if i < 3 else f"{i + 1}."
-        name = athlete_name or first_name
-        km = round((total_m or 0) / 1000, 1)
-        lines.append(f"{medal} {name} — *{km} km*")
+    board = []
+    for first_name, athlete_name, ride_m, run_m, walk_m, swim_m in entries:
+        km = {
+            "Ride": (ride_m or 0) / 1000,
+            "Run":  (run_m or 0) / 1000,
+            "Walk": (walk_m or 0) / 1000,
+            "Swim": (swim_m or 0) / 1000,
+        }
+        base_points = sum(km[s] * _POINTS_PER_KM[s] for s in _LEADERBOARD_SPORTS)
+        sports_active = sum(1 for s in _LEADERBOARD_SPORTS if km[s] > 0)
+        bonus_pct = _MULTI_SPORT_BONUS_PCT.get(sports_active, 0)
+        total_points = base_points * (1 + bonus_pct / 100)
+        if total_points <= 0:
+            continue
+        board.append({
+            "name": athlete_name or first_name,
+            "km": km,
+            "bonus_pct": bonus_pct,
+            "total_points": total_points,
+        })
 
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    if not board:
+        await update.message.reply_text(
+            "🏆 No activity recorded this month yet\\.\nConnect Strava with /connect and get riding\\!",
+            parse_mode="MarkdownV2",
+        )
+        return
+
+    board.sort(key=lambda e: e["total_points"], reverse=True)
+    board = board[:10]
+
+    medals = ["🥇", "🥈", "🥉"]
+    header_line = f"{'':<3}{'Member':<12}{'Ride':>6}{'Run':>6}{'Walk':>6}{'Swim':>6}{'Bonus':>7}{'Total':>8}"
+    table_lines = [header_line, "-" * len(header_line)]
+    for i, e in enumerate(board):
+        rank = medals[i] if i < 3 else f"{i + 1}."
+        km = e["km"]
+        table_lines.append(
+            f"{rank:<3}{_leaderboard_name(e['name'], 12):<12}"
+            f"{km['Ride']:>6.0f}{km['Run']:>6.0f}{km['Walk']:>6.0f}{km['Swim']:>6.0f}"
+            f"{'+' + str(e['bonus_pct']) + '%':>7}{e['total_points']:>8.0f}"
+        )
+
+    text = (
+        "🏆 *BMCC Leaderboard — This Month*\n"
+        "_Points: Run 10/km · Swim 40/km · Walk 6/km · Ride 3/km_\n"
+        "_Multi\\-sport bonus: 2 sports \\+5% · 3 sports \\+10% · 4 sports \\+15%_\n\n"
+        "```\n" + "\n".join(table_lines) + "\n```"
+    )
+    await update.message.reply_text(text, parse_mode="MarkdownV2")
 
 
 async def cmd_recap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

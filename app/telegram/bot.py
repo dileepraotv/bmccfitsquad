@@ -116,7 +116,7 @@ async def setup_bot() -> None:
         BotCommand("fullsync",     "Rebuild full history (use if stats look wrong)"),
         BotCommand("connect",      "Link your Strava account"),
         BotCommand("disconnect",   "Unlink your Strava account"),
-        BotCommand("leaderboard",  "Monthly distance leaderboard"),
+        BotCommand("leaderboard",  "Monthly points leaderboard (multi-sport bonus)"),
         BotCommand("quote",        "Random motivational quote"),
         BotCommand("notifications", "How activity notifications are managed"),
         BotCommand("cancel",       "Cancel any in-progress action"),
