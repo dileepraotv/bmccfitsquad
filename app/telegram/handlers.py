@@ -414,11 +414,6 @@ _POINTS_PER_KM = {"Run": 10, "Swim": 40, "Walk": 6, "Ride": 3}
 _MULTI_SPORT_BONUS_PCT = {1: 0, 2: 5, 3: 10, 4: 15}
 
 
-def _leaderboard_name(text: str, width: int) -> str:
-    """Truncate with an ellipsis so the monospace table stays aligned."""
-    return text if len(text) <= width else text[: width - 1] + "…"
-
-
 async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     async with AsyncSessionLocal() as db:
         now = datetime.now(timezone.utc)
@@ -480,25 +475,29 @@ async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     board.sort(key=lambda e: e["total_points"], reverse=True)
     board = board[:10]
 
+    # A fixed-width monospace table overflows on narrow phone screens once
+    # names or enough sports are involved — a stacked card per member reads
+    # naturally at any screen width instead of forcing horizontal scroll.
     medals = ["🥇", "🥈", "🥉"]
-    header_line = f"{'':<3}{'Member':<12}{'Ride':>6}{'Run':>6}{'Walk':>6}{'Swim':>6}{'Bonus':>7}{'Total':>8}"
-    table_lines = [header_line, "-" * len(header_line)]
+    sport_icon = {"Ride": "🚴", "Run": "🏃", "Walk": "🚶", "Swim": "🏊"}
+    lines = ["🏆 *BMCC Leaderboard — This Month*\n"]
     for i, e in enumerate(board):
-        rank = medals[i] if i < 3 else f"{i + 1}."
+        rank = medals[i] if i < 3 else f"{i + 1}\\."
         km = e["km"]
-        table_lines.append(
-            f"{rank:<3}{_leaderboard_name(e['name'], 12):<12}"
-            f"{km['Ride']:>6.0f}{km['Run']:>6.0f}{km['Walk']:>6.0f}{km['Swim']:>6.0f}"
-            f"{'+' + str(e['bonus_pct']) + '%':>7}{e['total_points']:>8.0f}"
+        breakdown = "  ·  ".join(
+            f"{sport_icon[s]} {km[s]:.0f} km" for s in _LEADERBOARD_SPORTS if km[s] > 0
+        )
+        bonus_note = f"  \\(\\+{e['bonus_pct']}%\\)" if e["bonus_pct"] else ""
+        lines.append(
+            f"{rank} *{_escape_md(e['name'])}* — *{e['total_points']:.0f} pts*{bonus_note}\n"
+            f"     {_escape_md(breakdown)}\n"
         )
 
-    text = (
-        "🏆 *BMCC Leaderboard — This Month*\n"
+    lines.append(
         "_Points: Run 10/km · Swim 40/km · Walk 6/km · Ride 3/km_\n"
-        "_Multi\\-sport bonus: 2 sports \\+5% · 3 sports \\+10% · 4 sports \\+15%_\n\n"
-        "```\n" + "\n".join(table_lines) + "\n```"
+        "_Multi\\-sport bonus: 2 sports \\+5% · 3 sports \\+10% · 4 sports \\+15%_"
     )
-    await update.message.reply_text(text, parse_mode="MarkdownV2")
+    await update.message.reply_text("\n".join(lines), parse_mode="MarkdownV2")
 
 
 async def cmd_recap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
