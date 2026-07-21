@@ -466,7 +466,7 @@ def render_recap_card(data: dict) -> bytes:
 
     f_title     = _font(_FONT_BOLD, 42)
     f_subtitle  = _font(_FONT_REG, 32)
-    f_daysline  = _font(_FONT_REG, 26)
+    f_daysline  = _font(_FONT_REG, 31)
     f_sport     = _font(_FONT_BOLD, 28)
     f_value     = _font(_FONT_BOLD, 68)
     f_unit      = _font(_FONT_REG, 30)
@@ -569,7 +569,7 @@ def render_recap_card(data: dict) -> bytes:
     # --- BMCC crest + tagline ------------------------------------------------
     y += 20
     try:
-        crest_size = 110
+        crest_size = 132
         crest = _load_art_rgba(_CREST_PATH, crest_size, midpoint=100, ramp=40)
         img.paste(crest, (int(W / 2 - crest.width / 2), int(y)), crest)
         y += crest_size + 20
