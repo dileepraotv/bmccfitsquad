@@ -183,6 +183,7 @@ _cron_status: dict = {
     "last_result": None,
     "run_count": 0,
     "last_recap_result": None,
+    "last_yearly_recap_result": None,
 }
 
 
@@ -198,7 +199,12 @@ async def cron_sync_all(secret: str = ""):
     UptimeRobot URL: https://bmccfitsquad.onrender.com/cron/sync-all?secret=YOUR_SECRET
     """
     import asyncio
-    from app.tasks import catchup_sync_all_users, fire_and_forget, maybe_send_monthly_recaps
+    from app.tasks import (
+        catchup_sync_all_users,
+        fire_and_forget,
+        maybe_send_monthly_recaps,
+        maybe_send_yearly_recap,
+    )
 
     if not settings.cron_secret or secret != settings.cron_secret:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -210,14 +216,17 @@ async def cron_sync_all(secret: str = ""):
         result = await catchup_sync_all_users()
         _cron_status["last_result"] = result
 
-    async def _run_monthly_recap():
-        result = await maybe_send_monthly_recaps()
-        _cron_status["last_recap_result"] = result
+    async def _run_recaps():
+        # Sequential, not parallel: on 31 Dec the yearly card must land
+        # right after that same day's monthly card, not race it.
+        _cron_status["last_recap_result"] = await maybe_send_monthly_recaps()
+        _cron_status["last_yearly_recap_result"] = await maybe_send_yearly_recap()
 
     fire_and_forget(_run_and_record())
     # Piggybacks on this same ping — no-ops on every tick except once, at
-    # 20:00 IST on the last day of the month (see maybe_send_monthly_recaps).
-    fire_and_forget(_run_monthly_recap())
+    # 20:00 IST on the last day of the month (see maybe_send_monthly_recaps
+    # and maybe_send_yearly_recap).
+    fire_and_forget(_run_recaps())
     return {"status": "scheduled", "run_count": _cron_status["run_count"]}
 
 
@@ -238,6 +247,7 @@ async def cron_status():
         "last_run_ago_seconds": round(time.time() - last_run) if last_run else None,
         "last_result": _cron_status["last_result"],
         "last_recap_result": _cron_status["last_recap_result"],
+        "last_yearly_recap_result": _cron_status["last_yearly_recap_result"],
     }
 
 

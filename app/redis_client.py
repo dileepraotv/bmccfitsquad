@@ -86,3 +86,13 @@ def key_recap_image(user_id, year: int, month: int) -> str:
 def key_recap_caption(user_id, year: int, month: int) -> str:
     """Cached recap caption text for one user + calendar month."""
     return f"recap:v{_RECAP_CACHE_VERSION}:caption:{user_id}:{year}-{month:02d}"
+
+
+def key_yearly_recap_image(user_id, year: int) -> str:
+    """Cached yearly recap card PNG (base64-encoded) for one user + year."""
+    return f"yearrecap:v{_RECAP_CACHE_VERSION}:image:{user_id}:{year}"
+
+
+def key_yearly_recap_caption(user_id, year: int) -> str:
+    """Cached yearly recap caption text for one user + year."""
+    return f"yearrecap:v{_RECAP_CACHE_VERSION}:caption:{user_id}:{year}"

@@ -85,6 +85,8 @@ _DIM_GRAY = (70, 70, 70)
 _GREEN = (110, 200, 110)
 _RED   = (215, 95, 95)
 _GOLD  = (212, 175, 55)
+_BG_BLACK = (0, 0, 0)
+_BG_NAVY  = (8, 14, 33)  # yearly recap card background — everything else unchanged
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +107,11 @@ def _previous_month(year: int, month: int) -> tuple[int, int]:
     if month == 1:
         return year - 1, 12
     return year, month - 1
+
+
+def year_bounds(year: int) -> tuple[datetime, datetime]:
+    """UTC (start, end-exclusive) bounds for a calendar year."""
+    return datetime(year, 1, 1, tzinfo=timezone.utc), datetime(year + 1, 1, 1, tzinfo=timezone.utc)
 
 
 def most_recently_completed_month(reference: datetime | None = None) -> tuple[int, int]:
@@ -157,6 +164,34 @@ def build_recap_caption(data: dict, first_name: str) -> str:
     return "\n".join(lines)
 
 
+def build_yearly_recap_caption(data: dict, first_name: str) -> str:
+    """Build the DM text sent alongside the yearly recap card, ending with
+    the goal-setting prompt for the upcoming year."""
+    year = data["year"]
+    total = data["total_activities"]
+
+    if total == 0:
+        opener = f"👀 {year} was a quiet one, {first_name}."
+        body = "New year, fresh start — let's get moving."
+    else:
+        opener = f"🏆 {year} wrapped up strong, {first_name}!"
+        top = data.get("top_sport_label")
+        lead = ""
+        if top:
+            top_stat = next(s for s in data["sports"] if s["key"] == top)
+            lead = f", led by {top_stat['value_text']} {top_stat['unit']} on the {top.lower()}"
+        plural = "activity" if total == 1 else "activities"
+        body = f"{total} {plural} this year{lead}."
+
+    lines = [opener, "", body]
+    if data["highlights"]:
+        lines.append("")
+        lines.extend(f"• {h}" for h in data["highlights"])
+
+    lines += ["", f"Want to set a goal for {year + 1}?"]
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Cached fetch — a completed month's card never changes once generated, so
 # repeat requests (manual /recap re-runs, the scheduled send picking up a
@@ -182,6 +217,34 @@ async def get_or_build_recap(db: AsyncSession, user: User, year: int, month: int
     data = await compute_monthly_recap(db, user, year, month)
     image_bytes = render_recap_card(data)
     caption = build_recap_caption(data, user.telegram_first_name or "there")
+
+    try:
+        await redis.set(img_key, base64.b64encode(image_bytes).decode("ascii"), ex=_RECAP_CACHE_TTL_SECONDS)
+        await redis.set(cap_key, caption, ex=_RECAP_CACHE_TTL_SECONDS)
+    except Exception:
+        logger.warning("recap cache: failed to write cache for %s", img_key)
+
+    return image_bytes, caption
+
+
+async def get_or_build_yearly_recap(db: AsyncSession, user: User, year: int) -> tuple[bytes, str]:
+    """Return (image_png_bytes, caption_text) for this user + year, using
+    the Redis cache when available and populating it otherwise."""
+    from app.redis_client import get_redis, key_yearly_recap_caption, key_yearly_recap_image
+
+    redis = await get_redis()
+    img_key, cap_key = key_yearly_recap_image(user.id, year), key_yearly_recap_caption(user.id, year)
+
+    cached_img_b64, cached_caption = await redis.get(img_key), await redis.get(cap_key)
+    if cached_img_b64 and cached_caption:
+        try:
+            return base64.b64decode(cached_img_b64), cached_caption
+        except Exception:
+            logger.warning("recap cache: corrupt cached yearly image for %s — regenerating", img_key)
+
+    data = await compute_yearly_recap(db, user, year)
+    image_bytes = render_recap_card(data, bg_color=_BG_NAVY)
+    caption = build_yearly_recap_caption(data, user.telegram_first_name or "there")
 
     try:
         await redis.set(img_key, base64.b64encode(image_bytes).decode("ascii"), ex=_RECAP_CACHE_TTL_SECONDS)
@@ -374,6 +437,85 @@ async def compute_monthly_recap(db: AsyncSession, user: User, year: int, month: 
     }
 
 
+async def compute_yearly_recap(db: AsyncSession, user: User, year: int) -> dict:
+    """Aggregate this athlete's Ride/Run/Walk/Swim recap for a full calendar
+    year — same shape as compute_monthly_recap, trended against the prior
+    year instead of the prior month."""
+    start, end = year_bounds(year)
+    prev_start, prev_end = year_bounds(year - 1)
+
+    sports: list[dict] = []
+    highlights: list[str] = []
+    total_activities = 0
+    top_sport_label = None
+    top_sport_distance = 0.0
+
+    for sport in _RECAP_SPORTS:
+        style = _SPORT_STYLE[sport]
+        total_m, count, max_m = await _sport_month_stats(db, user.id, sport, start, end)
+        prev_total_m, _prev_count, _prev_max = await _sport_month_stats(
+            db, user.id, sport, prev_start, prev_end
+        )
+        trend_label, trend_color = _trend(total_m, prev_total_m)
+
+        if style["unit"] == "m":
+            value_text = f"{int(round(total_m)):,}"
+        elif total_m <= 0:
+            value_text = "0"
+        elif total_m >= 1000:
+            value_text = f"{total_m / 1000:.0f}"
+        else:
+            value_text = f"{total_m / 1000:.1f}"
+
+        sports.append({
+            "key":         sport,
+            "label":       _SPORT_LABELS[sport],
+            "color":       style["color"],
+            "value_text":  value_text,
+            "unit":        style["unit"],
+            "count":       count,
+            "trend_label": trend_label,
+            "trend_color": trend_color,
+        })
+
+        total_activities += count
+        if total_m > top_sport_distance:
+            top_sport_distance = total_m
+            top_sport_label = sport
+
+        # New PR — longest single activity of this sport, ever.
+        if max_m > 0:
+            best_before = await _sport_best_before(db, user.id, sport, start)
+            if max_m > best_before:
+                unit = style["unit"]
+                pr_value = f"{int(round(max_m)):,} m" if unit == "m" else f"{max_m / 1000:.1f} km"
+                highlights.append(f"New PR: Longest {sport} — {pr_value}")
+
+    streak = await _current_streak_days(db, user.id, end)
+    if streak >= _MIN_STREAK_TO_SHOW:
+        highlights.append(f"{streak}-day activity streak")
+
+    days_in_year = (end - start).days
+    active_days = await _distinct_active_days(db, user.id, start, end)
+    rest_days = max(0, days_in_year - active_days)
+
+    for s in sports:
+        if s["trend_label"].endswith("%"):
+            s["trend_label"] = f"{s['trend_label']} vs {year - 1}"
+
+    return {
+        "year": year,
+        "title": f"{year} YEAR IN REVIEW",
+        "athlete_name": user.strava_athlete_name or user.telegram_first_name,
+        "sports": sports,
+        "highlights": highlights,
+        "total_activities": total_activities,
+        "top_sport_label": top_sport_label,
+        "active_days": active_days,
+        "rest_days": rest_days,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Card rendering
 # ---------------------------------------------------------------------------
@@ -450,18 +592,22 @@ def _draw_centered_text(draw, xy_center, text, font, fill, letter_spacing: int =
         x += w + letter_spacing
 
 
-def render_recap_card(data: dict) -> bytes:
+def render_recap_card(data: dict, bg_color: tuple[int, int, int] = _BG_BLACK) -> bytes:
     """Render the recap dict into a PNG card. Returns raw PNG bytes.
 
     Drawn onto a generously tall canvas, then cropped to the actual content
     height at the end — so the card is the same height regardless of how
     many highlight lines there are, with no leftover empty space at the
     bottom (and no risk of clipping when there are several highlights).
+
+    `bg_color` only swaps the canvas background (e.g. navy for the yearly
+    recap vs black for the monthly one) — every other visual element is
+    identical between the two card types.
     """
     from PIL import Image, ImageDraw
 
     W, MAX_H = 1080, 2000
-    img = Image.new("RGB", (W, MAX_H), (0, 0, 0))
+    img = Image.new("RGB", (W, MAX_H), bg_color)
     draw = ImageDraw.Draw(img)
 
     f_title     = _font(_FONT_BOLD, 42)
@@ -479,8 +625,9 @@ def render_recap_card(data: dict) -> bytes:
 
     # --- Header --------------------------------------------------------------
     y = 70
+    title = data.get("title") or (data["month_label"].upper() + " RECAP")
     _draw_centered_text(
-        draw, (W / 2, y), data["month_label"].upper() + " RECAP",
+        draw, (W / 2, y), title,
         f_title, _WHITE, letter_spacing=6,
     )
     y += 60
