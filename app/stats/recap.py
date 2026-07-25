@@ -31,6 +31,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Activity, User
+from app.utils import DURATION_BASED_SPORTS as _DURATION_BASED_SPORTS
 from app.utils import SPORT_ACTIVITY_TYPES as _SPORT_ACTIVITY_TYPES
 
 logger = logging.getLogger(__name__)
@@ -54,9 +55,18 @@ _YEARLY_PREVIEW_CACHE_TTL_SECONDS = 5 * 60
 # of "Ride" (200km+ rides) used only for goals/stats, not a separate sport.
 _RECAP_SPORTS: list[str] = ["Ride", "Run", "Walk", "Swim"]
 
-_SPORT_LABELS: dict[str, str] = {"Ride": "RIDE", "Run": "RUN", "Walk": "WALK", "Swim": "SWIM"}
+# "Other Activities" sports — these only earn a row on the card for a given
+# period if the athlete actually logged one, so the card stays clean for the
+# majority of members who only train the four core sports above.
+_RECAP_OTHER_SPORTS: list[str] = ["Hiking", "Yoga", "RacketSports", "StrengthTraining"]
 
-# (accent RGB, unit) per sport — Ride/Run/Walk in km, Swim in metres.
+_SPORT_LABELS: dict[str, str] = {
+    "Ride": "RIDE", "Run": "RUN", "Walk": "WALK", "Swim": "SWIM",
+    "Hiking": "HIKE", "Yoga": "YOGA", "RacketSports": "RACKET", "StrengthTraining": "STRENGTH",
+}
+
+# (accent RGB, unit) per sport — Ride/Run/Walk/Hiking in km, Swim in metres,
+# the duration-based "Other Activities" sports in hours.
 # Muted palette to match the approved reference design (icons carry the
 # accent color; the sport label text stays a single uniform gold — see
 # _LABEL_COLOR — rather than repeating each accent on the text itself).
@@ -65,6 +75,10 @@ _SPORT_STYLE: dict[str, dict] = {
     "Run":  {"color": (196, 122, 76),  "unit": "km"},   # muted terracotta
     "Walk": {"color": (116, 148, 92),  "unit": "km"},   # muted sage
     "Swim": {"color": (76, 110, 158),  "unit": "m"},    # muted steel blue
+    "Hiking":           {"color": (150, 120, 80),  "unit": "km"},   # muted umber
+    "Yoga":             {"color": (150, 120, 170), "unit": "hrs"},  # muted lavender
+    "RacketSports":     {"color": (90, 150, 150),  "unit": "hrs"},  # muted teal
+    "StrengthTraining": {"color": (170, 90, 90),   "unit": "hrs"},  # muted brick
 }
 
 _LABEL_COLOR = (204, 175, 133)  # uniform warm tan/gold for all sport labels
@@ -80,6 +94,11 @@ _ICON_PATHS = {
     "Run":  _ICON_DIR / "run.png",
     "Walk": _ICON_DIR / "walk.png",
     "Swim": _ICON_DIR / "swim.png",
+}
+# "Other Activities" sports have no bundled line-art PNG — they fall back to
+# a simple drawn monogram badge (see _paste_fallback_icon) in their accent color.
+_FALLBACK_MONOGRAM = {
+    "Hiking": "H", "Yoga": "Y", "RacketSports": "R", "StrengthTraining": "S",
 }
 _FONT_DIR   = _DATA_DIR / "fonts"
 _FONT_BOLD  = _FONT_DIR / "DejaVuSans-Bold.ttf"
@@ -276,16 +295,25 @@ async def get_or_build_yearly_recap(db: AsyncSession, user: User, year: int) -> 
 # Data aggregation
 # ---------------------------------------------------------------------------
 
+def _sport_metric_column(sport: str):
+    """Distance-based sports are measured in metres; the duration-based
+    "Other Activities" sports (Yoga, Racket Sports, Strength Training) have
+    no meaningful GPS distance, so they're measured by moving time instead."""
+    return Activity.moving_time_seconds if sport in _DURATION_BASED_SPORTS else Activity.distance_meters
+
+
 async def _sport_month_stats(
     db: AsyncSession, user_id, sport: str, start: datetime, end: datetime,
 ) -> tuple[float, int, float]:
-    """Return (total_distance_m, activity_count, max_single_activity_m)."""
+    """Return (total_metric, activity_count, max_single_activity_metric) —
+    metric is metres for distance sports, seconds for duration sports."""
     types = _SPORT_ACTIVITY_TYPES[sport]
+    metric_col = _sport_metric_column(sport)
     result = await db.execute(
         select(
-            func.coalesce(func.sum(Activity.distance_meters), 0.0),
+            func.coalesce(func.sum(metric_col), 0.0),
             func.count(Activity.id),
-            func.coalesce(func.max(Activity.distance_meters), 0.0),
+            func.coalesce(func.max(metric_col), 0.0),
         ).where(
             Activity.user_id == user_id,
             Activity.activity_type.in_(types),
@@ -293,15 +321,16 @@ async def _sport_month_stats(
             Activity.activity_date < end,
         )
     )
-    total_m, count, max_m = result.one()
-    return float(total_m or 0.0), int(count or 0), float(max_m or 0.0)
+    total, count, mx = result.one()
+    return float(total or 0.0), int(count or 0), float(mx or 0.0)
 
 
 async def _sport_best_before(db: AsyncSession, user_id, sport: str, before: datetime) -> float:
     """Best (longest) single activity of `sport` strictly before `before`."""
     types = _SPORT_ACTIVITY_TYPES[sport]
+    metric_col = _sport_metric_column(sport)
     result = await db.execute(
-        select(func.coalesce(func.max(Activity.distance_meters), 0.0))
+        select(func.coalesce(func.max(metric_col), 0.0))
         .where(
             Activity.user_id == user_id,
             Activity.activity_type.in_(types),
@@ -371,8 +400,65 @@ def _trend(current_m: float, previous_m: float) -> tuple[str, str]:
     return "0%", "flat"
 
 
+def _format_metric_value(total: float, unit: str) -> str:
+    """Render a raw metric total (metres, or seconds for duration sports)
+    into the display string shown as the card's big number."""
+    if unit == "m":
+        return f"{int(round(total)):,}"
+    if unit == "hrs":
+        return f"{total / 3600:.1f}" if total > 0 else "0"
+    if total <= 0:
+        return "0"
+    if total >= 1000:
+        return f"{total / 1000:.0f}"
+    return f"{total / 1000:.1f}"
+
+
+def _format_pr_value(mx: float, unit: str) -> str:
+    if unit == "m":
+        return f"{int(round(mx)):,} m"
+    if unit == "hrs":
+        return f"{mx / 3600:.1f} hrs"
+    return f"{mx / 1000:.1f} km"
+
+
+async def _build_sport_row(
+    db: AsyncSession, user: User, sport: str, start: datetime, end: datetime,
+    prev_start: datetime, prev_end: datetime,
+) -> tuple[dict, float, str | None]:
+    """Return (row_dict, total_metric, pr_highlight_or_None) for one sport
+    over one period. Shared by the monthly and yearly recap aggregators."""
+    style = _SPORT_STYLE[sport]
+    unit = style["unit"]
+    total, count, mx = await _sport_month_stats(db, user.id, sport, start, end)
+    prev_total, _prev_count, _prev_max = await _sport_month_stats(db, user.id, sport, prev_start, prev_end)
+    trend_label, trend_color = _trend(total, prev_total)
+
+    row = {
+        "key":         sport,
+        "label":       _SPORT_LABELS[sport],
+        "color":       style["color"],
+        "value_text":  _format_metric_value(total, unit),
+        "unit":        unit,
+        "count":       count,
+        "trend_label": trend_label,
+        "trend_color": trend_color,
+    }
+
+    highlight = None
+    if mx > 0:
+        best_before = await _sport_best_before(db, user.id, sport, start)
+        if mx > best_before:
+            noun = "session" if sport in _DURATION_BASED_SPORTS else sport
+            highlight = f"New PR: Longest {noun} — {_format_pr_value(mx, unit)}"
+
+    return row, total, highlight
+
+
 async def compute_monthly_recap(db: AsyncSession, user: User, year: int, month: int) -> dict:
-    """Aggregate this athlete's Ride/Run/Walk/Swim recap for a calendar month."""
+    """Aggregate this athlete's recap for a calendar month — the four core
+    sports always appear; "Other Activities" sports only appear if the
+    athlete actually logged one that month."""
     start, end = month_bounds(year, month)
     prev_year, prev_month = _previous_month(year, month)
     prev_start, prev_end = month_bounds(prev_year, prev_month)
@@ -384,45 +470,23 @@ async def compute_monthly_recap(db: AsyncSession, user: User, year: int, month: 
     top_sport_distance = 0.0
 
     for sport in _RECAP_SPORTS:
-        style = _SPORT_STYLE[sport]
-        total_m, count, max_m = await _sport_month_stats(db, user.id, sport, start, end)
-        prev_total_m, _prev_count, _prev_max = await _sport_month_stats(
-            db, user.id, sport, prev_start, prev_end
-        )
-        trend_label, trend_color = _trend(total_m, prev_total_m)
-
-        if style["unit"] == "m":
-            value_text = f"{int(round(total_m)):,}"
-        elif total_m <= 0:
-            value_text = "0"
-        elif total_m >= 1000:
-            value_text = f"{total_m / 1000:.0f}"
-        else:
-            value_text = f"{total_m / 1000:.1f}"
-
-        sports.append({
-            "key":         sport,
-            "label":       _SPORT_LABELS[sport],
-            "color":       style["color"],
-            "value_text":  value_text,
-            "unit":        style["unit"],
-            "count":       count,
-            "trend_label": trend_label,
-            "trend_color": trend_color,
-        })
-
-        total_activities += count
-        if total_m > top_sport_distance:
-            top_sport_distance = total_m
+        row, total, highlight = await _build_sport_row(db, user, sport, start, end, prev_start, prev_end)
+        sports.append(row)
+        total_activities += row["count"]
+        if total > top_sport_distance:
+            top_sport_distance = total
             top_sport_label = sport
+        if highlight:
+            highlights.append(highlight)
 
-        # New PR — longest single activity of this sport, ever.
-        if max_m > 0:
-            best_before = await _sport_best_before(db, user.id, sport, start)
-            if max_m > best_before:
-                unit = style["unit"]
-                pr_value = f"{int(round(max_m)):,} m" if unit == "m" else f"{max_m / 1000:.1f} km"
-                highlights.append(f"New PR: Longest {sport} — {pr_value}")
+    for sport in _RECAP_OTHER_SPORTS:
+        row, _total, highlight = await _build_sport_row(db, user, sport, start, end, prev_start, prev_end)
+        if row["count"] <= 0:
+            continue
+        sports.append(row)
+        total_activities += row["count"]
+        if highlight:
+            highlights.append(highlight)
 
     streak = await _current_streak_days(db, user.id, end)
     if streak >= _MIN_STREAK_TO_SHOW:
@@ -455,9 +519,9 @@ async def compute_monthly_recap(db: AsyncSession, user: User, year: int, month: 
 
 
 async def compute_yearly_recap(db: AsyncSession, user: User, year: int) -> dict:
-    """Aggregate this athlete's Ride/Run/Walk/Swim recap for a full calendar
-    year — same shape as compute_monthly_recap, trended against the prior
-    year instead of the prior month."""
+    """Aggregate this athlete's recap for a full calendar year — same shape
+    as compute_monthly_recap, trended against the prior year instead of the
+    prior month."""
     start, end = year_bounds(year)
     prev_start, prev_end = year_bounds(year - 1)
 
@@ -468,45 +532,23 @@ async def compute_yearly_recap(db: AsyncSession, user: User, year: int) -> dict:
     top_sport_distance = 0.0
 
     for sport in _RECAP_SPORTS:
-        style = _SPORT_STYLE[sport]
-        total_m, count, max_m = await _sport_month_stats(db, user.id, sport, start, end)
-        prev_total_m, _prev_count, _prev_max = await _sport_month_stats(
-            db, user.id, sport, prev_start, prev_end
-        )
-        trend_label, trend_color = _trend(total_m, prev_total_m)
-
-        if style["unit"] == "m":
-            value_text = f"{int(round(total_m)):,}"
-        elif total_m <= 0:
-            value_text = "0"
-        elif total_m >= 1000:
-            value_text = f"{total_m / 1000:.0f}"
-        else:
-            value_text = f"{total_m / 1000:.1f}"
-
-        sports.append({
-            "key":         sport,
-            "label":       _SPORT_LABELS[sport],
-            "color":       style["color"],
-            "value_text":  value_text,
-            "unit":        style["unit"],
-            "count":       count,
-            "trend_label": trend_label,
-            "trend_color": trend_color,
-        })
-
-        total_activities += count
-        if total_m > top_sport_distance:
-            top_sport_distance = total_m
+        row, total, highlight = await _build_sport_row(db, user, sport, start, end, prev_start, prev_end)
+        sports.append(row)
+        total_activities += row["count"]
+        if total > top_sport_distance:
+            top_sport_distance = total
             top_sport_label = sport
+        if highlight:
+            highlights.append(highlight)
 
-        # New PR — longest single activity of this sport, ever.
-        if max_m > 0:
-            best_before = await _sport_best_before(db, user.id, sport, start)
-            if max_m > best_before:
-                unit = style["unit"]
-                pr_value = f"{int(round(max_m)):,} m" if unit == "m" else f"{max_m / 1000:.1f} km"
-                highlights.append(f"New PR: Longest {sport} — {pr_value}")
+    for sport in _RECAP_OTHER_SPORTS:
+        row, _total, highlight = await _build_sport_row(db, user, sport, start, end, prev_start, prev_end)
+        if row["count"] <= 0:
+            continue
+        sports.append(row)
+        total_activities += row["count"]
+        if highlight:
+            highlights.append(highlight)
 
     streak = await _current_streak_days(db, user.id, end)
     if streak >= _MIN_STREAK_TO_SHOW:
@@ -581,16 +623,41 @@ def _load_art_rgba(path: pathlib.Path, max_size: int, midpoint: int = 40, ramp: 
     return rgba
 
 
-def _paste_icon(img, sport_key: str, box) -> None:
+def _paste_icon(img, sport_key: str, box, color: tuple[int, int, int] | None = None) -> None:
     """Paste the bundled icon for `sport_key` centered within `box`
-    (x0, y0, x1, y1), preserving its native aspect ratio."""
+    (x0, y0, x1, y1), preserving its native aspect ratio. Sports with no
+    bundled line-art PNG (the "Other Activities" sports) fall back to a
+    drawn monogram badge in their accent color instead."""
+    path = _ICON_PATHS.get(sport_key)
+    if path is None:
+        _paste_fallback_icon(img, sport_key, box, color)
+        return
     x0, y0, x1, y1 = box
     size = int(max(x1 - x0, y1 - y0))
-    icon = _load_art_rgba(_ICON_PATHS[sport_key], size)
+    icon = _load_art_rgba(path, size)
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
     px = int(cx - icon.width / 2)
     py = int(cy - icon.height / 2)
     img.paste(icon, (px, py), icon)
+
+
+def _paste_fallback_icon(img, sport_key: str, box, color: tuple[int, int, int] | None) -> None:
+    """Draw a simple ringed-monogram badge for sports with no bundled icon."""
+    from PIL import ImageDraw
+
+    x0, y0, x1, y1 = box
+    size = max(x1 - x0, y1 - y0)
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    ring_color = color or _GRAY
+    draw = ImageDraw.Draw(img)
+    r = size / 2 * 0.82
+    draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=ring_color, width=5)
+
+    letter = _FALLBACK_MONOGRAM.get(sport_key, sport_key[:1])
+    f = _font(_FONT_BOLD, int(size * 0.4))
+    bbox = draw.textbbox((0, 0), letter, font=f)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    draw.text((cx - tw / 2 - bbox[0], cy - th / 2 - bbox[1]), letter, font=f, fill=ring_color)
 
 
 def _draw_centered_text(draw, xy_center, text, font, fill, letter_spacing: int = 0):
@@ -623,7 +690,10 @@ def render_recap_card(data: dict, bg_color: tuple[int, int, int] = _BG_BLACK) ->
     """
     from PIL import Image, ImageDraw
 
-    W, MAX_H = 1080, 2000
+    # MAX_H is a generous upper bound only — the canvas is cropped to actual
+    # content height at the end. Raised from 2000 to comfortably fit the four
+    # core sports plus all four "Other Activities" rows in the same card.
+    W, MAX_H = 1080, 3200
     img = Image.new("RGB", (W, MAX_H), bg_color)
     draw = ImageDraw.Draw(img)
 
@@ -677,7 +747,7 @@ def render_recap_card(data: dict, bg_color: tuple[int, int, int] = _BG_BLACK) ->
         content_top = row_start + row_top_pad
         icon_cy = content_top + icon_anchor_offset
         icon_box = (margin, icon_cy - icon_size / 2, margin + icon_size, icon_cy + icon_size / 2)
-        _paste_icon(img, sport["key"], icon_box)
+        _paste_icon(img, sport["key"], icon_box, sport.get("color"))
 
         text_x = margin + icon_size + 30
 
@@ -688,7 +758,10 @@ def render_recap_card(data: dict, bg_color: tuple[int, int, int] = _BG_BLACK) ->
         value_w = draw.textlength(sport["value_text"], font=f_value)
         draw.text((text_x + value_w + 12, value_y + 30), sport["unit"], font=f_unit, fill=_GRAY)
 
-        count_label = "activity" if sport["count"] == 1 else "activities"
+        if sport["key"] in _DURATION_BASED_SPORTS:
+            count_label = "session" if sport["count"] == 1 else "sessions"
+        else:
+            count_label = "activity" if sport["count"] == 1 else "activities"
         draw.text(
             (text_x, content_top + 132), f"{sport['count']} {count_label}",
             font=f_count, fill=_GRAY,

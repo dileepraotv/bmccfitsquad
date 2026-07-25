@@ -33,6 +33,7 @@ from app.models import Activity, Goal, GroupChat, User
 from app.strava.auth import get_valid_access_token
 from app.strava.client import fetch_activities
 from app.telegram.notifications import format_activity_notification
+from app.utils import DURATION_BASED_SPORTS as _DURATION_BASED_SPORTS
 from app.utils import SPORT_ACTIVITY_TYPES as _SPORT_ACTIVITY_TYPES
 
 logger = logging.getLogger(__name__)
@@ -408,6 +409,25 @@ def _parse_category_threshold(category: str) -> float:
         return 0.0
 
 
+def _parse_duration_threshold_s(category: str) -> float:
+    """Convert a "30 min" style duration category to seconds."""
+    try:
+        return float(category.strip().split()[0].replace(",", ".")) * 60
+    except (IndexError, ValueError):
+        return 0.0
+
+
+_SPORT_TYPE_MAP_REVERSE = {
+    "RideEndurance":     "Ride Endurance",
+    "RacketSports":      "Racket Sports",
+    "StrengthTraining":  "Strength Training",
+}
+
+
+def _sport_display_label(activity_type: str) -> str:
+    return _SPORT_TYPE_MAP_REVERSE.get(activity_type, activity_type)
+
+
 async def _build_goal_lines(db, user: User) -> list[str]:
     """Return compact goal-status lines for the notification footer."""
     goals_res = await db.execute(
@@ -426,8 +446,14 @@ async def _build_goal_lines(db, user: User) -> list[str]:
             g.end_date.year, g.end_date.month, g.end_date.day, tzinfo=timezone.utc
         ) + timedelta(days=1)
 
-        act_types   = _SPORT_ACTIVITY_TYPES.get(g.activity_type, [g.activity_type])
-        threshold_m = _parse_category_threshold(g.category)
+        act_types = _SPORT_ACTIVITY_TYPES.get(g.activity_type, [g.activity_type])
+
+        if g.activity_type in _DURATION_BASED_SPORTS:
+            threshold_s = _parse_duration_threshold_s(g.category)
+            metric_filter = Activity.moving_time_seconds >= threshold_s
+        else:
+            threshold_m = _parse_category_threshold(g.category)
+            metric_filter = Activity.distance_meters >= threshold_m
 
         count_result = await db.execute(
             select(func.count(Activity.id)).where(
@@ -436,16 +462,18 @@ async def _build_goal_lines(db, user: User) -> list[str]:
                     Activity.activity_type.in_(act_types),
                     Activity.activity_date >= start_dt,
                     Activity.activity_date < end_dt,
-                    Activity.distance_meters >= threshold_m,
+                    metric_filter,
                 )
             )
         )
         achieved = count_result.scalar_one() or 0
 
-        sport_label = "Ride Endurance" if g.activity_type == "RideEndurance" else g.activity_type
+        sport_label = _sport_display_label(g.activity_type)
         sport_emoji = {
             "Ride": "🚴", "RideEndurance": "🚴",
             "Run": "🏃", "Walk": "🚶", "Swim": "🏊",
+            "Hiking": "🥾", "Yoga": "🧘",
+            "RacketSports": "🏸", "StrengthTraining": "🏋️",
         }.get(g.activity_type, "🏅")
         lines.append(
             f"{sport_emoji} {sport_label} {g.category} - {achieved}/{g.target_count}"

@@ -35,10 +35,28 @@ SPORT_ACTIVITY_TYPES: dict[str, list[str]] = {
         "Ride", "VirtualRide", "EBikeRide", "GravelRide",
         "MountainBikeRide", "EMountainBikeRide",
     ],
-    "Run":  ["Run", "VirtualRun", "TrailRun"],
-    "Walk": ["Walk", "Hike"],
-    "Swim": ["Swim", "OpenWaterSwim"],
+    "Run":    ["Run", "VirtualRun", "TrailRun"],
+    "Walk":   ["Walk"],
+    "Swim":   ["Swim", "OpenWaterSwim"],
+    "Hiking": ["Hike"],
+    "Yoga":   ["Yoga"],
+    "RacketSports": ["Tennis", "TableTennis", "Badminton", "Pickleball", "Squash"],
+    "StrengthTraining": [
+        "WeightTraining", "Workout", "HighIntensityIntervalTraining", "Crossfit",
+    ],
 }
+
+# Sports with no meaningful GPS distance (Strava reports distance = 0 for
+# these) — stats/goals/recap/leaderboard track them by time practiced
+# instead of kilometres. Everything else in SPORT_ACTIVITY_TYPES is
+# distance-based.
+DURATION_BASED_SPORTS: set[str] = {"Yoga", "RacketSports", "StrengthTraining"}
+
+# Sports grouped under the "Other Activities" bucket in /stats — anything
+# that isn't one of the five original core sports (Ride/RideEndurance/
+# Run/Walk/Swim), surfaced via a secondary menu instead of cluttering the
+# main sport-selection keyboard.
+OTHER_ACTIVITY_SPORTS: list[str] = ["Yoga", "RacketSports", "Hiking", "StrengthTraining"]
 
 
 # ---------------------------------------------------------------------------

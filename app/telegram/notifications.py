@@ -42,7 +42,14 @@ from datetime import datetime, timezone
 from telegram import Bot
 
 from app.models import Activity, User
-from app.utils import format_friendly_date, meters_to_km, ms_to_kmh, seconds_to_hhmmss
+from app.utils import (
+    DURATION_BASED_SPORTS,
+    SPORT_ACTIVITY_TYPES,
+    format_friendly_date,
+    meters_to_km,
+    ms_to_kmh,
+    seconds_to_hhmmss,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,16 +73,21 @@ _EMOJI: dict[str, str] = {
     "VirtualRun":      "🏃",
     "TrailRun":        "🏃",
     "Walk":            "🚶",
-    "Hike":            "🚶",
+    "Hike":            "🥾",
     "Swim":            "🏊",
     "OpenWaterSwim":   "🏊",
     "WeightTraining":  "🏋️",
     "Workout":         "💪",
+    "HighIntensityIntervalTraining": "🔥",
     "Yoga":            "🧘",
     "Rowing":          "🚣",
     "Kayaking":        "🚣",
     "Soccer":          "⚽",
     "Tennis":          "🎾",
+    "TableTennis":     "🏓",
+    "Badminton":       "🏸",
+    "Pickleball":      "🏓",
+    "Squash":          "🎾",
     "Golf":            "⛳",
     "Crossfit":        "💪",
     "RockClimbing":    "🧗",
@@ -94,6 +106,13 @@ def _random_greeting() -> str:
 
 
 _SWIM_TYPES = {"Swim", "OpenWaterSwim"}
+
+# Raw Strava activity_type strings with no meaningful GPS distance (Yoga,
+# Racket Sports, Strength Training) — these get a time/effort-focused
+# metrics block instead of distance/speed/elevation.
+_DURATION_TYPES: set[str] = {
+    t for sport in DURATION_BASED_SPORTS for t in SPORT_ACTIVITY_TYPES[sport]
+}
 
 
 def _format_pace_per_100m(avg_speed_ms: float | int | None) -> str:
@@ -155,6 +174,19 @@ async def format_activity_notification(
             f"Pace: {pace} /100m",
             f"Moving Time: {seconds_to_hhmmss(moving_secs)}",
         ]
+        if avg_hr is not None:
+            lines.append(f"Avg HR: {int(avg_hr)} bpm")
+    elif activity_type in _DURATION_TYPES:
+        moving_secs = int(activity.get("moving_time") or 0)
+        calories    = activity.get("calories")
+        avg_hr      = activity.get("average_heartrate")
+
+        lines += [
+            "",
+            f"Duration: {seconds_to_hhmmss(moving_secs)}",
+        ]
+        if calories:
+            lines.append(f"Calories: {int(calories)} kcal")
         if avg_hr is not None:
             lines.append(f"Avg HR: {int(avg_hr)} bpm")
     else:

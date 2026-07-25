@@ -7,11 +7,15 @@ Entry points
 
 Sport types accepted
 --------------------
-  "Ride"          – All rides (Ride + VirtualRide, where VirtualRide = indoor)
-  "RideEndurance" – Only rides whose distance is ≥ 200 km
-  "Run"           – Run + VirtualRun (VirtualRun = indoor/treadmill)
-  "Walk"          – Walk + Hike
-  "Swim"          – Swim + OpenWaterSwim
+  "Ride"             – All rides (Ride + VirtualRide, where VirtualRide = indoor)
+  "RideEndurance"    – Only rides whose distance is ≥ 200 km
+  "Run"              – Run + VirtualRun (VirtualRun = indoor/treadmill)
+  "Walk"             – Walk only (Hike is tracked separately, see "Hiking")
+  "Swim"             – Swim + OpenWaterSwim
+  "Hiking"           – Hike — distance-based, same shape as Walk
+  "Yoga"             – Duration-based ("Other Activities")
+  "RacketSports"     – Tennis/TableTennis/Badminton/Pickleball/Squash — duration-based
+  "StrengthTraining" – WeightTraining/Workout/HIIT/Crossfit — duration-based
 
 Time frames accepted
 --------------------
@@ -59,7 +63,10 @@ def _random_quote() -> str:
 # Constants
 # ---------------------------------------------------------------------------
 
-SportType = Literal["Ride", "RideEndurance", "Run", "Walk", "Swim"]
+SportType = Literal[
+    "Ride", "RideEndurance", "Run", "Walk", "Swim",
+    "Hiking", "Yoga", "RacketSports", "StrengthTraining",
+]
 TimeFrame = Literal[
     "all_time", "this_week", "year_to_date", "previous_year",
     "current_month", "previous_month",
@@ -79,11 +86,15 @@ _TIME_FRAME_LABELS: dict[str, str] = {
 }
 
 _SPORT_LABELS: dict[str, str] = {
-    "Ride":          "Ride",
-    "RideEndurance": "Ride Endurance",
-    "Run":           "Run",
-    "Walk":          "Walk",
-    "Swim":          "Swim",
+    "Ride":             "Ride",
+    "RideEndurance":    "Ride Endurance",
+    "Run":              "Run",
+    "Walk":             "Walk",
+    "Swim":             "Swim",
+    "Hiking":           "Hiking",
+    "Yoga":             "Yoga",
+    "RacketSports":     "Racket Sports",
+    "StrengthTraining": "Strength Training",
 }
 
 # Run milestone distances in km
@@ -123,11 +134,15 @@ async def calculate_stats(
     activities = await _fetch_activities(db_session, user_id, sport_type, time_frame)
 
     calculators = {
-        "Ride":          _compute_ride_stats,
-        "RideEndurance": _compute_ride_endurance_stats,
-        "Run":           _compute_run_stats,
-        "Walk":          _compute_walk_stats,
-        "Swim":          _compute_swim_stats,
+        "Ride":             _compute_ride_stats,
+        "RideEndurance":    _compute_ride_endurance_stats,
+        "Run":              _compute_run_stats,
+        "Walk":             _compute_walk_stats,
+        "Swim":             _compute_swim_stats,
+        "Hiking":           _compute_hiking_stats,
+        "Yoga":             _compute_duration_stats,
+        "RacketSports":     _compute_duration_stats,
+        "StrengthTraining": _compute_duration_stats,
     }
     return calculators[sport_type](activities)
 
@@ -166,11 +181,15 @@ def format_stats_message(
     header = f"*{sport_label} - {time_label} Stats: ({athlete_name})*"
 
     formatters = {
-        "Ride":          _format_ride,
-        "RideEndurance": _format_ride_endurance,
-        "Run":           _format_run,
-        "Walk":          _format_walk,
-        "Swim":          _format_swim,
+        "Ride":             _format_ride,
+        "RideEndurance":    _format_ride_endurance,
+        "Run":              _format_run,
+        "Walk":             _format_walk,
+        "Swim":             _format_swim,
+        "Hiking":           _format_hiking,
+        "Yoga":             lambda s: _format_duration_stats(s, "Sessions"),
+        "RacketSports":     lambda s: _format_duration_stats(s, "Matches"),
+        "StrengthTraining": lambda s: _format_duration_stats(s, "Workouts"),
     }
     body_lines = formatters.get(sport_type, lambda _: [])(stats)
     body = "\n".join(f"- {line}" for line in body_lines)
@@ -297,7 +316,7 @@ def _compute_swim_stats(activities: list[Activity]) -> dict:
 
 
 def _compute_walk_stats(activities: list[Activity]) -> dict:
-    """Walks and Hikes."""
+    """Walks only — Hikes are tracked separately under "Hiking"."""
     distances_km = [a.distance_meters / 1_000 for a in activities]
     return {
         "walks":           len(activities),
@@ -308,6 +327,38 @@ def _compute_walk_stats(activities: list[Activity]) -> dict:
         "twos":              sum(1 for d in distances_km if 2.0 <= d < 5.0),
         "fives":             sum(1 for d in distances_km if 5.0 <= d < 10.0),
         "tens":              sum(1 for d in distances_km if d >= 10.0),
+    }
+
+
+def _compute_hiking_stats(activities: list[Activity]) -> dict:
+    """Hikes — same distance-based shape as Walk, tracked as its own sport."""
+    distances_km = [a.distance_meters / 1_000 for a in activities]
+    return {
+        "hikes":           len(activities),
+        "distance_km":     _round2(sum(distances_km)),
+        "moving_time":     _fmt_duration(sum(a.moving_time_seconds for a in activities)),
+        "elevation_m":     round(sum(a.elevation_gain for a in activities)),
+        "biggest_hike_km": _round2(max(distances_km, default=0.0)),
+        "twos":              sum(1 for d in distances_km if 2.0 <= d < 5.0),
+        "fives":             sum(1 for d in distances_km if 5.0 <= d < 10.0),
+        "tens":              sum(1 for d in distances_km if d >= 10.0),
+    }
+
+
+def _compute_duration_stats(activities: list[Activity]) -> dict:
+    """Shared calculator for the "Other Activities" sports (Yoga, Racket
+    Sports, Strength Training) — these have no meaningful GPS distance, so
+    time practiced is the primary metric instead of kilometres."""
+    durations_min = [a.moving_time_seconds / 60 for a in activities]
+    total_calories = sum(a.calories or 0 for a in activities)
+    return {
+        "sessions":        len(activities),
+        "total_time":      _fmt_duration(sum(a.moving_time_seconds for a in activities)),
+        "longest_session": _fmt_duration(max((a.moving_time_seconds for a in activities), default=0)),
+        "avg_session_min": round(sum(durations_min) / len(durations_min)) if durations_min else 0,
+        "calories":        round(total_calories),
+        "thirty_plus":     sum(1 for d in durations_min if 30.0 <= d < 60.0),
+        "sixty_plus":      sum(1 for d in durations_min if d >= 60.0),
     }
 
 
@@ -388,6 +439,35 @@ def _format_walk(s: dict) -> list[str]:
         f"5 Km's: {s['fives']}",
         f"10 Km's: {s['tens']}",
     ]
+
+
+def _format_hiking(s: dict) -> list[str]:
+    return [
+        f"Hikes: {s['hikes']}",
+        f"Distance: {s['distance_km']:.2f} km",
+        f"Moving Time: {s['moving_time']}",
+        f"Elevation Gain: {s['elevation_m']:,} m",
+        f"Biggest Hike: {s['biggest_hike_km']:.2f} km",
+        f"2 Km's: {s['twos']}",
+        f"5 Km's: {s['fives']}",
+        f"10 Km's: {s['tens']}",
+    ]
+
+
+def _format_duration_stats(s: dict, session_label: str) -> list[str]:
+    lines = [
+        f"{session_label}: {s['sessions']}",
+        f"Total Time: {s['total_time']}",
+        f"Longest Session: {s['longest_session']}",
+        f"Avg Session: {s['avg_session_min']} min",
+    ]
+    if s["calories"]:
+        lines.append(f"Calories: {s['calories']:,} kcal")
+    lines += [
+        f"30+ min Sessions: {s['thirty_plus']}",
+        f"60+ min Sessions: {s['sixty_plus']}",
+    ]
+    return lines
 
 
 # ---------------------------------------------------------------------------

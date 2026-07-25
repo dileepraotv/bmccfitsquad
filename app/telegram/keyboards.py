@@ -43,7 +43,21 @@ def stats_sport_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(_padded("Run"),                callback_data="stats:sport:Run"),
          InlineKeyboardButton(_padded("Swim"),                callback_data="stats:sport:Swim"),
          InlineKeyboardButton(_padded("Walk"),                callback_data="stats:sport:Walk")],
+        [InlineKeyboardButton(_padded("Other Activities", 42), callback_data="stats:other")],
         [InlineKeyboardButton(_padded("Exit", 42),           callback_data="stats:exit")],
+    ])
+
+
+def stats_other_sport_keyboard() -> InlineKeyboardMarkup:
+    """Secondary sport menu for the non-core sports (duration/hike-based),
+    kept off the main keyboard so it doesn't crowd the primary five sports."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(_padded("Yoga", 21),           callback_data="stats:sport:Yoga"),
+         InlineKeyboardButton(_padded("Racket Sports", 21),  callback_data="stats:sport:RacketSports")],
+        [InlineKeyboardButton(_padded("Hiking", 21),         callback_data="stats:sport:Hiking"),
+         InlineKeyboardButton(_padded("Strength Training", 21), callback_data="stats:sport:StrengthTraining")],
+        [InlineKeyboardButton(_padded("Back", 21),           callback_data="stats:menu"),
+         InlineKeyboardButton(_padded("Exit", 21),           callback_data="stats:exit")],
     ])
 
 
@@ -63,9 +77,11 @@ def stats_period_keyboard(sport: str) -> InlineKeyboardMarkup:
 
 def stats_nav_keyboard(sport: str) -> InlineKeyboardMarkup:
     """Navigation keyboard shown below a stats result."""
+    from app.utils import OTHER_ACTIVITY_SPORTS
+    change_sport_target = "stats:other" if sport in OTHER_ACTIVITY_SPORTS else "stats:menu"
     return InlineKeyboardMarkup([[
         InlineKeyboardButton(_padded("Change Period", 14), callback_data=f"stats:sport:{sport}"),
-        InlineKeyboardButton(_padded("Change Sport", 14),  callback_data="stats:menu"),
+        InlineKeyboardButton(_padded("Change Sport", 14),  callback_data=change_sport_target),
         InlineKeyboardButton(_padded("Close", 14),         callback_data="stats:exit"),
     ]])
 

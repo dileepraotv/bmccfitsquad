@@ -49,9 +49,12 @@ from app.telegram.keyboards import (
     nav_keyboard,
     recap_goal_prompt_keyboard,
     stats_nav_keyboard,
+    stats_other_sport_keyboard,
     stats_period_keyboard,
     stats_sport_keyboard,
 )
+from app.utils import DURATION_BASED_SPORTS as _DURATION_BASED_SPORTS
+from app.utils import OTHER_ACTIVITY_SPORTS as _OTHER_ACTIVITY_SPORTS
 from app.utils import SPORT_ACTIVITY_TYPES as _SPORT_ACTIVITY_TYPES
 
 logger = logging.getLogger(__name__)
@@ -405,13 +408,31 @@ async def cmd_goals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _send_goals_menu(update.message, update.effective_user.id)
 
 
-# Point-based multiplier system: each sport's kilometre is worth a
-# different number of points (roughly proportional to average energy
-# expenditure, with Run as the 1x baseline), plus a bonus for members who
-# train across more sports rather than just one.
-_LEADERBOARD_SPORTS = ["Ride", "Run", "Walk", "Swim"]
-_POINTS_PER_KM = {"Run": 10, "Swim": 40, "Walk": 6, "Ride": 3}
+# Point-based multiplier system: each sport's kilometre (or, for the
+# duration-based "Other Activities" sports, each 30-minute block) is worth a
+# different number of points — roughly proportional to average energy
+# expenditure, with Run as the 1x baseline — plus a bonus for members who
+# train across more sports rather than just one. The bonus caps out at the
+# 4-sport tier: training a 5th+ sport keeps the max +15% rather than losing it.
+_LEADERBOARD_SPORTS = [
+    "Ride", "Run", "Walk", "Swim", "Hiking",
+    "Yoga", "RacketSports", "StrengthTraining",
+]
+_POINTS_PER_KM = {"Run": 10, "Swim": 40, "Walk": 6, "Ride": 3, "Hiking": 8}
+_POINTS_PER_30MIN = {"Yoga": 5, "RacketSports": 15, "StrengthTraining": 12}
 _MULTI_SPORT_BONUS_PCT = {1: 0, 2: 5, 3: 10, 4: 15}
+_LEADERBOARD_ICONS = {
+    "Ride": "🚴", "Run": "🏃", "Walk": "🚶", "Swim": "🏊", "Hiking": "🥾",
+    "Yoga": "🧘", "RacketSports": "🏸", "StrengthTraining": "🏋️",
+}
+
+
+def _leaderboard_metric_display(sport: str, value: float) -> str:
+    """Format a per-sport leaderboard metric — km for distance sports,
+    hours for duration-based sports (value is stored in 30-min blocks)."""
+    if sport in _DURATION_BASED_SPORTS:
+        return f"{value * 0.5:.1f}h"
+    return f"{value:.0f} km"
 
 
 async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -422,10 +443,14 @@ async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         sport_sums = [
             func.sum(
                 case(
-                    (Activity.activity_type.in_(_SPORT_ACTIVITY_TYPES[sport]), Activity.distance_meters),
+                    (
+                        Activity.activity_type.in_(_SPORT_ACTIVITY_TYPES[sport]),
+                        Activity.moving_time_seconds if sport in _DURATION_BASED_SPORTS
+                        else Activity.distance_meters,
+                    ),
                     else_=0.0,
                 )
-            ).label(f"{sport.lower()}_m")
+            ).label(f"{sport.lower()}_v")
             for sport in _LEADERBOARD_SPORTS
         ]
 
@@ -445,22 +470,26 @@ async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     board = []
-    for first_name, athlete_name, ride_m, run_m, walk_m, swim_m in entries:
-        km = {
-            "Ride": (ride_m or 0) / 1000,
-            "Run":  (run_m or 0) / 1000,
-            "Walk": (walk_m or 0) / 1000,
-            "Swim": (swim_m or 0) / 1000,
-        }
-        base_points = sum(km[s] * _POINTS_PER_KM[s] for s in _LEADERBOARD_SPORTS)
-        sports_active = sum(1 for s in _LEADERBOARD_SPORTS if km[s] > 0)
-        bonus_pct = _MULTI_SPORT_BONUS_PCT.get(sports_active, 0)
+    for first_name, athlete_name, *raw_values in entries:
+        raw = dict(zip(_LEADERBOARD_SPORTS, raw_values))
+        metrics = {}
+        for sport in _LEADERBOARD_SPORTS:
+            v = raw[sport] or 0
+            # Duration sports: seconds → 30-minute blocks. Distance sports: metres → km.
+            metrics[sport] = (v / 1800.0) if sport in _DURATION_BASED_SPORTS else (v / 1000.0)
+
+        base_points = sum(
+            metrics[s] * (_POINTS_PER_30MIN[s] if s in _DURATION_BASED_SPORTS else _POINTS_PER_KM[s])
+            for s in _LEADERBOARD_SPORTS
+        )
+        sports_active = sum(1 for s in _LEADERBOARD_SPORTS if metrics[s] > 0)
+        bonus_pct = _MULTI_SPORT_BONUS_PCT.get(min(sports_active, 4), 0)
         total_points = base_points * (1 + bonus_pct / 100)
         if total_points <= 0:
             continue
         board.append({
             "name": athlete_name or first_name,
-            "km": km,
+            "metrics": metrics,
             "bonus_pct": bonus_pct,
             "total_points": total_points,
         })
@@ -479,13 +508,13 @@ async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     # names or enough sports are involved — a stacked card per member reads
     # naturally at any screen width instead of forcing horizontal scroll.
     medals = ["🥇", "🥈", "🥉"]
-    sport_icon = {"Ride": "🚴", "Run": "🏃", "Walk": "🚶", "Swim": "🏊"}
     lines = ["🏆 *BMCC Leaderboard — This Month*\n"]
     for i, e in enumerate(board):
         rank = medals[i] if i < 3 else f"{i + 1}\\."
-        km = e["km"]
+        metrics = e["metrics"]
         breakdown = "  ·  ".join(
-            f"{sport_icon[s]} {km[s]:.0f} km" for s in _LEADERBOARD_SPORTS if km[s] > 0
+            f"{_LEADERBOARD_ICONS[s]} {_leaderboard_metric_display(s, metrics[s])}"
+            for s in _LEADERBOARD_SPORTS if metrics[s] > 0
         )
         bonus_note = f"  \\(\\+{e['bonus_pct']}%\\)" if e["bonus_pct"] else ""
         lines.append(
@@ -494,8 +523,9 @@ async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
 
     lines.append(
-        "_Points: Run 10/km · Swim 40/km · Walk 6/km · Ride 3/km_\n"
-        "_Multi\\-sport bonus: 2 sports \\+5% · 3 sports \\+10% · 4 sports \\+15%_"
+        "_Points: Run 10/km · Swim 40/km · Hiking 8/km · Walk 6/km · Ride 3/km_\n"
+        "_Racket Sports 15 · Strength Training 12 · Yoga 5 \\(per 30 min\\)_\n"
+        "_Multi\\-sport bonus: 2 sports \\+5% · 3 sports \\+10% · 4\\+ sports \\+15%_"
     )
     await update.message.reply_text("\n".join(lines), parse_mode="MarkdownV2")
 
@@ -639,7 +669,18 @@ async def cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 import json as _json
 
-_SPORT_TYPE_MAP = {"Ride Endurance": "RideEndurance"}
+_SPORT_TYPE_MAP = {
+    "Ride Endurance":    "RideEndurance",
+    "Racket Sports":     "RacketSports",
+    "Strength Training": "StrengthTraining",
+}
+_SPORT_TYPE_MAP_REVERSE = {v: k for k, v in _SPORT_TYPE_MAP.items()}
+
+
+def _sport_display_label(activity_type: str) -> str:
+    """Reverse-map an internal sport key (e.g. "RacketSports") back to its
+    space-cased display label (e.g. "Racket Sports") for goal messages."""
+    return _SPORT_TYPE_MAP_REVERSE.get(activity_type, activity_type)
 
 # Sport → Strava activity_type mapping now lives in app.utils.SPORT_ACTIVITY_TYPES
 # (imported above as _SPORT_ACTIVITY_TYPES) so goal progress always counts the
@@ -662,6 +703,20 @@ def _parse_category_threshold(category: str) -> float:
     except (IndexError, ValueError):
         return 0.0
 
+
+def _parse_duration_threshold_s(category: str) -> float:
+    """Convert a stored duration category string like "30 min" to seconds.
+
+    Used for the "Other Activities" sports (Yoga, Racket Sports, Strength
+    Training) which have no meaningful GPS distance. Falls back to 0 if
+    unparseable so all activities of that type are counted.
+    """
+    try:
+        val = float(category.strip().split()[0].replace(",", "."))
+        return val * 60
+    except (IndexError, ValueError):
+        return 0.0
+
 _GOAL_PERIODS = [
     "This Month",
     "This Quarter",
@@ -674,11 +729,15 @@ _GOAL_PERIODS = [
 _GOAL_DRAFT_TTL = 600  # seconds — draft expires after 10 min of inactivity
 
 _SPORT_UNITS: dict[str, str] = {
-    "Ride":           "km",
-    "Ride Endurance": "km",
-    "Run":            "km",
-    "Walk":           "km",
-    "Swim":           "m",
+    "Ride":              "km",
+    "Ride Endurance":    "km",
+    "Run":               "km",
+    "Walk":              "km",
+    "Swim":              "m",
+    "Hiking":            "km",
+    "Yoga":              "min",
+    "Racket Sports":     "min",
+    "Strength Training": "min",
 }
 
 
@@ -703,8 +762,21 @@ def _goal_sport_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(_pad("Run"),                callback_data="goal:sport:Run"),
          InlineKeyboardButton(_pad("Swim"),                callback_data="goal:sport:Swim"),
          InlineKeyboardButton(_pad("Walk"),                callback_data="goal:sport:Walk")],
+        [InlineKeyboardButton(_pad("Other Activities", 42), callback_data="goal:other")],
         [InlineKeyboardButton(_pad("Back", 21),           callback_data="goal:back"),
          InlineKeyboardButton(_pad("Exit", 21),           callback_data="goal:exit")],
+    ])
+
+
+def _goal_other_sport_keyboard() -> InlineKeyboardMarkup:
+    """Secondary sport menu for goal-setting on the non-core sports."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(_pad("Yoga", 21),          callback_data="goal:sport:Yoga"),
+         InlineKeyboardButton(_pad("Racket Sports", 21), callback_data="goal:sport:Racket Sports")],
+        [InlineKeyboardButton(_pad("Hiking", 21),        callback_data="goal:sport:Hiking"),
+         InlineKeyboardButton(_pad("Strength Training", 21), callback_data="goal:sport:Strength Training")],
+        [InlineKeyboardButton(_pad("Back", 21),          callback_data="goal:sport_menu"),
+         InlineKeyboardButton(_pad("Exit", 21),          callback_data="goal:exit")],
     ])
 
 
@@ -848,6 +920,22 @@ async def _handle_goal_callbacks(query, data: str) -> None:
         await _send_goals_menu(query, tg_id)
         return
 
+    if data == "goal:other":
+        await query.edit_message_text(
+            "Choose an activity:",
+            reply_markup=_goal_other_sport_keyboard(),
+        )
+        return
+
+    if data == "goal:sport_menu":
+        await query.edit_message_text(
+            '_"Setting goals is the first step in turning the invisible into the visible."_\n\n'
+            "Choose a Sport:",
+            parse_mode="Markdown",
+            reply_markup=_goal_sport_keyboard(),
+        )
+        return
+
     if data == "goal:delete_menu":
         await _show_delete_menu(query)
         return
@@ -871,15 +959,20 @@ async def _handle_goal_callbacks(query, data: str) -> None:
         )
         unit = _sport_unit(sport)
         examples = {
-            "Run":            "`5`, `10`, `21.1`, `42.2`",
-            "Walk":           "`2`, `5`, `10`, `21.1`",
-            "Ride":           "`50`, `100`, `200`",
-            "Ride Endurance": "`200`, `300`, `600`",
-            "Swim":           "`500`, `1000`, `1500`, `3800`",
+            "Run":               "`5`, `10`, `21.1`, `42.2`",
+            "Walk":              "`2`, `5`, `10`, `21.1`",
+            "Ride":              "`50`, `100`, `200`",
+            "Ride Endurance":    "`200`, `300`, `600`",
+            "Swim":              "`500`, `1000`, `1500`, `3800`",
+            "Hiking":            "`2`, `5`, `10`, `21.1`",
+            "Yoga":              "`30`, `45`, `60`",
+            "Racket Sports":     "`30`, `45`, `60`",
+            "Strength Training": "`30`, `45`, `60`",
         }
         eg = examples.get(sport, "`100`")
+        goal_noun = "session length" if unit == "min" else "distance"
         await query.message.reply_text(
-            f"✏️ *What is your goal distance for {sport}?*\n\n"
+            f"✏️ *What is your goal {goal_noun} for {sport}?*\n\n"
             f"Enter a number in {unit} — e.g. {eg}\n\n"
             f"Type /cancel to abort.",
             parse_mode="Markdown",
@@ -946,9 +1039,7 @@ async def _handle_goal_callbacks(query, data: str) -> None:
             await query.edit_message_text("Goal not found.")
             return
 
-        sport_label = ("Ride Endurance"
-                       if goal.activity_type == "RideEndurance"
-                       else goal.activity_type)
+        sport_label = _sport_display_label(goal.activity_type)
         target_word = "time" if goal.target_count == 1 else "times"
         await query.edit_message_text(
             f"Delete this goal?\n\n"
@@ -974,9 +1065,7 @@ async def _handle_goal_callbacks(query, data: str) -> None:
             )
             goal = result.scalar_one_or_none()
             if goal:
-                sport_label = ("Ride Endurance"
-                               if goal.activity_type == "RideEndurance"
-                               else goal.activity_type)
+                sport_label = _sport_display_label(goal.activity_type)
                 goal.is_active = False
                 await db.commit()
                 await query.edit_message_text(
@@ -1098,7 +1187,7 @@ async def _show_delete_menu(query) -> None:
     rows = [
         [InlineKeyboardButton(
             _pad(
-                f"{'Ride Endurance' if g.activity_type == 'RideEndurance' else g.activity_type}"
+                f"{_sport_display_label(g.activity_type)}"
                 f" — {g.category} x{g.target_count} ({g.start_date} to {g.end_date})",
                 42,
             ),
@@ -1154,8 +1243,15 @@ async def _show_goal_status(query) -> None:
             ) + timedelta(days=1)
             act_types = _SPORT_ACTIVITY_TYPES.get(g.activity_type, [g.activity_type])
 
-            # Parse threshold from stored category string, e.g. "100 km" → 100_000 m
-            threshold_m = _parse_category_threshold(g.category)
+            # Duration-based sports (Yoga, Racket Sports, Strength Training) have
+            # no meaningful GPS distance — compare moving time instead of km/m.
+            if g.activity_type in _DURATION_BASED_SPORTS:
+                threshold_s = _parse_duration_threshold_s(g.category)
+                metric_filter = Activity.moving_time_seconds >= threshold_s
+            else:
+                # Parse threshold from stored category string, e.g. "100 km" → 100_000 m
+                threshold_m = _parse_category_threshold(g.category)
+                metric_filter = Activity.distance_meters >= threshold_m
 
             count_result = await db.execute(
                 select(func.count(Activity.id))
@@ -1165,7 +1261,7 @@ async def _show_goal_status(query) -> None:
                         Activity.activity_type.in_(act_types),
                         Activity.activity_date >= start_dt,
                         Activity.activity_date < end_dt,
-                        Activity.distance_meters >= threshold_m,
+                        metric_filter,
                     )
                 )
             )
@@ -1176,7 +1272,7 @@ async def _show_goal_status(query) -> None:
             filled_segs = round(pct / 10)
             bar = "█" * filled_segs + "░" * (10 - filled_segs)
 
-            sport_label = "Ride Endurance" if g.activity_type == "RideEndurance" else g.activity_type
+            sport_label = _sport_display_label(g.activity_type)
             target_word = "time" if g.target_count == 1 else "times"
             lines.append(
                 f"*{sport_label}* — {g.category}\n"
@@ -1243,6 +1339,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         sport_labels = {
             "Ride": "Ride", "RideEndurance": "Ride Endurance",
             "Run": "Run", "Swim": "Swim", "Walk": "Walk",
+            "Hiking": "Hiking", "Yoga": "Yoga",
+            "RacketSports": "Racket Sports", "StrengthTraining": "Strength Training",
         }
         label = sport_labels.get(sport, sport)
         await query.edit_message_text(
@@ -1262,6 +1360,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "📊 *Stats*\n\nSelect the activity behind your progress:",
             parse_mode="Markdown",
             reply_markup=stats_sport_keyboard(),
+        )
+
+    elif data == "stats:other":
+        await query.edit_message_text(
+            "📊 *Other Activities*\n\nSelect the activity behind your progress:",
+            parse_mode="Markdown",
+            reply_markup=stats_other_sport_keyboard(),
         )
 
     elif data == "stats:exit":
