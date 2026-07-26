@@ -507,6 +507,12 @@ async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     # A fixed-width monospace table overflows on narrow phone screens once
     # names or enough sports are involved — a stacked card per member reads
     # naturally at any screen width instead of forcing horizontal scroll.
+    # The points/breakdown line is wrapped in a single `code` span so the
+    # numbers render in the same monospace font as /stats and activity
+    # notifications — consistent styling across the bot. Note: content
+    # inside a code span only needs backtick/backslash escaped (not the
+    # full MarkdownV2 set _escape_md applies), and everything here is
+    # app-generated (emoji, digits, units) so no escaping is needed at all.
     medals = ["🥇", "🥈", "🥉"]
     lines = ["🏆 *BMCC Leaderboard — This Month*\n"]
     for i, e in enumerate(board):
@@ -516,10 +522,10 @@ async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"{_LEADERBOARD_ICONS[s]} {_leaderboard_metric_display(s, metrics[s])}"
             for s in _LEADERBOARD_SPORTS if metrics[s] > 0
         )
-        bonus_note = f"  \\(\\+{e['bonus_pct']}%\\)" if e["bonus_pct"] else ""
+        bonus_note = f"  (+{e['bonus_pct']}%)" if e["bonus_pct"] else ""
         lines.append(
-            f"{rank} *{_escape_md(e['name'])}* — *{e['total_points']:.0f} pts*{bonus_note}\n"
-            f"     {_escape_md(breakdown)}\n"
+            f"{rank} *{_escape_md(e['name'])}*\n"
+            f"`{e['total_points']:.0f} pts{bonus_note}  ·  {breakdown}`\n"
         )
 
     lines.append(
