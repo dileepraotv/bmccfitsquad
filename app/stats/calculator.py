@@ -147,6 +147,17 @@ async def calculate_stats(
     return calculators[sport_type](activities)
 
 
+def _format_kv_block(lines: list[str]) -> str:
+    """Render "Label: value" lines as a fixed-width, monospace ``code`` block
+    so the labels and values line up in a straight column — Telegram's only
+    real "font" option is its monospace code formatting, there's no
+    separate typeface setting."""
+    pairs = [tuple(line.split(": ", 1)) if ": " in line else (line, "") for line in lines]
+    width = max((len(label) for label, _ in pairs), default=0)
+    body = "\n".join(f"{label.ljust(width)} : {value}" for label, value in pairs)
+    return f"```\n{body}\n```"
+
+
 def format_stats_message(
     stats: dict,
     sport_type: str,
@@ -155,17 +166,19 @@ def format_stats_message(
 ) -> str:
     """Format a stats dict into a Telegram-ready text message.
 
-    The output matches the BMCC style exactly::
+    The stats body renders as a monospace, key-aligned code block::
 
         Ride - Current Month Stats: (Dileep Rao)
 
-        - Rides: 2
-        - Distance: 152.67 km
-        - Moving Time: 08:01:23 hours
-        - Elevation Gain: 1.13 km
-        - Biggest Ride: 100.06 km
-        - 50's: 1
-        - 100's: 1
+        ```
+        Rides          : 2
+        Distance       : 152.67 km
+        Moving Time    : 08:01:23 hours
+        Elevation Gain : 1.13 km
+        Biggest Ride   : 100.06 km
+        50's           : 1
+        100's          : 1
+        ```
 
     Args:
         stats:        Dict returned by :func:`calculate_stats`.
@@ -192,7 +205,7 @@ def format_stats_message(
         "StrengthTraining": lambda s: _format_duration_stats(s, "Workouts"),
     }
     body_lines = formatters.get(sport_type, lambda _: [])(stats)
-    body = "\n".join(f"- {line}" for line in body_lines)
+    body = _format_kv_block(body_lines) if body_lines else ""
     quote = _random_quote()
     return f"{header}\n\n{body}\n\n*{quote}*"
 
