@@ -36,10 +36,14 @@ from app.utils import SPORT_ACTIVITY_TYPES as _SPORT_ACTIVITY_TYPES
 
 logger = logging.getLogger(__name__)
 
-# A completed month's data never changes, so once rendered it's cached for
-# the rest of that month (and a bit beyond, to comfortably cover the whole
-# window during which /recap could reasonably still target it).
-_RECAP_CACHE_TTL_SECONDS = 60 * 86_400
+# Short-lived cache — just long enough to absorb repeat /recap or /yearrecap
+# taps (or the scheduled send immediately followed by a manual check) without
+# re-rendering, without letting base64 PNG images sit in Redis for long.
+# Recap images are the single biggest consumer of Redis storage (a few
+# hundred KB each); a 1-day TTL keeps memory bounded as the user base grows,
+# at the cost of a cheap re-render (DB aggregation + Pillow draw, no Strava
+# API calls) if the same month/year is revisited more than a day later.
+_RECAP_CACHE_TTL_SECONDS = 86_400
 
 # A preview of the *current, still in-progress* year (via /yearrecap before
 # 31 Dec) must expire quickly — long enough to avoid re-rendering on rapid
