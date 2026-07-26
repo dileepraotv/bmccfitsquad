@@ -187,18 +187,20 @@ async def format_activity_notification(
 
     # ------------------------------------------------------------------
     # Header — Athlete/Date are aligned as monospace `code` lines like the
-    # metrics block below. Activity is kept as a plain (non-code) line so
-    # its Strava link stays tappable — wrapping a markdown link in a `code`
-    # span would print the raw "[text](url)" instead of rendering it.
+    # metrics block below. Only the "Activity" label is wrapped in `code`
+    # (same width as "Athlete"/"Date " so the colons line up) — the link
+    # itself stays outside the code span and unstyled, since wrapping a
+    # markdown link in `code` would print the raw "[text](url)" instead of
+    # rendering it as tappable.
     # ------------------------------------------------------------------
     greeting   = _random_greeting()
     sport_word = _friendly_sport_word(activity_type)
     lines: list[str] = [
         f"{emoji} *{greeting}, {first_name} — new {sport_word} activity logged!*",
         _SEPARATOR,
-        f"`Athlete : {athlete_name}`",
-        f"Activity: {activity_link}",
-        f"`Date    : {format_friendly_date(activity.get('start_date'))}`",
+        f"`Athlete ` : {athlete_name}",
+        f"`Activity` : {activity_link}",
+        f"`Date    ` : {format_friendly_date(activity.get('start_date'))}",
     ]
 
     # ------------------------------------------------------------------
