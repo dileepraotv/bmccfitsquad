@@ -148,14 +148,15 @@ async def calculate_stats(
 
 
 def _format_kv_block(lines: list[str]) -> str:
-    """Render "Label: value" lines as a fixed-width, monospace ``code`` block
-    so the labels and values line up in a straight column — Telegram's only
-    real "font" option is its monospace code formatting, there's no
-    separate typeface setting."""
+    """Render "Label: value" lines as fixed-width monospace text so labels
+    and values line up in a straight column. Each line is its own inline
+    `code` span (not a fenced ``` block) — a fenced block renders as a
+    separate, narrower boxed element with a "Copy" button in Telegram
+    clients; inline code keeps the monospace alignment while flowing as
+    normal message text at full bubble width."""
     pairs = [tuple(line.split(": ", 1)) if ": " in line else (line, "") for line in lines]
     width = max((len(label) for label, _ in pairs), default=0)
-    body = "\n".join(f"{label.ljust(width)} : {value}" for label, value in pairs)
-    return f"```\n{body}\n```"
+    return "\n".join(f"`{label.ljust(width)} : {value}`" for label, value in pairs)
 
 
 def format_stats_message(

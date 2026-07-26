@@ -159,12 +159,14 @@ def _friendly_sport_word(activity_type: str) -> str:
 
 
 def _format_kv_block(pairs: list[tuple[str, str]]) -> str:
-    """Render label/value pairs as a fixed-width, monospace ``code`` block so
-    the keys and values line up in a straight column (Telegram only offers
-    true monospace via code formatting — there's no separate "font" setting)."""
+    """Render label/value pairs as fixed-width monospace lines so keys and
+    values line up in a straight column. Each line is its own inline `code`
+    span (not a fenced ``` block) — a fenced block renders as a separate,
+    narrower boxed element with a "Copy" button in Telegram clients; inline
+    code keeps the monospace alignment while flowing as normal message text
+    at full bubble width."""
     width = max(len(label) for label, _ in pairs)
-    body = "\n".join(f"{label.ljust(width)} : {value}" for label, value in pairs)
-    return f"```\n{body}\n```"
+    return "\n".join(f"`{label.ljust(width)} : {value}`" for label, value in pairs)
 
 
 # ---------------------------------------------------------------------------
