@@ -4,13 +4,18 @@ All outbound HTTP calls to the Strava REST API live here.  Every function
 accepts a plaintext ``access_token`` — callers must obtain one via
 ``app.strava.auth.get_valid_access_token`` before calling these functions.
 
-Rate limits (as of 2024)
--------------------------
-  - 100 requests / 15 min
-  - 1 000 requests / day
+Rate limits (2026, Standard Tier after self-upgrade)
+-----------------------------------------------------
+  - Overall:  400 requests / 15 min,  4 000 requests / day
+  - Read-only ("non-upload") endpoints — covers everything this client
+    calls: 200 requests / 15 min,  2 000 requests / day
 
-We do not implement client-side rate-limit tracking here; Strava returns
-HTTP 429 when the limit is hit, which surfaces as an httpx.HTTPStatusError.
+Every response carries ``X-RateLimit-Limit``/``X-RateLimit-Usage`` headers
+(15-min,daily). We record the latest snapshot to Redis on every call via
+``_record_rate_limit_usage`` — callers doing bulk/background work (e.g. the
+catch-up cron) can check ``is_rate_limited()`` first and back off before
+ever actually hitting a 429, which still surfaces as an
+``httpx.HTTPStatusError`` if it happens anyway.
 """
 from __future__ import annotations
 
@@ -28,6 +33,75 @@ STRAVA_API_BASE = "https://www.strava.com/api/v3"
 
 # Maximum activities Strava will return in a single page
 _MAX_PER_PAGE = 200
+
+# Back off bulk/background Strava usage (catch-up cron) once daily usage
+# crosses this fraction of the 2,000/day read-endpoint quota — leaves
+# headroom for real-time webhook-triggered calls, which are never throttled.
+RATE_LIMIT_BACKOFF_THRESHOLD = 0.8
+
+
+async def _record_rate_limit_usage(response: httpx.Response) -> None:
+    """Best-effort: cache the latest X-RateLimit-Usage snapshot in Redis.
+
+    Never raises — a failure here must not affect the actual API call.
+    """
+    limit_header = response.headers.get("X-RateLimit-Limit")
+    usage_header = response.headers.get("X-RateLimit-Usage")
+    if not limit_header or not usage_header:
+        return
+    try:
+        from app.redis_client import get_redis, key_strava_rate_limit
+        redis = await get_redis()
+        await redis.set(
+            key_strava_rate_limit(),
+            f"{limit_header}|{usage_header}",
+            ex=900,  # stale after 15 min (one Strava rate-limit window) if no calls happen
+        )
+    except Exception:
+        logger.debug("Could not record Strava rate-limit usage", exc_info=True)
+
+
+async def get_rate_limit_status() -> dict | None:
+    """Return the last-seen Strava rate-limit snapshot, or None if unknown.
+
+    Shape: {"limit_15min": int, "usage_15min": int, "limit_daily": int,
+    "usage_daily": int, "daily_fraction": float}
+    """
+    try:
+        from app.redis_client import get_redis, key_strava_rate_limit
+        redis = await get_redis()
+        raw = await redis.get(key_strava_rate_limit())
+    except Exception:
+        return None
+    if not raw:
+        return None
+    try:
+        limit_part, usage_part = raw.split("|")
+        limit_15min, limit_daily = (int(x) for x in limit_part.split(","))
+        usage_15min, usage_daily = (int(x) for x in usage_part.split(","))
+    except (ValueError, AttributeError):
+        return None
+    return {
+        "limit_15min": limit_15min,
+        "usage_15min": usage_15min,
+        "limit_daily": limit_daily,
+        "usage_daily": usage_daily,
+        "daily_fraction": (usage_daily / limit_daily) if limit_daily else 0.0,
+    }
+
+
+async def is_rate_limited(threshold: float = RATE_LIMIT_BACKOFF_THRESHOLD) -> bool:
+    """True once daily Strava usage crosses *threshold* of the known quota.
+
+    Used by background/bulk callers (catch-up cron) to skip non-essential
+    Strava calls before actually getting 429'd. Returns False (i.e. proceed)
+    if no usage has been recorded yet — we only throttle once we have real
+    evidence of usage.
+    """
+    status = await get_rate_limit_status()
+    if status is None:
+        return False
+    return status["daily_fraction"] >= threshold
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +139,7 @@ async def _get(access_token: str, path: str, **params) -> dict | list:
     """
     async with _auth_client(access_token) as client:
         response = await client.get(path, params={k: v for k, v in params.items() if v is not None})
+        await _record_rate_limit_usage(response)
         response.raise_for_status()
         return response.json()
 
@@ -161,6 +236,7 @@ async def update_activity(
 
     async with _auth_client(access_token) as client:
         response = await client.put(f"/activities/{activity_id}", json=payload)
+        await _record_rate_limit_usage(response)
         response.raise_for_status()
         data = response.json()
 
@@ -200,6 +276,7 @@ async def fetch_activities(
                 params["before"] = before
 
             response = await client.get("/athlete/activities", params=params)
+            await _record_rate_limit_usage(response)
             response.raise_for_status()
             batch: list[dict] = response.json()
 

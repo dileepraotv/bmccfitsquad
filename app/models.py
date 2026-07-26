@@ -225,3 +225,44 @@ class GroupChat(Base):
 
     def __repr__(self) -> str:
         return f"<GroupChat id={self.id} title={self.title!r}>"
+
+
+# ---------------------------------------------------------------------------
+# webhook_events  — durable ack/process queue for Strava push events
+# ---------------------------------------------------------------------------
+# Strava requires a 200 response within 2 seconds of a webhook POST. Rather
+# than doing the real work (token refresh, Strava fetch, DB write, Telegram
+# notify) inside that request — where a cold start or a mid-flight exception
+# can silently lose the event forever — we durably persist the raw payload
+# here FIRST and ack immediately. A separate step processes the row and
+# marks it done. Any row left unprocessed (crash, transient error) is picked
+# up by the next cron tick's repair pass — this is what makes catch-up sync
+# event-driven (repair only what's actually pending) instead of a blind
+# poll-every-user-every-tick scan. See catchup_sync_all_users() in tasks.py.
+class WebhookEvent(Base):
+    """One raw Strava push-event payload, durable from ack to processing."""
+
+    __tablename__ = "webhook_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=_uuid
+    )
+
+    object_type: Mapped[str] = mapped_column(Text, nullable=False)   # "activity" | "athlete"
+    aspect_type: Mapped[str] = mapped_column(Text, nullable=False)   # "create" | "update" | "delete"
+    object_id: Mapped[int] = mapped_column(BigInteger, nullable=False)   # activity_id or athlete_id
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False)    # Strava athlete id
+    updates_json: Mapped[str | None] = mapped_column(Text)   # raw "updates" dict, JSON-encoded
+
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+    def __repr__(self) -> str:
+        return (
+            f"<WebhookEvent id={self.id} {self.object_type}/{self.aspect_type} "
+            f"object_id={self.object_id} processed={self.processed_at is not None}>"
+        )

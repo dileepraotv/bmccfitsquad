@@ -2,7 +2,7 @@
 
 Routes
 ------
-  GET      /cron/sync-all  — catchup sync for missed webhooks (cron-job.org, every 30 min)
+  GET      /cron/sync-all  — event-driven catch-up safety net (UptimeRobot/cron-job.org)
   GET|HEAD /ping            — instant keep-alive (UptimeRobot pings this every 5 min)
   GET  /health              — liveness probe with cached DB check
   GET  /strava/webhook      — Strava hub challenge verification
@@ -189,14 +189,14 @@ _cron_status: dict = {
 
 @app.api_route("/cron/sync-all", methods=["GET", "HEAD"], tags=["ops"], summary="Catchup sync — finds activities missed by webhook")
 async def cron_sync_all(secret: str = ""):
-    """Called every 5 minutes by UptimeRobot as a reliability safety net.
+    """Called periodically (UptimeRobot/cron-job.org) as a reliability safety net.
 
-    Scans the last 3 hours of Strava activity for every connected user and
-    sends notifications for anything not already processed by the webhook.
-    Missed webhooks are recovered within 5 minutes regardless of cause.
+    Event-driven, not a blind poll — see the module docstring above
+    catchup_sync_all_users() in tasks.py for the 3-layer design (repair
+    pending webhook events, heartbeat-gated outage recovery, low-frequency
+    daily rotation). Strava API usage no longer scales with (users x ticks).
 
     Protected by: ?secret={CRON_SECRET} query parameter
-    UptimeRobot URL: https://bmccfitsquad.onrender.com/cron/sync-all?secret=YOUR_SECRET
     """
     import asyncio
     from app.tasks import (
@@ -239,6 +239,8 @@ async def cron_status():
 
     If last_run is None or very old, CRON_SECRET is likely missing or wrong.
     """
+    from app.strava.client import get_rate_limit_status
+
     last_run = _cron_status["last_run"]
     return {
         "cron_secret_configured": bool(settings.cron_secret),
@@ -248,6 +250,7 @@ async def cron_status():
         "last_result": _cron_status["last_result"],
         "last_recap_result": _cron_status["last_recap_result"],
         "last_yearly_recap_result": _cron_status["last_yearly_recap_result"],
+        "strava_rate_limit": await get_rate_limit_status(),
     }
 
 
@@ -270,9 +273,14 @@ async def version():
 async def ping():
     """Instant 200 response used by UptimeRobot to prevent Render sleep.
 
-    No database or Redis calls — returns immediately so the 5-minute
-    UptimeRobot ping never wakes a sleeping instance slowly.
+    Response never waits on DB/Redis — the heartbeat write (used by
+    catchup_sync_all_users() to detect real outages vs. quiet nights) is
+    dispatched fire-and-forget so a slow Redis round-trip can never delay
+    this response, even on a cold-start path.
     """
+    from app.strava.webhook import touch_heartbeat
+    from app.tasks import fire_and_forget
+    fire_and_forget(touch_heartbeat())
     return {"status": "ok"}
 
 

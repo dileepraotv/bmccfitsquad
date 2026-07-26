@@ -487,36 +487,197 @@ async def _build_goal_lines(db, user: User) -> list[tuple[str, str]]:
 # ---------------------------------------------------------------------------
 # Task 3: catchup_sync_all_users  (cron safety net)
 # ---------------------------------------------------------------------------
+#
+# Architecture (see conversation "Strava daily API quota" fix):
+#
+# The old version of this task called Strava's /athlete/activities once per
+# CONNECTED USER on every single cron tick, regardless of whether anything
+# had actually gone wrong. That scales Strava usage as O(users x ticks) —
+# at 500 users on a 5-minute tick that's ~144,000 calls/day against a
+# 2,000/day quota. This version makes catch-up event-driven instead of a
+# blind poll, in three layers, each only spending Strava calls when there's
+# real evidence something might have been missed:
+#
+#   Layer 1 (repair pending webhook events) — retries any WebhookEvent row
+#     left unprocessed by a crash/restart. Cost: 1 Strava call per row that
+#     is ACTUALLY pending, typically zero on a healthy tick. See
+#     process_pending_webhook_events().
+#
+#   Layer 2 (heartbeat-gated outage recovery) — only runs a full per-user
+#     Strava scan when a gap in the /ping + /cron/sync-all heartbeat proves
+#     the process was actually unreachable (not just quiet), and only for
+#     the gap window itself, not a blind rolling lookback. Cost: 0 on every
+#     healthy tick; O(users) only right after a genuine outage.
+#
+#   Layer 3 (daily rotation safety net) — a distant backstop in case Layers
+#     1-2 miss something (e.g. a silent bug). Each user is checked at most
+#     once per rotation window (default 24h), spread evenly across ticks via
+#     a deterministic hash — so total daily cost is O(users), not
+#     O(users x ticks), regardless of how often the cron actually fires.
+#
+# All three layers respect Strava's rate-limit headers via
+# app.strava.client.is_rate_limited() and back off before ever hitting 429.
 
 # Must match webhook.py so both systems agree on dedup key lifetime.
 _DEDUP_TTL_SECONDS = 86_400  # 24 hours
 
+# Heartbeat gap beyond which we assume the process was genuinely unreachable
+# (not just a quiet night with no user activity) and worth a bounded repair
+# scan. ~2.4x the nominal 5-min keep-alive cadence, to absorb one missed
+# ping without false-triggering a full scan.
+_HEARTBEAT_GAP_THRESHOLD_SECONDS = 720  # 12 minutes
+
+# Layer 3: each user is swept at most once per this window, spread evenly
+# across ticks — bounds the safety-net's total Strava usage to ~users/day
+# regardless of actual cron frequency.
+_DAILY_SWEEP_WINDOW_SECONDS = 86_400  # 24 hours
+_DAILY_SWEEP_SLOTS = 288  # 5-minute-equivalent granularity within the window
+
+
+async def _sync_recent_activities_for_user(
+    user: User, *, after_ts: int, redis, source: str,
+) -> tuple[int, int]:
+    """Fetch activities for one user since after_ts and insert any new ones.
+
+    Shared by the Layer 2 (outage gap) and Layer 3 (daily rotation) scans —
+    both need the exact same "fetch, dedup, insert, notify" pipeline, just
+    triggered for different reasons (hence the *source* label in logs).
+
+    Returns (activities_seen, new_activities_inserted).
+    """
+    from app.redis_client import key_activity_seen
+
+    async with AsyncSessionLocal() as db:
+        user_db = await db.get(User, user.id)
+        if not user_db:
+            return (0, 0)
+        access_token = await get_valid_access_token(db, user_db)
+        user_id_str = str(user_db.id)
+
+    activities = await fetch_activities(access_token, after=after_ts)
+    new_count = 0
+
+    for data in activities:
+        strava_id = int(data["id"])
+        dedup_key = key_activity_seen(strava_id)
+
+        if await redis.exists(dedup_key):
+            continue
+
+        async with AsyncSessionLocal() as db:
+            existing = await db.execute(
+                select(Activity.id).where(Activity.strava_activity_id == strava_id)
+            )
+            if existing.scalar_one_or_none() is not None:
+                continue
+
+            activity_date = _parse_strava_date(
+                data.get("start_date") or data.get("start_date_local")
+            )
+            is_indoor = (
+                bool(data.get("trainer", False))
+                or str(data.get("sport_type") or data.get("type", "")).startswith("Virtual")
+            )
+            stmt = (
+                pg_insert(Activity)
+                .values(
+                    strava_activity_id=strava_id,
+                    user_id=user.id,
+                    activity_name=data.get("name") or "Unnamed Activity",
+                    activity_type=data.get("sport_type") or data.get("type") or "Unknown",
+                    activity_date=activity_date,
+                    distance_meters=float(data.get("distance") or 0),
+                    moving_time_seconds=int(data.get("moving_time") or 0),
+                    elapsed_time_seconds=int(data.get("elapsed_time") or 0),
+                    elevation_gain=float(data.get("total_elevation_gain") or 0),
+                    average_speed=float(data.get("average_speed") or 0),
+                    max_speed=float(data.get("max_speed") or 0),
+                    average_heartrate=_optional_float(data.get("average_heartrate")),
+                    max_heartrate=_optional_float(data.get("max_heartrate")),
+                    calories=_optional_float(data.get("calories")),
+                    is_indoor=is_indoor,
+                )
+                .on_conflict_do_nothing(index_elements=["strava_activity_id"])
+            )
+            await db.execute(stmt)
+            await db.commit()
+
+        await redis.set(dedup_key, "1", ex=_DEDUP_TTL_SECONDS, nx=True)
+        fire_and_forget(send_activity_notification(activity_data=data, user_id=user_id_str))
+        new_count += 1
+        logger.info(
+            "catchup_sync[%s]: notifying missed activity strava_id=%s user_id=%s",
+            source, strava_id, user_id_str,
+        )
+
+    return (len(activities), new_count)
+
+
+async def process_pending_webhook_events(*, max_events: int = 50) -> dict:
+    """Layer 1 — retry any durably-queued webhook event left unprocessed.
+
+    This is the primary recovery path: every webhook POST is persisted
+    before being acked (see strava/webhook.py), so anything the process
+    didn't get around to (crash, transient Strava/DB error) shows up here
+    as a WebhookEvent row with processed_at IS NULL. Cost is exactly one
+    Strava call per row that is genuinely pending — zero on a healthy tick.
+    """
+    from app.models import WebhookEvent
+    from app.strava.webhook import process_webhook_event
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(WebhookEvent.id)
+            .where(WebhookEvent.processed_at.is_(None))
+            .order_by(WebhookEvent.received_at)
+            .limit(max_events)
+        )
+        pending_ids = [str(row) for row in result.scalars().all()]
+
+    for event_id in pending_ids:
+        try:
+            await process_webhook_event(event_id)
+        except Exception:
+            logger.exception("process_pending_webhook_events: failed event_id=%s", event_id)
+
+    if pending_ids:
+        logger.info("process_pending_webhook_events: repaired %s event(s)", len(pending_ids))
+    return {"repaired": len(pending_ids)}
+
 
 async def catchup_sync_all_users() -> dict:
-    """Sync the last 3 hours of Strava activities for every connected user.
+    """Reliability safety net — see module comment above for the 3-layer design.
 
-    This is the reliability safety net.  It is called every 30 minutes by
-    cron-job.org via GET /cron/sync-all and catches any activities that the
-    Strava webhook missed (e.g. service was sleeping on delivery, Render cold
-    start exceeded Strava's 2-second ack window, etc.).
-
-    Logic per activity:
-      1. Redis dedup key present → webhook already handled it → skip
-      2. Row exists in DB        → processed by an earlier cron run → skip
-      3. Neither                 → insert row + send Telegram notification
-
-    Returns a summary dict that is logged by the endpoint handler.
+    Called every few minutes via GET /cron/sync-all. Unlike the old blind
+    per-user scan, this only spends Strava API calls when there's concrete
+    evidence something might have been missed.
     """
-    from app.redis_client import get_redis, key_activity_seen
+    from app.redis_client import get_redis, key_heartbeat
+    from app.strava.client import is_rate_limited
 
-    users_processed = 0
-    new_activities = 0
-    errors = 0
+    redis = await get_redis()
+    now_ts = int(datetime.now(timezone.utc).timestamp())
 
-    # Look back 3 hours — generous enough to cover any retry window
-    cutoff_ts = int((datetime.now(timezone.utc) - timedelta(hours=3)).timestamp())
+    # --- Layer 1: repair anything left unprocessed by a crash/restart -----
+    repair_result = await process_pending_webhook_events()
 
-    # Single query to get all active Strava-connected users
+    # --- Heartbeat: read the previous value, then stamp "now" -------------
+    prev_heartbeat_raw = await redis.get(key_heartbeat())
+    await redis.set(key_heartbeat(), str(now_ts))
+    prev_heartbeat = int(prev_heartbeat_raw) if prev_heartbeat_raw else None
+    gap_seconds = (now_ts - prev_heartbeat) if prev_heartbeat else None
+
+    if await is_rate_limited():
+        logger.warning("catchup_sync: Strava daily usage near quota — skipping bulk scans this tick")
+        return {
+            "repaired": repair_result["repaired"],
+            "outage_gap_seconds": gap_seconds,
+            "outage_scan": None,
+            "daily_sweep": None,
+            "rate_limited": True,
+        }
+
+    # Single query — active, connected users are needed by both remaining layers
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(User).where(
@@ -527,99 +688,69 @@ async def catchup_sync_all_users() -> dict:
         )
         users = result.scalars().all()
 
-    if not users:
-        logger.info("catchup_sync: no active connected users — nothing to do")
-        return {"users_processed": 0, "new_activities": 0, "errors": 0}
+    outage_scan: dict | None = None
+    daily_sweep: dict | None = None
 
-    redis = await get_redis()
-    logger.info("catchup_sync: scanning %s user(s) for missed activities", len(users))
-
-    for user in users:
-        try:
-            # Refresh token inside its own session
-            async with AsyncSessionLocal() as db:
-                user_db = await db.get(User, user.id)
-                if not user_db:
-                    continue
-                access_token = await get_valid_access_token(db, user_db)
-                user_id_str = str(user_db.id)
-
-            activities = await fetch_activities(access_token, after=cutoff_ts)
-            users_processed += 1
-
-            for data in activities:
-                strava_id = int(data["id"])
-                dedup_key = key_activity_seen(strava_id)
-
-                # 1. Webhook already processed this activity
-                if await redis.exists(dedup_key):
-                    continue
-
-                # 2. Already in DB from a prior cron run (dedup key may have expired)
-                async with AsyncSessionLocal() as db:
-                    existing = await db.execute(
-                        select(Activity.id).where(
-                            Activity.strava_activity_id == strava_id
-                        )
-                    )
-                    if existing.scalar_one_or_none() is not None:
-                        continue
-
-                    # 3. Genuinely new — insert it
-                    activity_date = _parse_strava_date(
-                        data.get("start_date") or data.get("start_date_local")
-                    )
-                    is_indoor = (
-                        bool(data.get("trainer", False))
-                        or str(data.get("sport_type") or data.get("type", "")).startswith("Virtual")
-                    )
-                    stmt = (
-                        pg_insert(Activity)
-                        .values(
-                            strava_activity_id=strava_id,
-                            user_id=user.id,
-                            activity_name=data.get("name") or "Unnamed Activity",
-                            activity_type=data.get("sport_type") or data.get("type") or "Unknown",
-                            activity_date=activity_date,
-                            distance_meters=float(data.get("distance") or 0),
-                            moving_time_seconds=int(data.get("moving_time") or 0),
-                            elapsed_time_seconds=int(data.get("elapsed_time") or 0),
-                            elevation_gain=float(data.get("total_elevation_gain") or 0),
-                            average_speed=float(data.get("average_speed") or 0),
-                            max_speed=float(data.get("max_speed") or 0),
-                            average_heartrate=_optional_float(data.get("average_heartrate")),
-                            max_heartrate=_optional_float(data.get("max_heartrate")),
-                            calories=_optional_float(data.get("calories")),
-                            is_indoor=is_indoor,
-                        )
-                        .on_conflict_do_nothing(index_elements=["strava_activity_id"])
-                    )
-                    await db.execute(stmt)
-                    await db.commit()
-
-                # Mark as processed so any in-flight webhook retry is ignored
-                await redis.set(dedup_key, "1", ex=_DEDUP_TTL_SECONDS, nx=True)
-
-                # Send notification
-                fire_and_forget(send_activity_notification(
-                    activity_data=data,
-                    user_id=user_id_str,
-                ))
-                new_activities += 1
-                logger.info(
-                    "catchup_sync: notifying missed activity strava_id=%s user_id=%s",
-                    strava_id, user_id_str,
+    # --- Layer 2: bounded full scan, only if a real outage gap is detected
+    if users and (prev_heartbeat is None or gap_seconds is not None and gap_seconds > _HEARTBEAT_GAP_THRESHOLD_SECONDS):
+        # No prior heartbeat (fresh deploy) → be conservative, cover 3h.
+        gap_lookback = gap_seconds if gap_seconds is not None else 10_800
+        after_ts = now_ts - min(gap_lookback + 300, 10_800)  # +5min pad, capped at 3h
+        logger.info(
+            "catchup_sync: outage gap detected (%ss) — scanning %s user(s) since %s",
+            gap_seconds, len(users), after_ts,
+        )
+        processed, new_activities, errors = 0, 0, 0
+        for user in users:
+            try:
+                _, new_count = await _sync_recent_activities_for_user(
+                    user, after_ts=after_ts, redis=redis, source="outage-gap",
                 )
+                processed += 1
+                new_activities += new_count
+            except Exception:
+                logger.exception("catchup_sync[outage-gap]: error for user_id=%s", user.id)
+                errors += 1
+        outage_scan = {"users_processed": processed, "new_activities": new_activities, "errors": errors}
 
-        except Exception:
-            logger.exception("catchup_sync: error processing user_id=%s", user.id)
-            errors += 1
+    # --- Layer 3: low-frequency daily rotation safety net ------------------
+    if users:
+        slot_now = (now_ts % _DAILY_SWEEP_WINDOW_SECONDS) // (
+            _DAILY_SWEEP_WINDOW_SECONDS // _DAILY_SWEEP_SLOTS
+        )
+        sweep_after_ts = now_ts - _DAILY_SWEEP_WINDOW_SECONDS
+        due_users = [
+            u for u in users
+            if (u.id.int % _DAILY_SWEEP_SLOTS) == slot_now
+        ]
+        if due_users:
+            processed, new_activities, errors = 0, 0, 0
+            for user in due_users:
+                if await is_rate_limited():
+                    logger.warning("catchup_sync[daily-sweep]: rate limit reached mid-sweep — stopping")
+                    break
+                try:
+                    _, new_count = await _sync_recent_activities_for_user(
+                        user, after_ts=sweep_after_ts, redis=redis, source="daily-sweep",
+                    )
+                    processed += 1
+                    new_activities += new_count
+                except Exception:
+                    logger.exception("catchup_sync[daily-sweep]: error for user_id=%s", user.id)
+                    errors += 1
+            daily_sweep = {"users_processed": processed, "new_activities": new_activities, "errors": errors}
 
     logger.info(
-        "catchup_sync complete — users=%s new_activities=%s errors=%s",
-        users_processed, new_activities, errors,
+        "catchup_sync complete — repaired=%s gap=%ss outage_scan=%s daily_sweep=%s",
+        repair_result["repaired"], gap_seconds, outage_scan, daily_sweep,
     )
-    return {"users_processed": users_processed, "new_activities": new_activities, "errors": errors}
+    return {
+        "repaired": repair_result["repaired"],
+        "outage_gap_seconds": gap_seconds,
+        "outage_scan": outage_scan,
+        "daily_sweep": daily_sweep,
+        "rate_limited": False,
+    }
 
 
 # ---------------------------------------------------------------------------

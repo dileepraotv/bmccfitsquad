@@ -72,6 +72,22 @@ def key_activity_edit(telegram_user_id: int) -> str:
     return f"activity:edit:{telegram_user_id}"
 
 
+def key_heartbeat() -> str:
+    """Last-seen timestamp updated by /ping and /cron/sync-all.
+
+    Used by catchup_sync_all_users() to detect an outage/cold-start gap
+    (process was unreachable for longer than the expected keep-alive
+    cadence) — the only remaining scenario where a bounded full-user Strava
+    scan is actually warranted, instead of scanning every user every tick.
+    """
+    return "ops:heartbeat:last_seen"
+
+
+def key_strava_rate_limit() -> str:
+    """Latest Strava X-RateLimit-Usage snapshot (15min_usage,daily_usage)."""
+    return "strava:rate_limit:usage"
+
+
 # Bump this whenever render_recap_card()'s visual output changes so stale
 # cached renders from before the change are transparently bypassed instead
 # of being served for up to the full 60-day cache TTL.

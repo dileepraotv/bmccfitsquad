@@ -5,8 +5,19 @@ Strava webhook protocol
 1. Subscription: POST /push_subscriptions → Strava GETs the callback URL with a
    hub.challenge; we echo it back to confirm ownership.
 2. Events: Strava POSTs JSON to the callback URL within seconds of each event.
-   We MUST respond with HTTP 200 within 2 seconds — all heavy work is
-   dispatched via asyncio.ensure_future so the HTTP response returns instantly.
+   We MUST respond with HTTP 200 within 2 seconds.
+
+Durable ack/process split
+--------------------------
+Rather than doing the real work (token refresh, Strava fetch, DB write,
+Telegram notify) inline before acking — where a Render cold start or a
+mid-flight exception can silently lose the event forever — every event is
+first persisted as a WebhookEvent row (a fast single INSERT) and only then
+acked. The actual processing is dispatched via fire_and_forget afterwards.
+If processing fails or the process dies mid-flight, the row is simply left
+with processed_at=NULL and the next cron tick's repair pass
+(process_pending_webhook_events() in tasks.py) retries it — no per-user
+blind Strava polling required to recover a missed event.
 
 OAuth callback
 --------------
@@ -15,7 +26,9 @@ After a user approves on the Strava website they are redirected here with
 """
 from __future__ import annotations
 
+import json
 import logging
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
@@ -23,7 +36,7 @@ from sqlalchemy import select
 
 from app.config import get_settings
 from app.database import AsyncSessionLocal, get_db
-from app.models import Activity, User
+from app.models import Activity, User, WebhookEvent
 from app.redis_client import get_redis, key_activity_seen
 from app.strava.auth import (
     exchange_code_for_tokens,
@@ -112,10 +125,14 @@ async def strava_webhook_status():
     summary="Receive Strava activity events",
 )
 async def strava_webhook_event(request: Request):
-    """Receive a Strava event and ack within Strava's 2-second window.
+    """Durably persist a Strava event, ack, then process in the background.
 
-    All processing is dispatched immediately via asyncio.ensure_future so
-    the HTTP 200 is returned before any DB or Strava API work begins.
+    1. INSERT a WebhookEvent row (processed_at=NULL) — a single fast write,
+       comfortably inside Strava's 2-second ack window.
+    2. Return HTTP 200 immediately.
+    3. fire_and_forget the real processing — if it fails or the process is
+       killed mid-flight, the row stays unprocessed and is retried by the
+       next cron tick's repair pass instead of being lost forever.
 
     Supported event types:
     - ``activity / create``  → fetch detail, store, send Telegram notification
@@ -133,19 +150,88 @@ async def strava_webhook_event(request: Request):
     owner_id: int = int(payload.get("owner_id", 0))
     updates: dict = payload.get("updates", {})
 
-    # Dispatch all work as fire-and-forget — never block the 200 response
-    if object_type == "activity":
-        if aspect_type == "create":
-            fire_and_forget(_handle_activity_created(owner_id=owner_id, activity_id=object_id))
-        elif aspect_type == "update":
-            fire_and_forget(_handle_activity_updated(activity_id=object_id, updates=updates))
-        elif aspect_type == "delete":
-            fire_and_forget(_handle_activity_deleted(activity_id=object_id))
-    elif object_type == "athlete" and aspect_type == "update":
-        fire_and_forget(_handle_athlete_updated(athlete_id=owner_id, updates=updates))
+    if object_type == "activity" and aspect_type not in ("create", "update", "delete"):
+        return {"status": "ok"}
+    if object_type == "athlete" and not (aspect_type == "update" and "authorized" in updates):
+        return {"status": "ok"}
+    if object_type not in ("activity", "athlete"):
+        return {"status": "ok"}
+
+    event_id: str | None = None
+    async with AsyncSessionLocal() as db:
+        event = WebhookEvent(
+            object_type=object_type,
+            aspect_type=aspect_type,
+            object_id=object_id,
+            owner_id=owner_id,
+            updates_json=json.dumps(updates) if updates else None,
+        )
+        db.add(event)
+        await db.commit()
+        event_id = str(event.id)
+
+    # Heartbeat: proves the app was reachable and processing right now —
+    # used by catchup_sync_all_users() to distinguish "quiet night, nothing
+    # to sync" from "app was actually down". Non-blocking, best-effort.
+    fire_and_forget(touch_heartbeat())
+
+    fire_and_forget(process_webhook_event(event_id))
 
     # Always return 200 immediately — Strava will retry on any other status
     return {"status": "ok"}
+
+
+async def touch_heartbeat() -> None:
+    try:
+        import time
+        from app.redis_client import get_redis, key_heartbeat
+        redis = await get_redis()
+        await redis.set(key_heartbeat(), str(int(time.time())))
+    except Exception:
+        logger.debug("Could not update heartbeat", exc_info=True)
+
+
+async def process_webhook_event(event_id: str) -> None:
+    """Process one durably-queued WebhookEvent row and mark it done.
+
+    Called immediately (fire_and_forget) after a fresh webhook POST, and
+    again from tasks.process_pending_webhook_events() for any row that was
+    left unprocessed by a crash/restart/transient error. Safe to call twice
+    for the same row — the downstream handlers are already idempotent
+    (Redis SETNX dedup, ON CONFLICT DO NOTHING upserts).
+    """
+    async with AsyncSessionLocal() as db:
+        event = await db.get(WebhookEvent, uuid.UUID(event_id))
+        if event is None:
+            return
+        if event.processed_at is not None:
+            return  # already handled (e.g. a duplicate repair pass)
+
+        updates: dict = json.loads(event.updates_json) if event.updates_json else {}
+
+        try:
+            if event.object_type == "activity":
+                if event.aspect_type == "create":
+                    await _handle_activity_created(owner_id=event.owner_id, activity_id=event.object_id)
+                elif event.aspect_type == "update":
+                    await _handle_activity_updated(activity_id=event.object_id, updates=updates)
+                elif event.aspect_type == "delete":
+                    await _handle_activity_deleted(activity_id=event.object_id)
+            elif event.object_type == "athlete" and event.aspect_type == "update":
+                await _handle_athlete_updated(athlete_id=event.owner_id, updates=updates)
+
+            event.processed_at = _utc_now()
+            event.last_error = None
+        except Exception as exc:
+            event.attempts += 1
+            event.last_error = str(exc)[:500]
+            logger.exception(
+                "process_webhook_event failed id=%s type=%s/%s attempts=%s",
+                event_id, event.object_type, event.aspect_type, event.attempts,
+            )
+            # Leave processed_at NULL — repair pass will retry later.
+        finally:
+            await db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -561,6 +647,10 @@ def _parse_strava_date(date_str: str | None) -> datetime:
     if not date_str:
         return datetime.now(_tz.utc)
     return datetime.fromisoformat(date_str.rstrip("Z")).replace(tzinfo=_tz.utc)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(_tz.utc)
 
 
 def _optional_float(value) -> float | None:
