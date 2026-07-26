@@ -164,6 +164,25 @@ def next_month_name(year: int, month: int) -> str:
 # Caption text
 # ---------------------------------------------------------------------------
 
+# Natural-language phrase for the caption's "led by X <unit> ___" clause.
+# The bare f"on the {sport.lower()}" fallback used for the 4 core sports
+# reads fine ("on the ride"), but produces "on the racketsports" /
+# "on the strengthtraining" for the umbrella "Other Activities" sports —
+# these need an explicit, readable phrase instead.
+_CAPTION_SPORT_PHRASE: dict[str, str] = {
+    "Yoga": "on the mat",
+    "RacketSports": "on the court",
+    "StrengthTraining": "in the gym",
+    "Hiking": "on the hike",
+}
+
+
+def _caption_sport_phrase(sport: str) -> str:
+    if sport in _CAPTION_SPORT_PHRASE:
+        return _CAPTION_SPORT_PHRASE[sport]
+    return f"on the {sport.lower()}"
+
+
 def build_recap_caption(data: dict, first_name: str) -> str:
     """Build the DM text sent alongside the recap card, ending with the
     goal-setting prompt for the upcoming month."""
@@ -179,7 +198,7 @@ def build_recap_caption(data: dict, first_name: str) -> str:
         lead = ""
         if top:
             top_stat = next(s for s in data["sports"] if s["key"] == top)
-            lead = f", led by {top_stat['value_text']} {top_stat['unit']} on the {top.lower()}"
+            lead = f", led by {top_stat['value_text']} {top_stat['unit']} {_caption_sport_phrase(top)}"
         plural = "activity" if total == 1 else "activities"
         body = f"{total} {plural} this month{lead}."
 
@@ -208,7 +227,7 @@ def build_yearly_recap_caption(data: dict, first_name: str) -> str:
         lead = ""
         if top:
             top_stat = next(s for s in data["sports"] if s["key"] == top)
-            lead = f", led by {top_stat['value_text']} {top_stat['unit']} on the {top.lower()}"
+            lead = f", led by {top_stat['value_text']} {top_stat['unit']} {_caption_sport_phrase(top)}"
         plural = "activity" if total == 1 else "activities"
         body = f"{total} {plural} this year{lead}."
 
@@ -308,9 +327,13 @@ def _sport_metric_column(sport: str):
 
 async def _sport_month_stats(
     db: AsyncSession, user_id, sport: str, start: datetime, end: datetime,
-) -> tuple[float, int, float]:
-    """Return (total_metric, activity_count, max_single_activity_metric) —
-    metric is metres for distance sports, seconds for duration sports."""
+) -> tuple[float, int, float, float]:
+    """Return (total_metric, activity_count, max_single_activity_metric,
+    total_moving_time_s) — metric is metres for distance sports, seconds for
+    duration sports. total_moving_time_s is *always* seconds regardless of
+    sport, so callers can compare "how much this sport dominated the period"
+    across sports that use different display units (e.g. Ride's km vs
+    Yoga's hours) — see _build_sport_row's effort_seconds."""
     types = _SPORT_ACTIVITY_TYPES[sport]
     metric_col = _sport_metric_column(sport)
     result = await db.execute(
@@ -318,6 +341,7 @@ async def _sport_month_stats(
             func.coalesce(func.sum(metric_col), 0.0),
             func.count(Activity.id),
             func.coalesce(func.max(metric_col), 0.0),
+            func.coalesce(func.sum(Activity.moving_time_seconds), 0.0),
         ).where(
             Activity.user_id == user_id,
             Activity.activity_type.in_(types),
@@ -325,8 +349,8 @@ async def _sport_month_stats(
             Activity.activity_date < end,
         )
     )
-    total, count, mx = result.one()
-    return float(total or 0.0), int(count or 0), float(mx or 0.0)
+    total, count, mx, total_time_s = result.one()
+    return float(total or 0.0), int(count or 0), float(mx or 0.0), float(total_time_s or 0.0)
 
 
 async def _sport_best_before(db: AsyncSession, user_id, sport: str, before: datetime) -> float:
@@ -429,13 +453,17 @@ def _format_pr_value(mx: float, unit: str) -> str:
 async def _build_sport_row(
     db: AsyncSession, user: User, sport: str, start: datetime, end: datetime,
     prev_start: datetime, prev_end: datetime,
-) -> tuple[dict, float, str | None]:
-    """Return (row_dict, total_metric, pr_highlight_or_None) for one sport
-    over one period. Shared by the monthly and yearly recap aggregators."""
+) -> tuple[dict, float, str | None, float]:
+    """Return (row_dict, total_metric, pr_highlight_or_None, effort_seconds)
+    for one sport over one period. Shared by the monthly and yearly recap
+    aggregators. effort_seconds is total moving time regardless of sport —
+    used by callers to pick the period's "top sport" fairly across sports
+    that display different units (km vs hrs), instead of only ever being
+    able to compare within the 4 core distance sports."""
     style = _SPORT_STYLE[sport]
     unit = style["unit"]
-    total, count, mx = await _sport_month_stats(db, user.id, sport, start, end)
-    prev_total, _prev_count, _prev_max = await _sport_month_stats(db, user.id, sport, prev_start, prev_end)
+    total, count, mx, effort_seconds = await _sport_month_stats(db, user.id, sport, start, end)
+    prev_total, _prev_count, _prev_max, _prev_effort = await _sport_month_stats(db, user.id, sport, prev_start, prev_end)
     trend_label, trend_color = _trend(total, prev_total)
 
     row = {
@@ -456,7 +484,7 @@ async def _build_sport_row(
             noun = "session" if sport in _DURATION_BASED_SPORTS else sport
             highlight = f"New PR: Longest {noun} — {_format_pr_value(mx, unit)}"
 
-    return row, total, highlight
+    return row, total, highlight, effort_seconds
 
 
 async def compute_monthly_recap(db: AsyncSession, user: User, year: int, month: int) -> dict:
@@ -471,24 +499,27 @@ async def compute_monthly_recap(db: AsyncSession, user: User, year: int, month: 
     highlights: list[str] = []
     total_activities = 0
     top_sport_label = None
-    top_sport_distance = 0.0
+    top_sport_effort = 0.0
 
     for sport in _RECAP_SPORTS:
-        row, total, highlight = await _build_sport_row(db, user, sport, start, end, prev_start, prev_end)
+        row, _total, highlight, effort = await _build_sport_row(db, user, sport, start, end, prev_start, prev_end)
         sports.append(row)
         total_activities += row["count"]
-        if total > top_sport_distance:
-            top_sport_distance = total
+        if effort > top_sport_effort:
+            top_sport_effort = effort
             top_sport_label = sport
         if highlight:
             highlights.append(highlight)
 
     for sport in _RECAP_OTHER_SPORTS:
-        row, _total, highlight = await _build_sport_row(db, user, sport, start, end, prev_start, prev_end)
+        row, _total, highlight, effort = await _build_sport_row(db, user, sport, start, end, prev_start, prev_end)
         if row["count"] <= 0:
             continue
         sports.append(row)
         total_activities += row["count"]
+        if effort > top_sport_effort:
+            top_sport_effort = effort
+            top_sport_label = sport
         if highlight:
             highlights.append(highlight)
 
@@ -533,24 +564,27 @@ async def compute_yearly_recap(db: AsyncSession, user: User, year: int) -> dict:
     highlights: list[str] = []
     total_activities = 0
     top_sport_label = None
-    top_sport_distance = 0.0
+    top_sport_effort = 0.0
 
     for sport in _RECAP_SPORTS:
-        row, total, highlight = await _build_sport_row(db, user, sport, start, end, prev_start, prev_end)
+        row, _total, highlight, effort = await _build_sport_row(db, user, sport, start, end, prev_start, prev_end)
         sports.append(row)
         total_activities += row["count"]
-        if total > top_sport_distance:
-            top_sport_distance = total
+        if effort > top_sport_effort:
+            top_sport_effort = effort
             top_sport_label = sport
         if highlight:
             highlights.append(highlight)
 
     for sport in _RECAP_OTHER_SPORTS:
-        row, _total, highlight = await _build_sport_row(db, user, sport, start, end, prev_start, prev_end)
+        row, _total, highlight, effort = await _build_sport_row(db, user, sport, start, end, prev_start, prev_end)
         if row["count"] <= 0:
             continue
         sports.append(row)
         total_activities += row["count"]
+        if effort > top_sport_effort:
+            top_sport_effort = effort
+            top_sport_label = sport
         if highlight:
             highlights.append(highlight)
 

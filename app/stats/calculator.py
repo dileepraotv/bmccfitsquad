@@ -39,6 +39,7 @@ from __future__ import annotations
 import pathlib
 import random
 import uuid
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
@@ -355,12 +356,44 @@ def _compute_hiking_stats(activities: list[Activity]) -> dict:
     }
 
 
+# Umbrella sports like RacketSports/StrengthTraining merge several distinct
+# raw Strava types (Tennis+Badminton+…) into one total everywhere — stats,
+# goals, leaderboard, recap — so on their own "3 hours this month" doesn't
+# say whether that was all one sport or a mix. This label map only affects
+# the breakdown line below; friendlier than a raw CamelCase split for the
+# couple of raw types that would otherwise read awkwardly.
+_DURATION_TYPE_LABELS: dict[str, str] = {
+    "TableTennis": "Table Tennis",
+    "WeightTraining": "Weight Training",
+    "HighIntensityIntervalTraining": "HIIT",
+}
+
+
+def _duration_type_label(raw_type: str) -> str:
+    if raw_type in _DURATION_TYPE_LABELS:
+        return _DURATION_TYPE_LABELS[raw_type]
+    out = []
+    for i, ch in enumerate(raw_type):
+        if ch.isupper() and i > 0:
+            out.append(" ")
+        out.append(ch)
+    return "".join(out)
+
+
 def _compute_duration_stats(activities: list[Activity]) -> dict:
     """Shared calculator for the "Other Activities" sports (Yoga, Racket
     Sports, Strength Training) — these have no meaningful GPS distance, so
     time practiced is the primary metric instead of kilometres."""
     durations_min = [a.moving_time_seconds / 60 for a in activities]
     total_calories = sum(a.calories or 0 for a in activities)
+
+    # Sub-type breakdown — only meaningful when an umbrella (e.g.
+    # RacketSports) actually mixes >1 raw Strava type this period; a
+    # single-type umbrella (Yoga, or a month where only Tennis was played)
+    # would just repeat the "Sessions" count, so the formatter skips it then.
+    type_counts = Counter(a.activity_type for a in activities)
+    breakdown = sorted(type_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+
     return {
         "sessions":        len(activities),
         "total_time":      _fmt_duration(sum(a.moving_time_seconds for a in activities)),
@@ -369,6 +402,7 @@ def _compute_duration_stats(activities: list[Activity]) -> dict:
         "calories":        round(total_calories),
         "thirty_plus":     sum(1 for d in durations_min if 30.0 <= d < 60.0),
         "sixty_plus":      sum(1 for d in durations_min if d >= 60.0),
+        "breakdown":       breakdown,
     }
 
 
@@ -477,6 +511,12 @@ def _format_duration_stats(s: dict, session_label: str) -> list[str]:
         f"30+ min Sessions: {s['thirty_plus']}",
         f"60+ min Sessions: {s['sixty_plus']}",
     ]
+    breakdown = s.get("breakdown") or []
+    if len(breakdown) > 1:
+        breakdown_str = " · ".join(
+            f"{_duration_type_label(raw_type)} {count}" for raw_type, count in breakdown
+        )
+        lines.append(f"Breakdown: {breakdown_str}")
     return lines
 
 
