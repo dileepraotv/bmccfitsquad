@@ -48,6 +48,7 @@ from app.utils import (
     DURATION_BASED_SPORTS,
     SPORT_ACTIVITY_TYPES,
     format_friendly_date,
+    format_kv_lines,
     meters_to_km,
     ms_to_kmh,
     seconds_to_hhmmss,
@@ -158,15 +159,9 @@ def _friendly_sport_word(activity_type: str) -> str:
     return _camel_to_words(activity_type).lower()
 
 
-def _format_kv_block(pairs: list[tuple[str, str]]) -> str:
-    """Render label/value pairs as fixed-width monospace lines so keys and
-    values line up in a straight column. Each line is its own inline `code`
-    span (not a fenced ``` block) — a fenced block renders as a separate,
-    narrower boxed element with a "Copy" button in Telegram clients; inline
-    code keeps the monospace alignment while flowing as normal message text
-    at full bubble width."""
-    width = max(len(label) for label, _ in pairs)
-    return "\n".join(f"`{label.ljust(width)} : {value}`" for label, value in pairs)
+# format_kv_lines (aligned monospace label/value lines) now lives in
+# app.utils so notifications, /stats, and goal-progress lines all share the
+# exact same rendering — see the import above.
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +171,7 @@ def _format_kv_block(pairs: list[tuple[str, str]]) -> str:
 async def format_activity_notification(
     activity: dict,
     athlete_name: str,
-    goal_lines: list[str] | None = None,
+    goal_lines: list[tuple[str, str]] | None = None,
 ) -> str:
     """Format a raw Strava activity dict into a BMCC Telegram notification."""
     activity_type: str = activity.get("sport_type") or activity.get("type") or "Unknown"
@@ -191,16 +186,19 @@ async def format_activity_notification(
         activity_link = activity_name
 
     # ------------------------------------------------------------------
-    # Header
+    # Header — Athlete/Date are aligned as monospace `code` lines like the
+    # metrics block below. Activity is kept as a plain (non-code) line so
+    # its Strava link stays tappable — wrapping a markdown link in a `code`
+    # span would print the raw "[text](url)" instead of rendering it.
     # ------------------------------------------------------------------
     greeting   = _random_greeting()
     sport_word = _friendly_sport_word(activity_type)
     lines: list[str] = [
         f"{emoji} *{greeting}, {first_name} — new {sport_word} activity logged!*",
         _SEPARATOR,
-        f"Athlete: {athlete_name}",
+        f"`Athlete : {athlete_name}`",
         f"Activity: {activity_link}",
-        f"Date: {format_friendly_date(activity.get('start_date'))}",
+        f"`Date    : {format_friendly_date(activity.get('start_date'))}`",
     ]
 
     # ------------------------------------------------------------------
@@ -221,7 +219,7 @@ async def format_activity_notification(
         ]
         if avg_hr is not None:
             pairs.append(("Avg HR", f"{int(avg_hr)} bpm"))
-        lines += ["", _format_kv_block(pairs)]
+        lines += ["", format_kv_lines(pairs)]
     elif activity_type in _DURATION_TYPES:
         moving_secs = int(activity.get("moving_time") or 0)
         calories    = activity.get("calories")
@@ -232,7 +230,7 @@ async def format_activity_notification(
             pairs.append(("Calories", f"{int(calories)} kcal"))
         if avg_hr is not None:
             pairs.append(("Avg HR", f"{int(avg_hr)} bpm"))
-        lines += ["", _format_kv_block(pairs)]
+        lines += ["", format_kv_lines(pairs)]
     else:
         distance_km   = meters_to_km(activity.get("distance"))
         avg_speed_kmh = ms_to_kmh(activity.get("average_speed"))
@@ -243,14 +241,16 @@ async def format_activity_notification(
             ("Avg Speed", f"{avg_speed_kmh:.2f} km/h"),
             ("Elevation Gain", f"{int(elevation_m)} m"),
         ]
-        lines += ["", _format_kv_block(pairs)]
+        lines += ["", format_kv_lines(pairs)]
 
     # ------------------------------------------------------------------
-    # Goal progress section
+    # Goal progress section — each goal renders as "<emoji sport category>
+    # : <achieved>/<target>", column-aligned the same way as the metrics
+    # block above.
     # ------------------------------------------------------------------
     lines += [_SEPARATOR, "🎯 *Goal Progress*", ""]
     if goal_lines:
-        lines += goal_lines
+        lines.append(format_kv_lines(goal_lines))
     else:
         lines.append("No active goals. Use /goals to set one.")
 

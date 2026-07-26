@@ -231,3 +231,24 @@ def safe_round(value: float | int | None, decimals: int = 2) -> float:
     if value is None:
         return 0.0
     return round(float(value), decimals)
+
+
+# ---------------------------------------------------------------------------
+# Telegram text formatting
+# ---------------------------------------------------------------------------
+
+def format_kv_lines(pairs: list[tuple[str, str]]) -> str:
+    """Render label/value pairs as fixed-width monospace lines that line up
+    in a straight column, for use inside a Telegram message.
+
+    Each line is wrapped as its own inline `code` span rather than a single
+    fenced ``` block — a fenced block renders as a separate, narrower boxed
+    element with a "Copy" button in Telegram clients, whereas inline code
+    keeps the monospace alignment while flowing as normal message text at
+    full bubble width. Shared by activity notifications (metrics + goal
+    progress lines) and /stats output so all three read consistently.
+    """
+    if not pairs:
+        return ""
+    width = max(len(label) for label, _ in pairs)
+    return "\n".join(f"`{label.ljust(width)} : {value}`" for label, value in pairs)

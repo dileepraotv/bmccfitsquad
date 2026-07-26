@@ -428,8 +428,10 @@ def _sport_display_label(activity_type: str) -> str:
     return _SPORT_TYPE_MAP_REVERSE.get(activity_type, activity_type)
 
 
-async def _build_goal_lines(db, user: User) -> list[str]:
-    """Return compact goal-status lines for the notification footer."""
+async def _build_goal_lines(db, user: User) -> list[tuple[str, str]]:
+    """Return (label, value) pairs for the notification's goal-progress
+    footer — e.g. ("🧘 Yoga 30 min", "3/8") — so they render as an aligned
+    monospace column via format_kv_lines, same as the metrics block."""
     goals_res = await db.execute(
         select(Goal).where(Goal.user_id == user.id, Goal.is_active == True)  # noqa: E712
     )
@@ -437,7 +439,7 @@ async def _build_goal_lines(db, user: User) -> list[str]:
     if not goals:
         return []
 
-    lines: list[str] = []
+    lines: list[tuple[str, str]] = []
     for i, g in enumerate(goals, start=1):
         start_dt = datetime(
             g.start_date.year, g.start_date.month, g.start_date.day, tzinfo=timezone.utc
@@ -476,7 +478,7 @@ async def _build_goal_lines(db, user: User) -> list[str]:
             "RacketSports": "🏸", "StrengthTraining": "🏋️",
         }.get(g.activity_type, "🏅")
         lines.append(
-            f"{sport_emoji} {sport_label} {g.category} - {achieved}/{g.target_count}"
+            (f"{sport_emoji} {sport_label} {g.category}", f"{achieved}/{g.target_count}")
         )
 
     return lines

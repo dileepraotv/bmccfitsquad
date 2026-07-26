@@ -47,7 +47,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Activity
 from app.utils import SPORT_ACTIVITY_TYPES as _SPORT_ACTIVITY_TYPES
-from app.utils import meters_to_km, safe_round, seconds_to_hhmmss
+from app.utils import format_kv_lines, meters_to_km, safe_round, seconds_to_hhmmss
 
 _QUOTES_PATH = pathlib.Path("data/quotes.txt")
 
@@ -148,15 +148,11 @@ async def calculate_stats(
 
 
 def _format_kv_block(lines: list[str]) -> str:
-    """Render "Label: value" lines as fixed-width monospace text so labels
-    and values line up in a straight column. Each line is its own inline
-    `code` span (not a fenced ``` block) — a fenced block renders as a
-    separate, narrower boxed element with a "Copy" button in Telegram
-    clients; inline code keeps the monospace alignment while flowing as
-    normal message text at full bubble width."""
+    """Split "Label: value" strings into pairs and render them via the
+    shared format_kv_lines helper (aligned monospace column, same styling
+    used by activity notifications)."""
     pairs = [tuple(line.split(": ", 1)) if ": " in line else (line, "") for line in lines]
-    width = max((len(label) for label, _ in pairs), default=0)
-    return "\n".join(f"`{label.ljust(width)} : {value}`" for label, value in pairs)
+    return format_kv_lines(pairs)
 
 
 def format_stats_message(
