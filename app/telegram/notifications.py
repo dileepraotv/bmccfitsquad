@@ -30,7 +30,7 @@ Template anatomy
   ─────────────────
   "{random quote}"
 
-  Beyond Miles - Beyond Limits
+  *Beyond Miles - Beyond Limits*
 """
 from __future__ import annotations
 
@@ -217,7 +217,7 @@ async def format_activity_notification(
         _SEPARATOR,
         f'*"{_random_quote()}"*',
         "",
-        "Beyond Miles - Beyond Limits",
+        "*Beyond Miles - Beyond Limits*",
     ]
 
     return "\n".join(lines)
