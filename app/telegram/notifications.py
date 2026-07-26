@@ -13,15 +13,17 @@ Public API
 
 Template anatomy
 ----------------
-  {emoji} {greeting}, {first_name} — new activity logged!
+  {emoji} {greeting}, {first_name} — new {sport} activity logged!
   ─────────────────
   Athlete: …
   Activity: …
   Date: Sat, 18 Jul 2026
 
-  Distance: … km            (Swim: … m)
-  Avg Speed: … km/h         (Swim: Pace … /100m, Moving Time HH:MM:SS)
-  Elevation Gain: … m       (Swim: Avg HR … bpm, omitted if no HR data)
+  ```
+  Distance : … km        (Swim: Distance/Pace/Moving Time/Avg HR;
+  Avg Speed: … km/h       duration sports: Duration/Calories/Avg HR)
+  Elevation: … m
+  ```
 
   ─────────────────
   🎯 Goal Progress
@@ -124,6 +126,47 @@ def _format_pace_per_100m(avg_speed_ms: float | int | None) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
+# Friendly one/two-word names for the greeting line ("new <word> activity
+# logged!") — overrides for raw Strava types that would otherwise read
+# awkwardly if just space-split from CamelCase (e.g. "high intensity
+# interval training"). Anything not listed here falls back to a generic
+# CamelCase → lowercase words split.
+_SPORT_WORD_OVERRIDES: dict[str, str] = {
+    "VirtualRide": "ride", "EBikeRide": "ride", "GravelRide": "ride",
+    "MountainBikeRide": "ride", "EMountainBikeRide": "ride",
+    "Handcycle": "ride", "Velomobile": "ride",
+    "VirtualRun": "run", "TrailRun": "run",
+    "OpenWaterSwim": "swim",
+    "HighIntensityIntervalTraining": "HIIT",
+}
+
+
+def _camel_to_words(text: str) -> str:
+    out = []
+    for i, ch in enumerate(text):
+        if ch.isupper() and i > 0:
+            out.append(" ")
+        out.append(ch)
+    return "".join(out)
+
+
+def _friendly_sport_word(activity_type: str) -> str:
+    """"Ride" -> "ride", "TableTennis" -> "table tennis", etc. — used in the
+    greeting line so the notification reads "new <sport> activity logged!"."""
+    if activity_type in _SPORT_WORD_OVERRIDES:
+        return _SPORT_WORD_OVERRIDES[activity_type]
+    return _camel_to_words(activity_type).lower()
+
+
+def _format_kv_block(pairs: list[tuple[str, str]]) -> str:
+    """Render label/value pairs as a fixed-width, monospace ``code`` block so
+    the keys and values line up in a straight column (Telegram only offers
+    true monospace via code formatting — there's no separate "font" setting)."""
+    width = max(len(label) for label, _ in pairs)
+    body = "\n".join(f"{label.ljust(width)} : {value}" for label, value in pairs)
+    return f"```\n{body}\n```"
+
+
 # ---------------------------------------------------------------------------
 # Primary public formatter
 # ---------------------------------------------------------------------------
@@ -148,9 +191,10 @@ async def format_activity_notification(
     # ------------------------------------------------------------------
     # Header
     # ------------------------------------------------------------------
-    greeting = _random_greeting()
+    greeting   = _random_greeting()
+    sport_word = _friendly_sport_word(activity_type)
     lines: list[str] = [
-        f"{emoji} *{greeting}, {first_name} — new activity logged!*",
+        f"{emoji} *{greeting}, {first_name} — new {sport_word} activity logged!*",
         _SEPARATOR,
         f"Athlete: {athlete_name}",
         f"Activity: {activity_link}",
@@ -168,38 +212,36 @@ async def format_activity_notification(
         moving_secs = int(activity.get("moving_time") or 0)
         avg_hr      = activity.get("average_heartrate")
 
-        lines += [
-            "",
-            f"Distance: {distance_m} m",
-            f"Pace: {pace} /100m",
-            f"Moving Time: {seconds_to_hhmmss(moving_secs)}",
+        pairs = [
+            ("Distance", f"{distance_m} m"),
+            ("Pace", f"{pace} /100m"),
+            ("Moving Time", seconds_to_hhmmss(moving_secs)),
         ]
         if avg_hr is not None:
-            lines.append(f"Avg HR: {int(avg_hr)} bpm")
+            pairs.append(("Avg HR", f"{int(avg_hr)} bpm"))
+        lines += ["", _format_kv_block(pairs)]
     elif activity_type in _DURATION_TYPES:
         moving_secs = int(activity.get("moving_time") or 0)
         calories    = activity.get("calories")
         avg_hr      = activity.get("average_heartrate")
 
-        lines += [
-            "",
-            f"Duration: {seconds_to_hhmmss(moving_secs)}",
-        ]
+        pairs = [("Duration", seconds_to_hhmmss(moving_secs))]
         if calories:
-            lines.append(f"Calories: {int(calories)} kcal")
+            pairs.append(("Calories", f"{int(calories)} kcal"))
         if avg_hr is not None:
-            lines.append(f"Avg HR: {int(avg_hr)} bpm")
+            pairs.append(("Avg HR", f"{int(avg_hr)} bpm"))
+        lines += ["", _format_kv_block(pairs)]
     else:
         distance_km   = meters_to_km(activity.get("distance"))
         avg_speed_kmh = ms_to_kmh(activity.get("average_speed"))
         elevation_m   = activity.get("total_elevation_gain") or 0
 
-        lines += [
-            "",
-            f"Distance: {distance_km:.2f} km",
-            f"Avg Speed: {avg_speed_kmh:.2f} km/h",
-            f"Elevation Gain: {int(elevation_m)} m",
+        pairs = [
+            ("Distance", f"{distance_km:.2f} km"),
+            ("Avg Speed", f"{avg_speed_kmh:.2f} km/h"),
+            ("Elevation Gain", f"{int(elevation_m)} m"),
         ]
+        lines += ["", _format_kv_block(pairs)]
 
     # ------------------------------------------------------------------
     # Goal progress section
