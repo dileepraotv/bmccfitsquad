@@ -36,20 +36,17 @@ from app.utils import SPORT_ACTIVITY_TYPES as _SPORT_ACTIVITY_TYPES
 
 logger = logging.getLogger(__name__)
 
-# Short-lived cache — just long enough to absorb repeat /recap or /yearrecap
-# taps (or the scheduled send immediately followed by a manual check) without
-# re-rendering, without letting base64 PNG images sit in Redis for long.
-# Recap images are the single biggest consumer of Redis storage (a few
-# hundred KB each); a 1-day TTL keeps memory bounded as the user base grows,
-# at the cost of a cheap re-render (DB aggregation + Pillow draw, no Strava
-# API calls) if the same month/year is revisited more than a day later.
-_RECAP_CACHE_TTL_SECONDS = 86_400
-
-# A preview of the *current, still in-progress* year (via /yearrecap before
-# 31 Dec) must expire quickly — long enough to avoid re-rendering on rapid
-# repeat taps, but nowhere near long enough to still be sitting in the
-# cache by the time the real, final send happens at year end.
-_YEARLY_PREVIEW_CACHE_TTL_SECONDS = 5 * 60
+# Deliberately short — this exists purely to absorb an accidental double-tap
+# of /recap or /yearrecap (or the scheduled send immediately followed by a
+# manual check within the same minute), not to avoid the underlying cost.
+# Rendering is cheap (Pillow draw ~100ms) and the DB aggregation only hits
+# our own indexed Postgres tables (no Strava API calls, no external quota
+# at risk), so there's no real cost benefit to caching longer — and a long
+# TTL only creates a class of "why hasn't this updated" bugs (icons, watermark,
+# rest_days fixes all needed a manual cache-version bump to take effect
+# immediately). A 1-minute TTL keeps that risk window negligible for both
+# a completed month/year and an in-progress /yearrecap preview alike.
+_RECAP_CACHE_TTL_SECONDS = 60
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -283,13 +280,11 @@ async def get_or_build_yearly_recap(db: AsyncSession, user: User, year: int) -> 
     """Return (image_png_bytes, caption_text) for this user + year, using
     the Redis cache when available and populating it otherwise.
 
-    Unlike a calendar month, a year isn't "done changing" until it actually
-    ends — /yearrecap lets someone preview the current, still-in-progress
-    year, so that preview must not be cached with the same long TTL used
-    for a genuinely completed year. Otherwise an earlier manual preview
-    (e.g. in November) could still be sitting in the cache on 31 December
-    and get served — with stale, incomplete data — to the real scheduled
-    send that evening."""
+    With only a 1-minute TTL (see _RECAP_CACHE_TTL_SECONDS), an in-progress
+    /yearrecap preview and a genuinely completed year can safely share the
+    same short-lived cache — there's no realistic way a preview taken
+    months earlier is still sitting in the cache by the time the real
+    scheduled send happens on 31 December."""
     from app.redis_client import get_redis, key_yearly_recap_caption, key_yearly_recap_image
 
     redis = await get_redis()
@@ -306,12 +301,9 @@ async def get_or_build_yearly_recap(db: AsyncSession, user: User, year: int) -> 
     image_bytes = render_recap_card(data, bg_color=_BG_NAVY)
     caption = build_yearly_recap_caption(data, user.telegram_first_name or "there")
 
-    year_is_over = datetime.now(timezone.utc) >= datetime(year + 1, 1, 1, tzinfo=timezone.utc)
-    ttl = _RECAP_CACHE_TTL_SECONDS if year_is_over else _YEARLY_PREVIEW_CACHE_TTL_SECONDS
-
     try:
-        await redis.set(img_key, base64.b64encode(image_bytes).decode("ascii"), ex=ttl)
-        await redis.set(cap_key, caption, ex=ttl)
+        await redis.set(img_key, base64.b64encode(image_bytes).decode("ascii"), ex=_RECAP_CACHE_TTL_SECONDS)
+        await redis.set(cap_key, caption, ex=_RECAP_CACHE_TTL_SECONDS)
     except Exception:
         logger.warning("recap cache: failed to write cache for %s", img_key)
 
