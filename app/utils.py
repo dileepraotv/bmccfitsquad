@@ -237,6 +237,11 @@ def safe_round(value: float | int | None, decimals: int = 2) -> float:
 # Telegram text formatting
 # ---------------------------------------------------------------------------
 
+# Shared visual section divider — used by activity notifications, /stats,
+# and the leaderboard so all message types break up sections consistently.
+SEPARATOR = "─────────────────"
+
+
 def format_kv_lines(pairs: list[tuple[str, str]]) -> str:
     """Render label/value pairs as fixed-width monospace lines that line up
     in a straight column, for use inside a Telegram message.

@@ -53,6 +53,7 @@ from app.utils import (
     ms_to_kmh,
     seconds_to_hhmmss,
 )
+from app.utils import SEPARATOR as _SEPARATOR
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +63,6 @@ logger = logging.getLogger(__name__)
 _DATA_DIR = pathlib.Path("data")
 _CLUB_MESSAGE_PATH = _DATA_DIR / "club_message.txt"
 _QUOTES_PATH = _DATA_DIR / "quotes.txt"
-
-_SEPARATOR = "─────────────────"
 
 # ---------------------------------------------------------------------------
 # Sport emoji map

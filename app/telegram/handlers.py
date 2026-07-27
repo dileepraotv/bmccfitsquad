@@ -56,6 +56,8 @@ from app.telegram.keyboards import (
 from app.utils import DURATION_BASED_SPORTS as _DURATION_BASED_SPORTS
 from app.utils import OTHER_ACTIVITY_SPORTS as _OTHER_ACTIVITY_SPORTS
 from app.utils import SPORT_ACTIVITY_TYPES as _SPORT_ACTIVITY_TYPES
+from app.utils import format_kv_lines as _format_kv_lines
+from app.utils import SEPARATOR as _SEPARATOR
 
 logger = logging.getLogger(__name__)
 
@@ -528,9 +530,23 @@ async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"`{e['total_points']:.0f} pts{bonus_note}  ·  {breakdown}`\n"
         )
 
+    # A clearly demarcated, monospace-aligned legend (one sport per line,
+    # same `label : value` style as /stats and notifications) reads far
+    # easier than the previous run-on sentence crammed into two lines.
+    points_lines = _format_kv_lines([
+        ("Run", "10 pts/km"),
+        ("Swim", "40 pts/km"),
+        ("Hiking", "8 pts/km"),
+        ("Walk", "6 pts/km"),
+        ("Ride", "3 pts/km"),
+        ("Racket Sports", "15 pts/30 min"),
+        ("Strength Training", "12 pts/30 min"),
+        ("Yoga", "5 pts/30 min"),
+    ])
     lines.append(
-        "_Points: Run 10/km · Swim 40/km · Hiking 8/km · Walk 6/km · Ride 3/km_\n"
-        "_Racket Sports 15 · Strength Training 12 · Yoga 5 \\(per 30 min\\)_\n"
+        f"{_SEPARATOR}\n\n"
+        f"*Point Values*\n"
+        f"{points_lines}\n\n"
         "_Multi\\-sport bonus: 2 sports \\+5% · 3 sports \\+10% · 4\\+ sports \\+15%_"
     )
     await update.message.reply_text("\n".join(lines), parse_mode="MarkdownV2")
