@@ -94,13 +94,17 @@ _LOGO_PATH  = _DATA_DIR / "bmcc_logo.jpg"
 _CREST_PATH = _DATA_DIR / "bmcc_crest.png"
 _ICON_DIR   = _DATA_DIR / "icons"
 _ICON_PATHS = {
-    "Ride": _ICON_DIR / "ride.png",
-    "Run":  _ICON_DIR / "run.png",
-    "Walk": _ICON_DIR / "walk.png",
-    "Swim": _ICON_DIR / "swim.png",
+    "Ride":             _ICON_DIR / "ride.png",
+    "Run":              _ICON_DIR / "run.png",
+    "Walk":             _ICON_DIR / "walk.png",
+    "Swim":             _ICON_DIR / "swim.png",
+    "Hiking":           _ICON_DIR / "hiking.png",
+    "Yoga":             _ICON_DIR / "yoga.png",
+    "RacketSports":     _ICON_DIR / "racket.png",
+    "StrengthTraining": _ICON_DIR / "strength.png",
 }
-# "Other Activities" sports have no bundled line-art PNG — they fall back to
-# a simple drawn monogram badge (see _paste_fallback_icon) in their accent color.
+# Fallback drawn monogram badge (see _paste_fallback_icon) — only used if a
+# bundled line-art PNG above is ever missing on disk.
 _FALLBACK_MONOGRAM = {
     "Hiking": "H", "Yoga": "Y", "RacketSports": "R", "StrengthTraining": "S",
 }
@@ -667,7 +671,7 @@ def _paste_icon(img, sport_key: str, box, color: tuple[int, int, int] | None = N
     bundled line-art PNG (the "Other Activities" sports) fall back to a
     drawn monogram badge in their accent color instead."""
     path = _ICON_PATHS.get(sport_key)
-    if path is None:
+    if path is None or not path.exists():
         _paste_fallback_icon(img, sport_key, box, color)
         return
     x0, y0, x1, y1 = box
