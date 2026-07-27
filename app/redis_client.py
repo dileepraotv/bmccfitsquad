@@ -91,7 +91,7 @@ def key_strava_rate_limit() -> str:
 # Bump this whenever render_recap_card()'s visual output changes so stale
 # cached renders from before the change are transparently bypassed instead
 # of being served for up to the full cache TTL (see _RECAP_CACHE_TTL_SECONDS).
-_RECAP_CACHE_VERSION = 8
+_RECAP_CACHE_VERSION = 9
 
 
 def key_recap_image(user_id, year: int, month: int) -> str:
