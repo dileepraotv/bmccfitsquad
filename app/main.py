@@ -254,6 +254,45 @@ async def cron_status():
     }
 
 
+@app.get("/ops/recent-errors", tags=["ops"], summary="Recent unhandled exceptions from Telegram handlers")
+async def recent_errors(secret: str = ""):
+    """In-memory ring buffer (last 25) of unhandled handler exceptions.
+
+    Telegram's webhook always gets 200 OK even when a handler raises (see
+    telegram_webhook() in bot.py + handle_error() in handlers.py), so these
+    failures are otherwise only visible in Render's own log dashboard.
+    Protected by ?secret={CRON_SECRET} since it may include update snippets.
+    """
+    if not settings.cron_secret or secret != settings.cron_secret:
+        raise HTTPException(status_code=401, detail="invalid or missing secret")
+    from app.telegram.handlers import get_recent_errors
+
+    return {"errors": get_recent_errors()}
+
+
+@app.get("/telegram/status", tags=["ops"], summary="Telegram's own view of webhook delivery health")
+async def telegram_status():
+    """Surfaces Telegram's getWebhookInfo so we can tell an app outage
+    (Telegram couldn't deliver — pending_update_count grows, last_error_message
+    set) apart from an in-handler exception (Telegram sees 200 OK every time,
+    since telegram_webhook() always returns 200 even when handle_error() fires).
+    """
+    from app.telegram.bot import get_application
+
+    info = await get_application().bot.get_webhook_info()
+    return {
+        "url": info.url,
+        "pending_update_count": info.pending_update_count,
+        "last_error_date": info.last_error_date.isoformat() if info.last_error_date else None,
+        "last_error_message": info.last_error_message,
+        "last_synchronization_error_date": (
+            info.last_synchronization_error_date.isoformat()
+            if info.last_synchronization_error_date else None
+        ),
+        "max_connections": info.max_connections,
+    }
+
+
 @app.get("/version", tags=["ops"], summary="Deployed git commit — for confirming a deploy actually landed")
 async def version():
     import subprocess

@@ -1775,8 +1775,28 @@ async def handle_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text("Use /help to see what I can do.")
 
 
+# Small in-memory ring buffer of recent unhandled errors, surfaced via
+# /ops/recent-errors — Telegram always sees 200 OK from our webhook (see
+# telegram_webhook() in bot.py) even when a handler blows up and this fires,
+# so without this buffer the failure is invisible outside Render's own log
+# dashboard, which we don't have API access to from here.
+_recent_errors: list[dict] = []
+_RECENT_ERRORS_MAX = 25
+
+
 async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    import traceback
+
     logger.exception("Unhandled error for update %s", update, exc_info=context.error)
+    _recent_errors.append({
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "update": str(update)[:500],
+        "error": "".join(
+            traceback.format_exception(type(context.error), context.error, context.error.__traceback__)
+        )[-3000:] if context.error else None,
+    })
+    del _recent_errors[:-_RECENT_ERRORS_MAX]
+
     # Tell the user something went wrong instead of leaving them hanging.
     if not isinstance(update, Update):
         return
@@ -1792,3 +1812,8 @@ async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> No
             )
         except Exception:
             pass  # don't let error-handler itself raise
+
+
+def get_recent_errors() -> list[dict]:
+    """Public accessor for the /ops/recent-errors diagnostic endpoint."""
+    return list(_recent_errors)
