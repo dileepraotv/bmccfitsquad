@@ -596,7 +596,17 @@ async def compute_yearly_recap(db: AsyncSession, user: User, year: int) -> dict:
     if streak >= _MIN_STREAK_TO_SHOW:
         highlights.append(f"{streak}-day activity streak")
 
-    days_in_year = (end - start).days
+    # For a completed past year, the full 365/366-day span is correct. But
+    # /yearrecap is explicitly a preview of the *current, still in-progress*
+    # year — using the full year length there wrongly counts every day from
+    # today through Dec 31 as a "rest day" it hasn't even happened yet.
+    # Cap the denominator at days actually elapsed (inclusive of today) once
+    # we detect the year isn't over yet.
+    now = datetime.now(timezone.utc)
+    if now >= end:
+        days_in_year = (end - start).days
+    else:
+        days_in_year = (now.date() - start.date()).days + 1
     active_days = await _distinct_active_days(db, user.id, start, end)
     rest_days = max(0, days_in_year - active_days)
 
