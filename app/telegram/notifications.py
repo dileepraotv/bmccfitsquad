@@ -27,12 +27,7 @@ Template anatomy
 
   ─────────────────
   🎯 Goal Progress
-  …
-
-  ─────────────────
-  "{random quote}"
-
-  *BMCC* - _Beyond Miles, Beyond Limits_
+  … (up to 10 active goals)
 """
 from __future__ import annotations
 
@@ -101,6 +96,8 @@ _DEFAULT_EMOJI = "🏅"
 
 # Rotated so the opener doesn't feel copy-pasted across consecutive posts.
 _GREETINGS: list[str] = ["Nice one", "Kudos to you", "Amazing", "Wow", "Great stuff"]
+
+_MAX_GOAL_LINES = 10
 
 
 def _random_greeting() -> str:
@@ -247,23 +244,14 @@ async def format_activity_notification(
     # ------------------------------------------------------------------
     # Goal progress section — each goal renders as "<emoji sport category>
     # : <achieved>/<target>", column-aligned the same way as the metrics
-    # block above.
+    # block above. Capped at 10 so a member with many active goals doesn't
+    # turn every activity notification into a wall of text.
     # ------------------------------------------------------------------
     lines += [_SEPARATOR, "🎯 *Goal Progress*", ""]
     if goal_lines:
-        lines.append(format_kv_lines(goal_lines))
+        lines.append(format_kv_lines(goal_lines[:_MAX_GOAL_LINES]))
     else:
         lines.append("No active goals. Use /goals to set one.")
-
-    # ------------------------------------------------------------------
-    # Quote + tagline
-    # ------------------------------------------------------------------
-    lines += [
-        _SEPARATOR,
-        f'*"{_random_quote()}"*',
-        "",
-        "*BMCC* - _Beyond Miles, Beyond Limits_",
-    ]
 
     return "\n".join(lines)
 

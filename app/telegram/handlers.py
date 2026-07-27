@@ -47,6 +47,7 @@ from app.telegram.keyboards import (
     confirm_keyboard,
     connect_strava_keyboard,
     nav_keyboard,
+    post_dismiss_keyboard,
     recap_goal_prompt_keyboard,
     stats_nav_keyboard,
     stats_other_sport_keyboard,
@@ -217,31 +218,36 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 
+_HELP_TEXT = (
+    "*BMCC FitSquad — All Commands*\n\n"
+    "🔗 *Strava*\n"
+    "/connect — Link your Strava account\n"
+    "/disconnect — Unlink your Strava account\n"
+    "/sync — Fetch latest activities \\(fast, day\\-to\\-day use\\)\n"
+    "/fullsync — Rebuild your full history \\(use only if stats look wrong\\)\n\n"
+    "📊 *Stats \\& Goals*\n"
+    "/stats — View activity stats by sport and time period\n"
+    "/goals — Set, delete or check your fitness goals\n"
+    "/recap — Your most recently completed month, recapped\n"
+    "/yearrecap — Preview your year in review so far\n\n"
+    "🏆 *Group*\n"
+    "/leaderboard — Monthly points leaderboard \\(multi\\-sport bonus included\\)\n\n"
+    "💬 *Other*\n"
+    "/quote — Random motivational quote\n"
+    "/notifications — How activity notifications are managed\n"
+    "/cancel — Cancel any in\\-progress action\n"
+    "/skip — Skip the current step in an in\\-progress action\n"
+    "/start — Welcome message and main menu\n"
+    "/help — Show this list\n\n"
+    "💡 *Tip:* New activities sync automatically when you save them on Strava\\. "
+    "Use /sync only if a recent activity is missing\\.\n\n"
+    "🌐 [www\\.beyondmiles\\.cc](http://www.beyondmiles.cc) \\| 📸 @beyondmilescc"
+)
+
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "*BMCC FitSquad — All Commands*\n\n"
-        "🔗 *Strava*\n"
-        "/connect — Link your Strava account\n"
-        "/disconnect — Unlink your Strava account\n"
-        "/sync — Fetch latest activities \\(fast, day\\-to\\-day use\\)\n"
-        "/fullsync — Rebuild your full history \\(use only if stats look wrong\\)\n\n"
-        "📊 *Stats \\& Goals*\n"
-        "/stats — View activity stats by sport and time period\n"
-        "/goals — Set, delete or check your fitness goals\n"
-        "/recap — Your most recently completed month, recapped\n"
-        "/yearrecap — Preview your year in review so far\n\n"
-        "🏆 *Group*\n"
-        "/leaderboard — Monthly points leaderboard \\(multi\\-sport bonus included\\)\n\n"
-        "💬 *Other*\n"
-        "/quote — Random motivational quote\n"
-        "/notifications — How activity notifications are managed\n"
-        "/cancel — Cancel any in\\-progress action\n"
-        "/skip — Skip the current step in an in\\-progress action\n"
-        "/start — Welcome message and main menu\n"
-        "/help — Show this list\n\n"
-        "💡 *Tip:* New activities sync automatically when you save them on Strava\\. "
-        "Use /sync only if a recent activity is missing\\.\n\n"
-        "🌐 [www\\.beyondmiles\\.cc](http://www.beyondmiles.cc) \\| 📸 @beyondmilescc",
+        _HELP_TEXT,
         parse_mode="MarkdownV2",
         disable_web_page_preview=True,
     )
@@ -530,23 +536,24 @@ async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"`{e['total_points']:.0f} pts{bonus_note}  ·  {breakdown}`\n"
         )
 
-    # A clearly demarcated, monospace-aligned legend (one sport per line,
-    # same `label : value` style as /stats and notifications) reads far
-    # easier than the previous run-on sentence crammed into two lines.
-    points_lines = _format_kv_lines([
-        ("Run", "10 pts/km"),
-        ("Swim", "40 pts/km"),
-        ("Hiking", "8 pts/km"),
-        ("Walk", "6 pts/km"),
-        ("Ride", "3 pts/km"),
-        ("Racket Sports", "15 pts/30 min"),
-        ("Strength Training", "12 pts/30 min"),
-        ("Yoga", "5 pts/30 min"),
+    # A clearly demarcated, monospace-aligned legend. Telegram has no way to
+    # shrink font size, so instead of one long "pts/30 min" suffix repeated
+    # on every line (which wrapped on narrow phones), the unit is stated
+    # once per group header and each line is just "Label : points" — much
+    # shorter, no wrapping, still lines up in a straight column.
+    per_km_lines = _format_kv_lines([
+        ("Run", "10"), ("Swim", "40"), ("Hiking", "8"),
+        ("Walk", "6"), ("Ride", "3"),
+    ])
+    per_30min_lines = _format_kv_lines([
+        ("Racket Sports", "15"), ("Strength Training", "12"), ("Yoga", "5"),
     ])
     lines.append(
         f"{_SEPARATOR}\n\n"
-        f"*Point Values*\n"
-        f"{points_lines}\n\n"
+        f"*Point Values \\(per km\\)*\n"
+        f"{per_km_lines}\n\n"
+        f"*Point Values \\(per 30 min\\)*\n"
+        f"{per_30min_lines}\n\n"
         "_Multi\\-sport bonus: 2 sports \\+5% · 3 sports \\+10% · 4\\+ sports \\+15%_"
     )
     await update.message.reply_text("\n".join(lines), parse_mode="MarkdownV2")
@@ -1329,10 +1336,28 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await _handle_activity_desc_cancel(query)
         return
     if data == "activity:dismiss":
+        # Give the user an obvious next step instead of just ending the
+        # interaction — swap the Update/Dismiss buttons for Stats/Goals/Help.
         try:
-            await query.edit_message_reply_markup(reply_markup=None)
+            await query.edit_message_reply_markup(reply_markup=post_dismiss_keyboard())
         except Exception:
             pass
+        return
+
+    if data == "postact:stats":
+        await query.edit_message_text(
+            "📊 *Stats*\n\nSelect the activity behind your progress:",
+            parse_mode="Markdown",
+            reply_markup=stats_sport_keyboard(),
+        )
+        return
+    if data == "postact:goals":
+        await _send_goals_menu(query, query.from_user.id)
+        return
+    if data == "postact:help":
+        await query.edit_message_text(
+            _HELP_TEXT, parse_mode="MarkdownV2", disable_web_page_preview=True,
+        )
         return
 
     if data.startswith("activity:edit:"):

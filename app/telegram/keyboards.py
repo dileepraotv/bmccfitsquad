@@ -122,6 +122,17 @@ def activity_edit_description_keyboard() -> InlineKeyboardMarkup:
     ]])
 
 
+def post_dismiss_keyboard() -> InlineKeyboardMarkup:
+    """Shown after an activity notification is dismissed — offers the three
+    top-level destinations instead of just ending the interaction, so the
+    user has an obvious next step to follow."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(_padded("Stats", 14), callback_data="postact:stats"),
+        InlineKeyboardButton(_padded("Goals", 14), callback_data="postact:goals"),
+        InlineKeyboardButton(_padded("Help", 14),  callback_data="postact:help"),
+    ]])
+
+
 def recap_goal_prompt_keyboard() -> InlineKeyboardMarkup:
     """Shown under the monthly recap caption, offering to set next month's goal."""
     return InlineKeyboardMarkup([[
