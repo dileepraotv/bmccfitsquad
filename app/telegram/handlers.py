@@ -649,7 +649,9 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     # Try to cancel activity edit first
     if await r.delete(key_activity_edit(tg_id)):
         _users_with_draft.discard(tg_id)
-        await update.message.reply_text("Activity update cancelled.")
+        await update.message.reply_text(
+            "Activity update cancelled.", reply_markup=post_dismiss_keyboard(),
+        )
         return
     # Then try goal draft
     if await r.delete(_draft_key(tg_id)):
@@ -1586,7 +1588,9 @@ async def _handle_activity_desc_cancel(query) -> None:
         await query.edit_message_reply_markup(reply_markup=None)
     except Exception:
         pass
-    await query.message.reply_text("Activity update cancelled.")
+    await query.message.reply_text(
+        "Activity update cancelled.", reply_markup=post_dismiss_keyboard(),
+    )
 
 
 async def _handle_activity_edit_start(query, data: str) -> None:
@@ -1717,6 +1721,7 @@ async def _push_activity_update(
         f"Name: *{name}*\n"
         f"Description: {desc_display}",
         parse_mode="Markdown",
+        reply_markup=post_dismiss_keyboard(),
     )
 
 
