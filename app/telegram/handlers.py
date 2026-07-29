@@ -168,6 +168,17 @@ def _escape_md(text: str) -> str:
     return text
 
 
+def _inline_code_or_plain(text: str) -> str:
+    """Wrap free-text user content (activity name/description) in a
+    single-line inline code span for monospace display. Telegram inline
+    code spans can't contain a literal newline, so multi-line descriptions
+    fall back to plain text rather than risk a broken/rejected message.
+    """
+    if not text or "\n" in text:
+        return text
+    return f"`{text.replace('`', chr(39))}`"
+
+
 # ---------------------------------------------------------------------------
 # Command handlers
 # ---------------------------------------------------------------------------
@@ -222,25 +233,25 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 _HELP_TEXT = (
     "*BMCC FitSquad — All Commands*\n\n"
     "🔗 *Strava*\n"
-    "/connect — Link your Strava account\n"
-    "/disconnect — Unlink your Strava account\n"
-    "/sync — Fetch latest activities \\(fast, day\\-to\\-day use\\)\n"
-    "/fullsync — Rebuild your full history \\(use only if stats look wrong\\)\n"
-    "/duplicates — Check your history for possible duplicate uploads\n\n"
+    "`/connect — Link your Strava account`\n"
+    "`/disconnect — Unlink your Strava account`\n"
+    "`/sync — Fetch latest activities (fast, day-to-day use)`\n"
+    "`/fullsync — Rebuild your full history (use only if stats look wrong)`\n"
+    "`/duplicates — Check your history for possible duplicate uploads`\n\n"
     "📊 *Stats \\& Goals*\n"
-    "/stats — View activity stats by sport and time period\n"
-    "/goals — Set, delete or check your fitness goals\n"
-    "/recap — Your most recently completed month, recapped\n"
-    "/yearrecap — Preview your year in review so far\n\n"
+    "`/stats — View activity stats by sport and time period`\n"
+    "`/goals — Set, delete or check your fitness goals`\n"
+    "`/recap — Your most recently completed month, recapped`\n"
+    "`/yearrecap — Preview your year in review so far`\n\n"
     "🏆 *Group*\n"
-    "/leaderboard — Monthly points leaderboard \\(multi\\-sport bonus included\\)\n\n"
+    "`/leaderboard — Monthly points leaderboard (multi-sport bonus included)`\n\n"
     "💬 *Other*\n"
-    "/quote — Random motivational quote\n"
-    "/notifications — How activity notifications are managed\n"
-    "/cancel — Cancel any in\\-progress action\n"
-    "/skip — Skip the current step in an in\\-progress action\n"
-    "/start — Welcome message and main menu\n"
-    "/help — Show this list\n\n"
+    "`/quote — Random motivational quote`\n"
+    "`/notifications — How activity notifications are managed`\n"
+    "`/cancel — Cancel any in-progress action`\n"
+    "`/skip — Skip the current step in an in-progress action`\n"
+    "`/start — Welcome message and main menu`\n"
+    "`/help — Show this list`\n\n"
     "💡 *Tip:* New activities sync automatically when you save them on Strava\\. "
     "Use /sync only if a recent activity is missing\\.\n\n"
     "🌐 [www\\.beyondmiles\\.cc](http://www.beyondmiles.cc) \\| 📸 @beyondmilescc"
@@ -1769,11 +1780,11 @@ async def _push_activity_update(
             )
             return
 
-    desc_display = description if description else "_(unchanged)_"
+    desc_value = description if description else "(unchanged)"
     await reply_message.reply_text(
         f"✅ *Activity updated on Strava!*\n\n"
-        f"Name: *{name}*\n"
-        f"Description: {desc_display}",
+        f"Name: {_inline_code_or_plain(name)}\n"
+        f"Description: {_inline_code_or_plain(desc_value)}",
         parse_mode="Markdown",
         reply_markup=post_dismiss_keyboard(),
     )

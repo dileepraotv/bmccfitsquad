@@ -246,12 +246,12 @@ async def send_possible_duplicate_alert(
     )
     text = (
         "⚠️ *Possible duplicate activity*\n\n"
-        f"We found {n} {sport_label} activities that look like the same workout — "
-        f"same start time, same duration:\n\n"
+        f"`We found {n} {sport_label} activities that look like the same workout "
+        f"— same start time, same duration:`\n\n"
         f"{links}\n\n"
-        "If your device or app uploaded this more than once, please review them and delete "
-        "the extra copies directly in the Strava app — the bot can't delete activities on "
-        "your behalf (Strava's API doesn't support it)."
+        "`If your device or app uploaded this more than once, please review them and "
+        "delete the extra copies directly in the Strava app — the bot can't delete "
+        "activities on your behalf (Strava's API doesn't support it).`"
     )
     bot = TelegramBot(token=settings.telegram_bot_token)
     async with bot:
