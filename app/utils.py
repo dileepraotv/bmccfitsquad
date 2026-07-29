@@ -242,6 +242,22 @@ def safe_round(value: float | int | None, decimals: int = 2) -> float:
 SEPARATOR = "─────────────────"
 
 
+def escape_markdown_v2(text: str) -> str:
+    """Escape free-text (names, etc.) for safe interpolation into a
+    MarkdownV2-formatted Telegram message.
+
+    Any user- or third-party-controlled string (Telegram display name,
+    Strava athlete name, ...) MUST go through this before being inserted
+    into a MarkdownV2 message — otherwise a name containing a reserved
+    character (e.g. a hyphenated name, or one with a period) causes
+    Telegram to reject the whole message with a "can't parse entities"
+    error, silently dropping it.
+    """
+    for ch in r"\_*[]()~`>#+-=|{}.!":
+        text = text.replace(ch, f"\\{ch}")
+    return text
+
+
 def format_kv_lines(pairs: list[tuple[str, str]]) -> str:
     """Render label/value pairs as fixed-width monospace lines that line up
     in a straight column, for use inside a Telegram message.

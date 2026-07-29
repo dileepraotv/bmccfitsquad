@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from html import escape as _html_escape
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
@@ -368,13 +369,21 @@ async def strava_oauth_callback(
     try:
         from app.telegram.bot import get_application
         from app.telegram.keyboards import nav_keyboard
+        from app.utils import escape_markdown_v2
+
         bot = get_application().bot
+        # Strava's own athlete.firstname is third-party-controlled text — a
+        # hyphen, period, or any other MarkdownV2-reserved character in it
+        # would otherwise make Telegram reject this whole message (silently
+        # dropping the welcome + nav keyboard) with a "can't parse entities"
+        # error. Fall back to a generic greeting if it's empty.
+        safe_firstname = escape_markdown_v2(athlete_firstname) if athlete_firstname else "there"
         # Single message — the persistent nav bar (Stats / Goals / Help) is
         # the one top-level destination menu; no duplicate inline menu.
         await bot.send_message(
             chat_id=telegram_user_id,
             text=(
-                f"🎉 *Welcome, {athlete_firstname}\\!* 🚴🏃🏊🚶\n\n"
+                f"🎉 *Welcome, {safe_firstname}\\!* 🚴🏃🏊🚶\n\n"
                 f"✅ Your Strava account is connected\\. I'm importing your activity "
                 f"history now — this can take a minute for a large history\\.\n\n"
                 f"📊 Use /stats to see your activity numbers\n"
@@ -390,8 +399,8 @@ async def strava_oauth_callback(
 
     return HTMLResponse(content=_html_page(
         title="Strava Connected!",
-        body=f"<strong>{athlete_firstname}</strong>, your Strava account is now linked "
-             f"to the BMCC bot. You can close this tab and return to Telegram.",
+        body=f"<strong>{_html_escape(athlete_firstname) or 'You'}</strong>, your Strava account is "
+             f"now linked to the BMCC bot. You can close this tab and return to Telegram.",
         success=True,
     ))
 

@@ -59,6 +59,7 @@ from app.utils import OTHER_ACTIVITY_SPORTS as _OTHER_ACTIVITY_SPORTS
 from app.utils import SPORT_ACTIVITY_TYPES as _SPORT_ACTIVITY_TYPES
 from app.utils import format_kv_lines as _format_kv_lines
 from app.utils import SEPARATOR as _SEPARATOR
+from app.utils import escape_markdown_v2 as _escape_md
 
 logger = logging.getLogger(__name__)
 
@@ -159,13 +160,6 @@ def _random_quote() -> str:
         return random.choice(lines) if lines else "Keep moving forward."
     except FileNotFoundError:
         return "Every kilometre counts."
-
-
-def _escape_md(text: str) -> str:
-    """Escape text for Telegram MarkdownV2."""
-    for ch in r"\_*[]()~`>#+-=|{}.!":
-        text = text.replace(ch, f"\\{ch}")
-    return text
 
 
 def _inline_code_or_plain(text: str) -> str:
