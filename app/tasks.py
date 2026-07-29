@@ -264,6 +264,73 @@ async def send_possible_duplicate_alert(
             )
 
 
+async def scan_and_alert_duplicates(*, dry_run: bool = True) -> dict:
+    """One-off historical scan for possible-duplicate activity pairs already
+    sitting in the database (as opposed to _find_possible_duplicate, which
+    only looks at newly-ingested activities going forward).
+
+    Finds every pair of activities for the same user + same sport whose
+    start times are within 2 minutes and durations within 10% (min 30s),
+    then DMs each affected athlete once per pair via the same alert used by
+    the live path. Set dry_run=True (default) to preview without sending.
+    """
+    from sqlalchemy import text as _text
+
+    async with AsyncSessionLocal() as db:
+        rows = (await db.execute(_text(
+            """
+            SELECT
+                a.user_id             AS user_id,
+                a.strava_activity_id  AS a_id,
+                a.activity_date       AS a_date,
+                b.strava_activity_id  AS b_id,
+                b.activity_date       AS b_date,
+                a.activity_type       AS activity_type
+            FROM activities a
+            JOIN activities b
+              ON a.user_id = b.user_id
+             AND a.activity_type = b.activity_type
+             AND a.strava_activity_id < b.strava_activity_id
+             AND ABS(EXTRACT(EPOCH FROM (a.activity_date - b.activity_date))) <= 120
+             AND ABS(a.moving_time_seconds - b.moving_time_seconds) <=
+                 GREATEST(30, a.moving_time_seconds * 0.1)
+            ORDER BY a.user_id, a.activity_date
+            """
+        ))).fetchall()
+
+    pairs: list[dict] = []
+    for row in rows:
+        earlier_id, later_id = (
+            (row.a_id, row.b_id) if row.a_date <= row.b_date else (row.b_id, row.a_id)
+        )
+        pairs.append({
+            "user_id": str(row.user_id),
+            "activity_type": row.activity_type,
+            "earlier_strava_id": earlier_id,
+            "later_strava_id": later_id,
+        })
+
+    users_affected: set[str] = {p["user_id"] for p in pairs}
+    sent = 0
+    if not dry_run:
+        for p in pairs:
+            await send_possible_duplicate_alert(
+                user_id=p["user_id"],
+                new_strava_id=p["later_strava_id"],
+                matched_strava_id=p["earlier_strava_id"],
+                activity_type=p["activity_type"],
+            )
+            sent += 1
+
+    return {
+        "dry_run": dry_run,
+        "pairs_found": len(pairs),
+        "users_affected": len(users_affected),
+        "alerts_sent": sent,
+        "pairs": pairs,
+    }
+
+
 class _NotConnected(Exception):
     """Raised internally when a user has no valid Strava connection to sync.
 

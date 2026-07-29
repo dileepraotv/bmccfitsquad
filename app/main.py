@@ -270,6 +270,27 @@ async def recent_errors(secret: str = ""):
     return {"errors": get_recent_errors()}
 
 
+@app.get(
+    "/ops/scan-duplicates",
+    tags=["ops"],
+    summary="One-off scan of activity history for possible duplicates + alert affected users",
+)
+async def ops_scan_duplicates(secret: str = "", dry_run: bool = True):
+    """Historical backfill counterpart to the live duplicate check in
+    tasks.py — scans every activity already in the DB (not just new ones)
+    and DMs each affected athlete once per matched pair.
+
+    Protected by: ?secret={CRON_SECRET} query parameter
+    Defaults to dry_run=true (no messages sent) — call with dry_run=false
+    to actually send the alerts.
+    """
+    if not settings.cron_secret or secret != settings.cron_secret:
+        raise HTTPException(status_code=401, detail="invalid or missing secret")
+    from app.tasks import scan_and_alert_duplicates
+
+    return await scan_and_alert_duplicates(dry_run=dry_run)
+
+
 @app.get("/telegram/status", tags=["ops"], summary="Telegram's own view of webhook delivery health")
 async def telegram_status():
     """Surfaces Telegram's getWebhookInfo so we can tell an app outage
