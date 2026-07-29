@@ -217,16 +217,21 @@ async def _find_possible_duplicate(
 async def send_possible_duplicate_alert(
     *,
     user_id: str,
-    new_strava_id: int,
-    matched_strava_id: int,
+    strava_ids: list[int],
     activity_type: str,
 ) -> None:
-    """DM the athlete that a just-logged activity looks like a duplicate.
+    """DM the athlete that a cluster of activities looks like the same workout
+    logged more than once (2 or more strava_ids — always sent as ONE message
+    per cluster, never one message per pair, so a 6-way duplicate doesn't
+    turn into 15 separate DMs).
 
     Informational only — never touches stats, goals, or the leaderboard.
     Strava's API has no delete-activity endpoint, so the message directs
     the user to clean it up manually in the Strava app if they agree.
     """
+    if len(strava_ids) < 2:
+        return
+
     async with AsyncSessionLocal() as db:
         user: User | None = await db.get(User, uuid.UUID(user_id))
         if user is None or not user.is_active:
@@ -234,16 +239,19 @@ async def send_possible_duplicate_alert(
         telegram_user_id = user.telegram_user_id
 
     sport_label = _sport_display_label(activity_type)
-    new_link = f"https://www.strava.com/activities/{new_strava_id}"
-    old_link = f"https://www.strava.com/activities/{matched_strava_id}"
+    n = len(strava_ids)
+    links = "\n".join(
+        f"{i}. [Activity](https://www.strava.com/activities/{sid})"
+        for i, sid in enumerate(strava_ids, start=1)
+    )
     text = (
         "⚠️ *Possible duplicate activity*\n\n"
-        f"Your new {sport_label} activity looks like it might be the same workout as one "
-        f"you already have on record — same start time, same duration.\n\n"
-        f"[New activity]({new_link}) · [Earlier activity]({old_link})\n\n"
-        "If your device or app uploaded this twice, please review both and delete the extra "
-        "one directly in the Strava app — the bot can't delete activities on your behalf "
-        "(Strava's API doesn't support it)."
+        f"We found {n} {sport_label} activities that look like the same workout — "
+        f"same start time, same duration:\n\n"
+        f"{links}\n\n"
+        "If your device or app uploaded this more than once, please review them and delete "
+        "the extra copies directly in the Strava app — the bot can't delete activities on "
+        "your behalf (Strava's API doesn't support it)."
     )
     bot = TelegramBot(token=settings.telegram_bot_token)
     async with bot:
@@ -255,8 +263,8 @@ async def send_possible_duplicate_alert(
                 disable_web_page_preview=True,
             )
             logger.info(
-                "Possible-duplicate alert sent to telegram_id=%s (new=%s matched=%s)",
-                telegram_user_id, new_strava_id, matched_strava_id,
+                "Possible-duplicate alert sent to telegram_id=%s ids=%s",
+                telegram_user_id, strava_ids,
             )
         except Exception as exc:
             logger.error(
@@ -265,14 +273,16 @@ async def send_possible_duplicate_alert(
 
 
 async def scan_and_alert_duplicates(*, dry_run: bool = True) -> dict:
-    """One-off historical scan for possible-duplicate activity pairs already
-    sitting in the database (as opposed to _find_possible_duplicate, which
-    only looks at newly-ingested activities going forward).
+    """One-off historical scan for possible-duplicate activity clusters
+    already sitting in the database (as opposed to _find_possible_duplicate,
+    which only looks at newly-ingested activities going forward).
 
     Finds every pair of activities for the same user + same sport whose
     start times are within 2 minutes and durations within 10% (min 30s),
-    then DMs each affected athlete once per pair via the same alert used by
-    the live path. Set dry_run=True (default) to preview without sending.
+    unions overlapping pairs into clusters (so e.g. 6 mutually-duplicate
+    uploads become ONE cluster, not 15 pairwise messages), then DMs each
+    affected athlete once per cluster. Set dry_run=True (default) to preview
+    without sending anything.
     """
     from sqlalchemy import text as _text
 
@@ -298,36 +308,62 @@ async def scan_and_alert_duplicates(*, dry_run: bool = True) -> dict:
             """
         ))).fetchall()
 
-    pairs: list[dict] = []
+    # Union-find, keyed by (user_id, activity_type) so clusters never span
+    # sports even if two strava_activity_ids happen to collide across users.
+    parent: dict[tuple, tuple] = {}
+
+    def _find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def _union(x, y):
+        rx, ry = _find(x), _find(y)
+        if rx != ry:
+            parent[rx] = ry
+
+    dates: dict[tuple, datetime] = {}
     for row in rows:
-        earlier_id, later_id = (
-            (row.a_id, row.b_id) if row.a_date <= row.b_date else (row.b_id, row.a_id)
-        )
-        pairs.append({
-            "user_id": str(row.user_id),
-            "activity_type": row.activity_type,
-            "earlier_strava_id": earlier_id,
-            "later_strava_id": later_id,
+        a_key = (str(row.user_id), row.activity_type, row.a_id)
+        b_key = (str(row.user_id), row.activity_type, row.b_id)
+        parent.setdefault(a_key, a_key)
+        parent.setdefault(b_key, b_key)
+        dates[a_key] = row.a_date
+        dates[b_key] = row.b_date
+        _union(a_key, b_key)
+
+    clusters: dict[tuple, list[tuple]] = {}
+    for key in parent:
+        clusters.setdefault(_find(key), []).append(key)
+
+    cluster_list: list[dict] = []
+    for members in clusters.values():
+        members_sorted = sorted(members, key=lambda k: dates[k])
+        user_id, activity_type, _ = members_sorted[0]
+        cluster_list.append({
+            "user_id": user_id,
+            "activity_type": activity_type,
+            "strava_ids": [m[2] for m in members_sorted],
         })
 
-    users_affected: set[str] = {p["user_id"] for p in pairs}
+    users_affected: set[str] = {c["user_id"] for c in cluster_list}
     sent = 0
     if not dry_run:
-        for p in pairs:
+        for c in cluster_list:
             await send_possible_duplicate_alert(
-                user_id=p["user_id"],
-                new_strava_id=p["later_strava_id"],
-                matched_strava_id=p["earlier_strava_id"],
-                activity_type=p["activity_type"],
+                user_id=c["user_id"],
+                strava_ids=c["strava_ids"],
+                activity_type=c["activity_type"],
             )
             sent += 1
 
     return {
         "dry_run": dry_run,
-        "pairs_found": len(pairs),
+        "clusters_found": len(cluster_list),
         "users_affected": len(users_affected),
         "alerts_sent": sent,
-        "pairs": pairs,
+        "clusters": cluster_list,
     }
 
 
@@ -778,8 +814,7 @@ async def _sync_recent_activities_for_user(
         if possible_duplicate is not None:
             fire_and_forget(send_possible_duplicate_alert(
                 user_id=user_id_str,
-                new_strava_id=strava_id,
-                matched_strava_id=possible_duplicate.strava_activity_id,
+                strava_ids=[possible_duplicate.strava_activity_id, strava_id],
                 activity_type=data.get("sport_type") or data.get("type") or "Unknown",
             ))
         new_count += 1

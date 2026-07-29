@@ -524,8 +524,7 @@ async def _handle_activity_created(owner_id: int, activity_id: int) -> None:
         from app.tasks import send_possible_duplicate_alert
         fire_and_forget(send_possible_duplicate_alert(
             user_id=user_id_str,
-            new_strava_id=activity_id,
-            matched_strava_id=possible_duplicate.strava_activity_id,
+            strava_ids=[possible_duplicate.strava_activity_id, activity_id],
             activity_type=_sport,
         ))
         logger.info(
