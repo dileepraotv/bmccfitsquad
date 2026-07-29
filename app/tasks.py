@@ -272,23 +272,27 @@ async def send_possible_duplicate_alert(
             )
 
 
-async def scan_and_alert_duplicates(*, dry_run: bool = True) -> dict:
-    """One-off historical scan for possible-duplicate activity clusters
-    already sitting in the database (as opposed to _find_possible_duplicate,
-    which only looks at newly-ingested activities going forward).
+async def _find_duplicate_clusters(user_id: uuid.UUID | None = None) -> list[dict]:
+    """Scan stored activities for possible-duplicate clusters.
 
     Finds every pair of activities for the same user + same sport whose
     start times are within 2 minutes and durations within 10% (min 30s),
-    unions overlapping pairs into clusters (so e.g. 6 mutually-duplicate
-    uploads become ONE cluster, not 15 pairwise messages), then DMs each
-    affected athlete once per cluster. Set dry_run=True (default) to preview
-    without sending anything.
+    then unions overlapping pairs into clusters (so e.g. 6 mutually-duplicate
+    uploads become ONE cluster, not 15 pairwise entries). Pass user_id to
+    scope the scan to a single athlete (used by the /duplicates command);
+    leave it None to scan the whole database (used by the ops backfill scan).
     """
     from sqlalchemy import text as _text
 
+    params: dict = {}
+    user_filter = ""
+    if user_id is not None:
+        user_filter = "AND a.user_id = :user_id"
+        params["user_id"] = str(user_id)
+
     async with AsyncSessionLocal() as db:
         rows = (await db.execute(_text(
-            """
+            f"""
             SELECT
                 a.user_id             AS user_id,
                 a.strava_activity_id  AS a_id,
@@ -304,9 +308,10 @@ async def scan_and_alert_duplicates(*, dry_run: bool = True) -> dict:
              AND ABS(EXTRACT(EPOCH FROM (a.activity_date - b.activity_date))) <= 120
              AND ABS(a.moving_time_seconds - b.moving_time_seconds) <=
                  GREATEST(30, a.moving_time_seconds * 0.1)
+            {user_filter}
             ORDER BY a.user_id, a.activity_date
             """
-        ))).fetchall()
+        ), params)).fetchall()
 
     # Union-find, keyed by (user_id, activity_type) so clusters never span
     # sports even if two strava_activity_ids happen to collide across users.
@@ -340,12 +345,24 @@ async def scan_and_alert_duplicates(*, dry_run: bool = True) -> dict:
     cluster_list: list[dict] = []
     for members in clusters.values():
         members_sorted = sorted(members, key=lambda k: dates[k])
-        user_id, activity_type, _ = members_sorted[0]
+        c_user_id, activity_type, _ = members_sorted[0]
         cluster_list.append({
-            "user_id": user_id,
+            "user_id": c_user_id,
             "activity_type": activity_type,
             "strava_ids": [m[2] for m in members_sorted],
         })
+
+    return cluster_list
+
+
+async def scan_and_alert_duplicates(*, dry_run: bool = True) -> dict:
+    """One-off historical scan (all users) for possible-duplicate activity
+    clusters already sitting in the database — the backfill counterpart to
+    _find_possible_duplicate, which only looks at newly-ingested activities
+    going forward. DMs each affected athlete once per cluster. Set
+    dry_run=True (default) to preview without sending anything.
+    """
+    cluster_list = await _find_duplicate_clusters()
 
     users_affected: set[str] = {c["user_id"] for c in cluster_list}
     sent = 0
@@ -365,6 +382,23 @@ async def scan_and_alert_duplicates(*, dry_run: bool = True) -> dict:
         "alerts_sent": sent,
         "clusters": cluster_list,
     }
+
+
+async def check_duplicates_for_user(user_id: str) -> list[dict]:
+    """User-triggered version of the duplicate scan (/duplicates command).
+
+    Scans only this athlete's own history and immediately DMs one alert per
+    cluster found (reusing the exact same message as the live/backfill
+    paths). Returns the cluster list so the caller can report a count.
+    """
+    cluster_list = await _find_duplicate_clusters(uuid.UUID(user_id))
+    for c in cluster_list:
+        await send_possible_duplicate_alert(
+            user_id=c["user_id"],
+            strava_ids=c["strava_ids"],
+            activity_type=c["activity_type"],
+        )
+    return cluster_list
 
 
 class _NotConnected(Exception):

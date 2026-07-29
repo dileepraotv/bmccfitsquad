@@ -94,6 +94,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("disconnect",    cmd_disconnect,    filters=_priv))
     app.add_handler(CommandHandler("sync",          cmd_sync,          filters=_priv))
     app.add_handler(CommandHandler("fullsync",      cmd_fullsync,      filters=_priv))
+    app.add_handler(CommandHandler("duplicates",    cmd_duplicates,    filters=_priv))
     app.add_handler(CommandHandler("stats",         cmd_stats,         filters=_priv))
     app.add_handler(CommandHandler("goals",         cmd_goals,         filters=_priv))
     app.add_handler(CommandHandler("cancel",        cmd_cancel,        filters=_priv))
@@ -224,7 +225,8 @@ _HELP_TEXT = (
     "/connect — Link your Strava account\n"
     "/disconnect — Unlink your Strava account\n"
     "/sync — Fetch latest activities \\(fast, day\\-to\\-day use\\)\n"
-    "/fullsync — Rebuild your full history \\(use only if stats look wrong\\)\n\n"
+    "/fullsync — Rebuild your full history \\(use only if stats look wrong\\)\n"
+    "/duplicates — Check your history for possible duplicate uploads\n\n"
     "📊 *Stats \\& Goals*\n"
     "/stats — View activity stats by sport and time period\n"
     "/goals — Set, delete or check your fitness goals\n"
@@ -342,6 +344,58 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Fetching your latest Strava activities\\. I'll message you when it's done\\.\n\n"
         "_If your stats still look off after syncing, use /fullsync to rebuild your full history\\._",
         parse_mode="MarkdownV2",
+    )
+
+
+async def cmd_duplicates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Scan the caller's own activity history for possible duplicate uploads.
+
+    Matches the same fingerprint as the automatic live/backfill checks (same
+    sport, start time within 2 min, duration within 10%), but user-triggered
+    and scoped to just this athlete. Cheap — a single indexed query.
+    """
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(User).where(User.telegram_user_id == update.effective_user.id)
+            )
+            user = result.scalar_one_or_none()
+    except Exception:
+        logger.exception("cmd_duplicates: DB error")
+        await update.message.reply_text(
+            "Sorry, I couldn't reach the database right now. Please try again in a moment."
+        )
+        return
+
+    if not user or not user.strava_athlete_id:
+        await update.message.reply_text(
+            "You haven't connected your Strava account yet\\. Use /connect to get started\\.",
+            parse_mode="MarkdownV2",
+        )
+        return
+
+    await update.message.reply_text("🔍 Checking your activity history for duplicates...")
+
+    from app.tasks import check_duplicates_for_user
+    try:
+        clusters = await check_duplicates_for_user(str(user.id))
+    except Exception:
+        logger.exception("cmd_duplicates: scan failed for user_id=%s", user.id)
+        await update.message.reply_text(
+            "Sorry, something went wrong while checking. Please try again in a moment."
+        )
+        return
+
+    if not clusters:
+        await update.message.reply_text(
+            "✅ No possible duplicates found — your activity history looks clean!"
+        )
+        return
+
+    n = len(clusters)
+    noun = "issue" if n == 1 else "issues"
+    await update.message.reply_text(
+        f"⚠️ Found {n} possible duplicate {noun} in your history — details above 👆"
     )
 
 

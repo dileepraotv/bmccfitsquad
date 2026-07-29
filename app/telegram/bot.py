@@ -114,6 +114,7 @@ async def setup_bot() -> None:
         BotCommand("yearrecap",    "Preview your year in review so far"),
         BotCommand("sync",         "Fetch latest activities (fast, day-to-day)"),
         BotCommand("fullsync",     "Rebuild full history (use if stats look wrong)"),
+        BotCommand("duplicates",   "Check your history for possible duplicates"),
         BotCommand("connect",      "Link your Strava account"),
         BotCommand("disconnect",   "Unlink your Strava account"),
         BotCommand("leaderboard",  "Monthly points leaderboard (multi-sport bonus)"),
