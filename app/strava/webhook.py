@@ -412,7 +412,8 @@ async def _handle_activity_created(owner_id: int, activity_id: int) -> None:
       3. Token refresh      — transparent, uses cached token when possible
       4. Strava API fetch   — full activity detail
       5. DB upsert          — ON CONFLICT DO NOTHING
-      6. Notification       — DM athlete + group chats
+      6. Duplicate check    — flag + alert if it looks like a repeat upload
+      7. Notification       — DM athlete + group chats
     """
     from sqlalchemy.dialects.postgresql import insert as pg_insert
     from app.tasks import send_activity_notification
@@ -494,16 +495,43 @@ async def _handle_activity_created(owner_id: int, activity_id: int) -> None:
             )
             .on_conflict_do_nothing(index_elements=["strava_activity_id"])
         )
-        await db.execute(stmt)
+        insert_result = await db.execute(stmt)
+        inserted = insert_result.rowcount > 0
         await db.commit()
 
         user_id_str = str(user.id)
 
-    # 6. Send notification (outside the DB session — uses its own session)
+        # 6. Possible-duplicate check — only meaningful once we know the row
+        #    was actually a brand-new insert (not a redundant delivery).
+        possible_duplicate = None
+        if inserted:
+            from app.tasks import _find_possible_duplicate
+            possible_duplicate = await _find_possible_duplicate(
+                db,
+                user_id=user.id,
+                activity_type=_sport,
+                activity_date=activity_date,
+                moving_time_seconds=int(activity_data.get("moving_time") or 0),
+                exclude_strava_id=activity_id,
+            )
+
+    # 7. Send notification (outside the DB session — uses its own session)
     from app.tasks import fire_and_forget
     fire_and_forget(
         send_activity_notification(activity_data=activity_data, user_id=user_id_str)
     )
+    if possible_duplicate is not None:
+        from app.tasks import send_possible_duplicate_alert
+        fire_and_forget(send_possible_duplicate_alert(
+            user_id=user_id_str,
+            new_strava_id=activity_id,
+            matched_strava_id=possible_duplicate.strava_activity_id,
+            activity_type=_sport,
+        ))
+        logger.info(
+            "Activity strava_id=%s flagged as possible duplicate of strava_id=%s",
+            activity_id, possible_duplicate.strava_activity_id,
+        )
     logger.info("Activity strava_id=%s saved; notification scheduled", activity_id)
 
 

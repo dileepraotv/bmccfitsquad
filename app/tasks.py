@@ -169,6 +169,101 @@ async def _send_activity_notification_async(
                     logger.error("Failed to notify chat_id=%s: %s", chat.id, exc)
 
 
+# ---------------------------------------------------------------------------
+# Possible-duplicate detection
+# ---------------------------------------------------------------------------
+# Strava's API has never exposed a delete-activity endpoint (removed in
+# 2017), so the bot cannot clean up a duplicate on the user's behalf — the
+# best we can do is flag it and point the user at the Strava app. This is a
+# pure alert: nothing is excluded from stats/goals/leaderboard automatically.
+
+_DUPLICATE_TIME_WINDOW = timedelta(minutes=2)
+_DUPLICATE_DURATION_TOLERANCE_FLOOR_S = 30  # minimum tolerance for very short activities
+
+
+async def _find_possible_duplicate(
+    db,
+    *,
+    user_id: uuid.UUID,
+    activity_type: str,
+    activity_date: datetime,
+    moving_time_seconds: int,
+    exclude_strava_id: int,
+) -> Activity | None:
+    """Look for an existing activity that looks like the same workout.
+
+    Matches on same user + same sport + start time within ±2 minutes +
+    moving time within ±10% (or ±30s, whichever is larger). Deliberately
+    conservative — a false negative just means no alert, a false positive
+    means an unnecessary (but harmless) heads-up message.
+    """
+    tolerance_s = max(_DUPLICATE_DURATION_TOLERANCE_FLOOR_S, moving_time_seconds * 0.1)
+    result = await db.execute(
+        select(Activity)
+        .where(
+            Activity.user_id == user_id,
+            Activity.activity_type == activity_type,
+            Activity.strava_activity_id != exclude_strava_id,
+            Activity.activity_date >= activity_date - _DUPLICATE_TIME_WINDOW,
+            Activity.activity_date <= activity_date + _DUPLICATE_TIME_WINDOW,
+            func.abs(Activity.moving_time_seconds - moving_time_seconds) <= tolerance_s,
+        )
+        .order_by(Activity.activity_date)
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def send_possible_duplicate_alert(
+    *,
+    user_id: str,
+    new_strava_id: int,
+    matched_strava_id: int,
+    activity_type: str,
+) -> None:
+    """DM the athlete that a just-logged activity looks like a duplicate.
+
+    Informational only — never touches stats, goals, or the leaderboard.
+    Strava's API has no delete-activity endpoint, so the message directs
+    the user to clean it up manually in the Strava app if they agree.
+    """
+    async with AsyncSessionLocal() as db:
+        user: User | None = await db.get(User, uuid.UUID(user_id))
+        if user is None or not user.is_active:
+            return
+        telegram_user_id = user.telegram_user_id
+
+    sport_label = _sport_display_label(activity_type)
+    new_link = f"https://www.strava.com/activities/{new_strava_id}"
+    old_link = f"https://www.strava.com/activities/{matched_strava_id}"
+    text = (
+        "⚠️ *Possible duplicate activity*\n\n"
+        f"Your new {sport_label} activity looks like it might be the same workout as one "
+        f"you already have on record — same start time, same duration.\n\n"
+        f"[New activity]({new_link}) · [Earlier activity]({old_link})\n\n"
+        "If your device or app uploaded this twice, please review both and delete the extra "
+        "one directly in the Strava app — the bot can't delete activities on your behalf "
+        "(Strava's API doesn't support it)."
+    )
+    bot = TelegramBot(token=settings.telegram_bot_token)
+    async with bot:
+        try:
+            await bot.send_message(
+                chat_id=telegram_user_id,
+                text=text,
+                parse_mode="Markdown",
+                disable_web_page_preview=True,
+            )
+            logger.info(
+                "Possible-duplicate alert sent to telegram_id=%s (new=%s matched=%s)",
+                telegram_user_id, new_strava_id, matched_strava_id,
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to send duplicate alert to telegram_id=%s: %s", telegram_user_id, exc
+            )
+
+
 class _NotConnected(Exception):
     """Raised internally when a user has no valid Strava connection to sync.
 
@@ -602,8 +697,24 @@ async def _sync_recent_activities_for_user(
             await db.execute(stmt)
             await db.commit()
 
+            possible_duplicate = await _find_possible_duplicate(
+                db,
+                user_id=user.id,
+                activity_type=data.get("sport_type") or data.get("type") or "Unknown",
+                activity_date=activity_date,
+                moving_time_seconds=int(data.get("moving_time") or 0),
+                exclude_strava_id=strava_id,
+            )
+
         await redis.set(dedup_key, "1", ex=_DEDUP_TTL_SECONDS, nx=True)
         fire_and_forget(send_activity_notification(activity_data=data, user_id=user_id_str))
+        if possible_duplicate is not None:
+            fire_and_forget(send_possible_duplicate_alert(
+                user_id=user_id_str,
+                new_strava_id=strava_id,
+                matched_strava_id=possible_duplicate.strava_activity_id,
+                activity_type=data.get("sport_type") or data.get("type") or "Unknown",
+            ))
         new_count += 1
         logger.info(
             "catchup_sync[%s]: notifying missed activity strava_id=%s user_id=%s",
