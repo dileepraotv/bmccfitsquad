@@ -747,7 +747,16 @@ async def _build_goal_lines(db, user: User) -> list[tuple[str, str]]:
 #     a deterministic hash — so total daily cost is O(users), not
 #     O(users x ticks), regardless of how often the cron actually fires.
 #
-# All three layers respect Strava's rate-limit headers via
+#   Layer 4 (monthly full-history reconciliation) — Layers 1-3 only ever
+#     look at *recent* activity (an incremental fetch since the last known
+#     timestamp), so they can't catch things that don't show up as "new":
+#     an activity edited long ago, a type change, or a deletion that
+#     happened while a webhook was missed. Each user gets one full /fullsync
+#     -equivalent re-fetch per calendar month, on a fixed day derived from
+#     their user id (1-28, spread evenly), so the cost is O(users/28) per
+#     day, not O(users) all at once. See monthly_reconcile_sweep().
+#
+# All four layers respect Strava's rate-limit headers via
 # app.strava.client.is_rate_limited() and back off before ever hitting 429.
 
 # Must match webhook.py so both systems agree on dedup key lifetime.
@@ -764,6 +773,16 @@ _HEARTBEAT_GAP_THRESHOLD_SECONDS = 720  # 12 minutes
 # regardless of actual cron frequency.
 _DAILY_SWEEP_WINDOW_SECONDS = 86_400  # 24 hours
 _DAILY_SWEEP_SLOTS = 288  # 5-minute-equivalent granularity within the window
+
+# Layer 4: each user is assigned a fixed day-of-month (1-28) on which their
+# entire Strava history is reconciled. Capped at 28 (not the calendar's 28-31)
+# so every user gets exactly one reconciliation day every month regardless
+# of how long that month is.
+_MONTHLY_RECONCILE_DAYS = 28
+# Longer than any month so a user can never be double-reconciled even if
+# their assigned day is re-evaluated on a later cron tick before the key
+# would otherwise expire.
+_MONTHLY_RECONCILE_DEDUP_TTL_SECONDS = 40 * 86_400
 
 
 async def _sync_recent_activities_for_user(
@@ -892,6 +911,53 @@ async def process_pending_webhook_events(*, max_events: int = 50) -> dict:
     return {"repaired": len(pending_ids)}
 
 
+async def monthly_reconcile_sweep(users: list[User], *, redis, now: datetime) -> dict:
+    """Layer 4 — low-frequency full-history reconciliation safety net.
+
+    Each connected user is assigned a fixed day-of-month (1-28, derived
+    deterministically from their user id) on which their entire Strava
+    history is silently re-fetched and reconciled against the local DB —
+    the exact same path as /fullsync (upsert everything, delete local rows
+    no longer present on Strava), just silent (no completion DM) and run
+    automatically instead of waiting for the user to notice something's off.
+
+    A Redis dedup key ensures each user is only reconciled once per calendar
+    month even though this is called every few minutes on their assigned day.
+    """
+    from app.redis_client import key_monthly_reconcile
+    from app.strava.client import is_rate_limited
+
+    period = f"{now.year}-{now.month:02d}"
+    today = now.day
+    due_users = [
+        u for u in users
+        if (u.id.int % _MONTHLY_RECONCILE_DAYS) + 1 == today
+    ]
+
+    processed, errors = 0, 0
+    for user in due_users:
+        dedup_key = key_monthly_reconcile(user.id, period)
+        if not await redis.set(dedup_key, "1", ex=_MONTHLY_RECONCILE_DEDUP_TTL_SECONDS, nx=True):
+            continue  # already reconciled this user this month
+        if await is_rate_limited():
+            logger.warning("monthly_reconcile: rate limit reached mid-sweep — stopping")
+            break
+        try:
+            await _sync_user_activities_async(user_id=str(user.id), full=True)
+            processed += 1
+            logger.info("monthly_reconcile: reconciled user_id=%s", user.id)
+        except Exception:
+            logger.exception("monthly_reconcile: error for user_id=%s", user.id)
+            errors += 1
+
+    if due_users:
+        logger.info(
+            "monthly_reconcile: day=%s due=%s processed=%s errors=%s",
+            today, len(due_users), processed, errors,
+        )
+    return {"due": len(due_users), "processed": processed, "errors": errors}
+
+
 async def catchup_sync_all_users() -> dict:
     """Reliability safety net — see module comment above for the 3-layer design.
 
@@ -921,6 +987,7 @@ async def catchup_sync_all_users() -> dict:
             "outage_gap_seconds": gap_seconds,
             "outage_scan": None,
             "daily_sweep": None,
+            "monthly_reconcile": None,
             "rate_limited": True,
         }
 
@@ -987,15 +1054,23 @@ async def catchup_sync_all_users() -> dict:
                     errors += 1
             daily_sweep = {"users_processed": processed, "new_activities": new_activities, "errors": errors}
 
+    # --- Layer 4: low-frequency monthly full-history reconciliation -------
+    monthly_reconcile: dict | None = None
+    if users:
+        monthly_reconcile = await monthly_reconcile_sweep(
+            users, redis=redis, now=datetime.now(timezone.utc)
+        )
+
     logger.info(
-        "catchup_sync complete — repaired=%s gap=%ss outage_scan=%s daily_sweep=%s",
-        repair_result["repaired"], gap_seconds, outage_scan, daily_sweep,
+        "catchup_sync complete — repaired=%s gap=%ss outage_scan=%s daily_sweep=%s monthly_reconcile=%s",
+        repair_result["repaired"], gap_seconds, outage_scan, daily_sweep, monthly_reconcile,
     )
     return {
         "repaired": repair_result["repaired"],
         "outage_gap_seconds": gap_seconds,
         "outage_scan": outage_scan,
         "daily_sweep": daily_sweep,
+        "monthly_reconcile": monthly_reconcile,
         "rate_limited": False,
     }
 

@@ -192,9 +192,10 @@ async def cron_sync_all(secret: str = ""):
     """Called periodically (UptimeRobot/cron-job.org) as a reliability safety net.
 
     Event-driven, not a blind poll — see the module docstring above
-    catchup_sync_all_users() in tasks.py for the 3-layer design (repair
+    catchup_sync_all_users() in tasks.py for the 4-layer design (repair
     pending webhook events, heartbeat-gated outage recovery, low-frequency
-    daily rotation). Strava API usage no longer scales with (users x ticks).
+    daily rotation, monthly full-history reconciliation). Strava API usage
+    no longer scales with (users x ticks).
 
     Protected by: ?secret={CRON_SECRET} query parameter
     """

@@ -88,6 +88,15 @@ def key_strava_rate_limit() -> str:
     return "strava:rate_limit:usage"
 
 
+def key_monthly_reconcile(user_id, period: str) -> str:
+    """Dedup key ensuring a user's monthly full-history reconciliation sync
+    (see monthly_reconcile_sweep() in tasks.py) runs at most once per
+    calendar month even though the cron ticks every few minutes on their
+    assigned day. *period* is a "YYYY-MM" string.
+    """
+    return f"reconcile:monthly:{user_id}:{period}"
+
+
 # Bump this whenever render_recap_card()'s visual output changes so stale
 # cached renders from before the change are transparently bypassed instead
 # of being served for up to the full cache TTL (see _RECAP_CACHE_TTL_SECONDS).
