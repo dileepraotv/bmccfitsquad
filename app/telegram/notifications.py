@@ -14,6 +14,8 @@ Public API
 Template anatomy
 ----------------
   {emoji} {greeting}, {first_name} — new {sport} activity logged!
+  (Roast Mode, on by default: {emoji} {first_name}, {roast_or_kudos_line}
+   new {sport} activity logged. — see _roast_or_kudos_line())
   ─────────────────
   Athlete: …
   Activity: …
@@ -104,6 +106,102 @@ def _random_greeting() -> str:
     return random.choice(_GREETINGS)
 
 
+# ---------------------------------------------------------------------------
+# Roast Mode — on by default (per-user, via /roastmode), replaces the plain
+# "Nice one / Kudos to you / ..." greeting with a contextual line: a mild
+# roast for a short/light effort, or a kudos line for a solid one. Only
+# defined for the four core distance sports below; anything else (Yoga,
+# Racket Sports, Strength Training, Hiking, ...) keeps the plain greeting
+# regardless of the user's Roast Mode setting, since no threshold is defined.
+# ---------------------------------------------------------------------------
+
+# Below this distance → roast; at/above → kudos. Keyed by SPORT_ACTIVITY_TYPES
+# bucket name (not raw Strava type) — see _roast_bucket_for_type() below.
+_ROAST_THRESHOLDS_M: dict[str, float] = {
+    "Ride": 50_000,
+    "Run": 10_000,
+    "Swim": 1_500,
+    "Walk": 5_000,
+}
+
+# Raw Strava activity_type -> bucket name, built once from the shared sport
+# taxonomy so this stays in sync with SPORT_ACTIVITY_TYPES automatically.
+_ROAST_BUCKET_BY_TYPE: dict[str, str] = {
+    raw_type: bucket
+    for bucket in _ROAST_THRESHOLDS_M
+    for raw_type in SPORT_ACTIVITY_TYPES.get(bucket, [])
+}
+
+_ROAST_GENERAL: list[str] = [
+    "Only {value} {unit}? My grandma's dog walk was longer 😏",
+    "{value} {unit}, huh? Bold of you to call that cardio.",
+    "That was less a workout, more a warm-up for the warm-up.",
+    "Congrats, you've officially out-walked your couch.",
+    "I've seen coffee breaks with more mileage.",
+]
+
+_ROAST_SPORT: dict[str, list[str]] = {
+    "Run": [
+        "That 'run' had more walking breaks than a mall food court.",
+        "Marathon training? More like light jogging with commitment issues.",
+    ],
+    "Ride": [
+        "Your average speed suggests the bike was doing you a favor.",
+        "That's not a ride, that's a scenic bike-shaped stroll.",
+    ],
+    "Swim": [
+        "Did you swim it or float there thinking about lunch?",
+        "That lap count says 'effort,' your pace says 'floatation device.'",
+    ],
+    "Walk": [
+        "A 'walk' that short barely counts as leaving the building.",
+        "Technically movement. Generously, exercise.",
+    ],
+}
+
+_KUDOS_GENERAL: list[str] = [
+    "That's not a workout, that's a statement. 💪",
+    "Distance like that doesn't happen by accident.",
+    "You didn't just log an activity, you logged a flex.",
+    "That's the kind of effort Strava screenshots are made of.",
+    "That's a certified good one. 🙌",
+    "Solid effort, no notes.",
+    "Textbook. Absolutely textbook.",
+    "That's the standard now — good luck topping it.",
+]
+
+_KUDOS_SPORT: dict[str, list[str]] = {
+    "Run": ["That run had 'no bad days' energy."],
+    "Ride": ["That ride had more power than patience — love it."],
+    "Swim": ["Smooth, strong, and barely made a splash. Class act."],
+    "Walk": ["Not every step needs to be a sprint — that was a solid, honest effort."],
+}
+
+
+def _roast_or_kudos_line(activity_type: str, distance_m: float | int | None) -> str | None:
+    """Pick a contextual roast/kudos line for this activity, or None if this
+    sport has no defined distance threshold (caller falls back to the plain
+    rotating greeting in that case)."""
+    bucket = _ROAST_BUCKET_BY_TYPE.get(activity_type)
+    if bucket is None:
+        return None
+
+    threshold_m = _ROAST_THRESHOLDS_M[bucket]
+    distance_m = distance_m or 0
+
+    if distance_m < threshold_m:
+        pool = _ROAST_GENERAL + _ROAST_SPORT.get(bucket, [])
+        line = random.choice(pool)
+        if bucket == "Swim":
+            value, unit = int(distance_m), "m"
+        else:
+            value, unit = round(distance_m / 1_000), "km"
+        return line.format(value=value, unit=unit)
+
+    pool = _KUDOS_GENERAL + _KUDOS_SPORT.get(bucket, [])
+    return random.choice(pool)
+
+
 _SWIM_TYPES = {"Swim", "OpenWaterSwim"}
 
 # Raw Strava activity_type strings with no meaningful GPS distance (Yoga,
@@ -168,6 +266,7 @@ async def format_activity_notification(
     activity: dict,
     athlete_name: str,
     goal_lines: list[tuple[str, str]] | None = None,
+    roast_mode_enabled: bool = True,
 ) -> str:
     """Format a raw Strava activity dict into a BMCC Telegram notification."""
     activity_type: str = activity.get("sport_type") or activity.get("type") or "Unknown"
@@ -189,10 +288,18 @@ async def format_activity_notification(
     # unstyled, since wrapping a markdown link in `code` would print the
     # raw "[text](url)" instead of rendering it as tappable.
     # ------------------------------------------------------------------
-    greeting   = _random_greeting()
     sport_word = _friendly_sport_word(activity_type)
+    roast_line = (
+        _roast_or_kudos_line(activity_type, activity.get("distance"))
+        if roast_mode_enabled
+        else None
+    )
+    if roast_line:
+        header = f"{emoji} *{first_name}, {roast_line} new {sport_word} activity logged.*"
+    else:
+        header = f"{emoji} *{_random_greeting()}, {first_name} — new {sport_word} activity logged!*"
     lines: list[str] = [
-        f"{emoji} *{greeting}, {first_name} — new {sport_word} activity logged!*",
+        header,
         _SEPARATOR,
         f"`Athlete : {athlete_name}`",
         f"`Activity` : {activity_link}",

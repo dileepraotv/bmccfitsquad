@@ -120,6 +120,7 @@ async def setup_bot() -> None:
         BotCommand("leaderboard",  "Monthly points leaderboard (multi-sport bonus)"),
         BotCommand("quote",        "Random motivational quote"),
         BotCommand("notifications", "How activity notifications are managed"),
+        BotCommand("roastmode",    "Toggle roast/kudos activity notifications"),
         BotCommand("cancel",       "Cancel any in-progress action"),
         BotCommand("skip",         "Skip the current step in an in-progress action"),
         BotCommand("help",         "Show all available commands"),

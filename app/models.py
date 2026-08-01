@@ -59,6 +59,10 @@ class User(Base):
 
     # Misc
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Opt-out (on by default) — swaps the activity notification's greeting
+    # for a contextual roast/kudos line based on distance vs sport threshold.
+    # See app.telegram.notifications for the selection logic.
+    roast_mode_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False
     )

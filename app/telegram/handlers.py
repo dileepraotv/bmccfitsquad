@@ -102,6 +102,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("skip",          cmd_skip,          filters=_priv))
     app.add_handler(CommandHandler("leaderboard",   cmd_leaderboard,   filters=_priv))
     app.add_handler(CommandHandler("notifications", cmd_notifications, filters=_priv))
+    app.add_handler(CommandHandler("roastmode",     cmd_roastmode,     filters=_priv))
     app.add_handler(CommandHandler("quote",         cmd_quote,         filters=_priv))
     app.add_handler(CommandHandler("recap",         cmd_recap,         filters=_priv))
     app.add_handler(CommandHandler("yearrecap",     cmd_yearrecap,     filters=_priv))
@@ -242,6 +243,7 @@ _HELP_TEXT = (
     "💬 *Other*\n"
     "/quote — Random motivational quote\n"
     "/notifications — How activity notifications are managed\n"
+    "/roastmode — Toggle roast/kudos activity notifications \\(on by default\\)\n"
     "/cancel — Cancel any in\\-progress action\n"
     "/skip — Skip the current step in an in\\-progress action\n"
     "/start — Welcome message and main menu\n"
@@ -694,6 +696,63 @@ async def cmd_notifications(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         "Ask a group admin to configure notifications in the group chat\\.",
         parse_mode="MarkdownV2",
     )
+
+
+async def cmd_roastmode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Toggle Roast Mode — on by default, swaps the activity notification's
+    greeting for a contextual roast (short effort) or kudos (solid effort)
+    line, for Ride/Run/Swim/Walk. Usage: /roastmode, /roastmode on, /roastmode off.
+    """
+    arg = (context.args[0].lower() if context.args else "").strip()
+
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(User).where(User.telegram_user_id == update.effective_user.id)
+            )
+            user = result.scalar_one_or_none()
+            if user is None:
+                await update.message.reply_text(
+                    "You haven't connected your Strava account yet\\. Use /connect to get started\\.",
+                    parse_mode="MarkdownV2",
+                )
+                return
+
+            if arg in ("on", "enable"):
+                user.roast_mode_enabled = True
+            elif arg in ("off", "disable"):
+                user.roast_mode_enabled = False
+            elif arg:
+                await update.message.reply_text("Usage: /roastmode on | off")
+                return
+            else:
+                user.roast_mode_enabled = not user.roast_mode_enabled
+
+            new_state = user.roast_mode_enabled
+            await db.commit()
+    except Exception:
+        logger.exception("cmd_roastmode: DB error")
+        await update.message.reply_text(
+            "Sorry, I couldn't reach the database right now. Please try again in a moment."
+        )
+        return
+
+    if new_state:
+        await update.message.reply_text(
+            "😏 Roast Mode is now *ON*\\.\n"
+            "Fall short of a sport's threshold \\(Ride < 50 km, Run < 10 km, "
+            "Swim < 1500 m, Walk < 5 km\\) and your next activity notification "
+            "will roast you a little\\. Clear it and you'll get a kudos line instead\\.\n"
+            "Turn it off anytime with /roastmode off\\.",
+            parse_mode="MarkdownV2",
+        )
+    else:
+        await update.message.reply_text(
+            "🙂 Roast Mode is now *OFF*\\. Activity notifications will go back "
+            "to the plain \"Nice one / Kudos to you / Amazing\\.\\.\\.\" greeting\\.\n"
+            "Turn it back on anytime with /roastmode on\\.",
+            parse_mode="MarkdownV2",
+        )
 
 
 async def cmd_quote(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

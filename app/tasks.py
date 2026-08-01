@@ -123,7 +123,10 @@ async def _send_activity_notification_async(
 
         goal_lines = await _build_goal_lines(db, user)
         text = await format_activity_notification(
-            activity_data, athlete_name, goal_lines=goal_lines
+            activity_data,
+            athlete_name,
+            goal_lines=goal_lines,
+            roast_mode_enabled=user.roast_mode_enabled,
         )
 
         activity_id = activity_data.get("id")
