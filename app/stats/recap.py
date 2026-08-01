@@ -546,7 +546,52 @@ def _idx_jalebi(total_kcal: float, period_word: str) -> str | None:
     return f"🍩 *The Jalebi Index*: {int(round(total_kcal)):,} calories burned this {period_word} — that's roughly {n} {noun}."
 
 
-_CALORIE_INDEX_BUILDERS = [_idx_pizza, _idx_burger, _idx_chai, _idx_chocolate, _idx_thali, _idx_beer, _idx_jalebi]
+def _idx_samosa(total_kcal: float, period_word: str) -> str | None:
+    n = max(1, round(total_kcal / 150))
+    noun = "samosa" if n == 1 else "samosas"
+    return f"🥟 *The Samosa Index*: You burned {int(round(total_kcal)):,} calories this {period_word} — that's about {n} {noun}, chutney included."
+
+
+def _idx_vadapav(total_kcal: float, period_word: str) -> str | None:
+    n = max(1, round(total_kcal / 300))
+    noun = "vada pav" if n == 1 else "vada pavs"
+    return f"🍔 *The Vada Pav Index*: {int(round(total_kcal)):,} calories burned this {period_word} — that's {n} {noun}, Mumbai's finest fuel."
+
+
+def _idx_dosa(total_kcal: float, period_word: str) -> str | None:
+    n = max(1, round(total_kcal / 350))
+    noun = "masala dosa" if n == 1 else "masala dosas"
+    return f"🥞 *The Dosa Index*: {int(round(total_kcal)):,} calories burned this {period_word} — that's {n} {noun}, sambar and all."
+
+
+def _idx_biryani(total_kcal: float, period_word: str) -> str | None:
+    n = max(1, round(total_kcal / 650))
+    noun = "plate of biryani" if n == 1 else "plates of biryani"
+    return f"🍚 *The Biryani Index*: {int(round(total_kcal)):,} calories burned this {period_word} — that's {n} full {noun}. Hyderabadi, obviously."
+
+
+def _idx_ladoo(total_kcal: float, period_word: str) -> str | None:
+    n = max(1, round(total_kcal / 180))
+    noun = "ladoo" if n == 1 else "ladoos"
+    return f"🍬 *The Ladoo Index*: {int(round(total_kcal)):,} calories burned this {period_word} — that's {n} {noun} — festival-season guilt-free."
+
+
+def _idx_gulabjamun(total_kcal: float, period_word: str) -> str | None:
+    n = max(1, round(total_kcal / 150))
+    noun = "gulab jamun" if n == 1 else "gulab jamuns"
+    return f"🍯 *The Gulab Jamun Index*: {int(round(total_kcal)):,} calories burned this {period_word} — that's {n} {noun} swimming in syrup."
+
+
+def _idx_filtercoffee(total_kcal: float, period_word: str) -> str | None:
+    n = max(1, round(total_kcal / 60))
+    noun = "cup" if n == 1 else "cups"
+    return f"☕ *The Filter Coffee Index*: {int(round(total_kcal)):,} calories burned this {period_word} — that's {n} {noun} of filter kaapi, tumbler-and-davara style."
+
+
+_CALORIE_INDEX_BUILDERS = [
+    _idx_pizza, _idx_burger, _idx_chai, _idx_chocolate, _idx_thali, _idx_beer, _idx_jalebi,
+    _idx_samosa, _idx_vadapav, _idx_dosa, _idx_biryani, _idx_ladoo, _idx_gulabjamun, _idx_filtercoffee,
+]
 
 
 def _idx_commute(total_km: float, elevation_m: float, period_word: str) -> str | None:
@@ -592,10 +637,66 @@ def _idx_moonwalk(total_km: float, elevation_m: float, period_word: str) -> str 
     return f"🌕 *The Moonwalk Index*: You covered {total_km:.0f} km this {period_word} — at this rate, the Moon is only {years} years away."
 
 
-_DISTANCE_INDEX_BUILDERS = [_idx_commute, _idx_globe, _idx_everest, _idx_marathon, _idx_stadium]
-# Only makes sense at yearly scale — a monthly total projected to the Moon
-# always reads as an absurdly large number of years.
-_DISTANCE_INDEX_BUILDERS_YEARLY = _DISTANCE_INDEX_BUILDERS + [_idx_moonwalk]
+def _idx_mumbai_local(total_km: float, elevation_m: float, period_word: str) -> str | None:
+    if total_km <= 0:
+        return None
+    n = total_km / 120  # Churchgate–Virar round trip, ~60 km one-way
+    return f"🚆 *The Mumbai Local Index*: You covered {total_km:.0f} km this {period_word} — that's {n:.1f} Churchgate-to-Virar round trips."
+
+
+def _idx_golden_quad(total_km: float, elevation_m: float, period_word: str) -> str | None:
+    if total_km <= 0:
+        return None
+    pct = total_km / 5_846 * 100
+    return f"🛣️ *The Golden Quadrilateral Index*: {total_km:.0f} km covered this {period_word} — that's {pct:.0f}% of the Golden Quadrilateral (Delhi–Mumbai–Chennai–Kolkata highway loop)."
+
+
+def _idx_cricket_pitch(total_km: float, elevation_m: float, period_word: str) -> str | None:
+    if total_km <= 0:
+        return None
+    pitches = round(total_km * 1_000 / 20.12)
+    return f"🏏 *The Cricket Pitch Index*: {total_km:.0f} km covered this {period_word} — that's {pitches:,} cricket pitches laid end to end."
+
+
+def _idx_statue_of_unity(total_km: float, elevation_m: float, period_word: str) -> str | None:
+    if elevation_m <= 0:
+        return None
+    n = max(1, round(elevation_m / 182))
+    noun = "Statue of Unity height" if n == 1 else "Statue of Unity heights"
+    return f"🗿 *The Statue of Unity Index*: You climbed {int(round(elevation_m)):,} m of elevation this {period_word} — that's {n} {noun} (182 m), the tallest statue in the world."
+
+
+def _idx_qutub_minar(total_km: float, elevation_m: float, period_word: str) -> str | None:
+    if elevation_m <= 0:
+        return None
+    n = max(1, round(elevation_m / 73))
+    noun = "Qutub Minar" if n == 1 else "Qutub Minars"
+    return f"🕌 *The Qutub Minar Index*: {int(round(elevation_m)):,} m climbed this {period_word} — that's {n} {noun}, stacked on top of each other."
+
+
+def _idx_kedarnath(total_km: float, elevation_m: float, period_word: str) -> str | None:
+    if elevation_m <= 0:
+        return None
+    n = elevation_m / 1_500  # ~1,500 m gain over the Gaurikund–Kedarnath trek
+    return f"🏔️ *The Kedarnath Trek Index*: {int(round(elevation_m)):,} m of elevation gain this {period_word} — that's roughly {n:.1f} Kedarnath treks (~1,500 m gain over 16 km)."
+
+
+def _idx_kashmir_kanyakumari(total_km: float, elevation_m: float, period_word: str) -> str | None:
+    if total_km <= 0:
+        return None
+    pct = total_km / 3_700 * 100
+    return f"🇮🇳 *The Kashmir–Kanyakumari Index*: {total_km:.0f} km logged this {period_word} — that's {pct:.0f}% of the length of India, tip to tip."
+
+
+_DISTANCE_INDEX_BUILDERS = [
+    _idx_commute, _idx_globe, _idx_everest, _idx_marathon, _idx_stadium,
+    _idx_mumbai_local, _idx_golden_quad, _idx_cricket_pitch,
+    _idx_statue_of_unity, _idx_qutub_minar, _idx_kedarnath,
+]
+# Only makes sense at yearly scale — a monthly total projected to the Moon,
+# or a large % of India's length, always reads as an absurdly large/small
+# number at monthly scale.
+_DISTANCE_INDEX_BUILDERS_YEARLY = _DISTANCE_INDEX_BUILDERS + [_idx_moonwalk, _idx_kashmir_kanyakumari]
 
 
 def _idx_netflix(total_s: float, period_word: str) -> str | None:
@@ -628,7 +729,41 @@ def _idx_workday(total_s: float, period_word: str) -> str | None:
     return f"💼 *The Workday Index*: {_format_hm(total_s)} logged this {period_word} — that's {n:.1f} full work days spent moving instead of in meetings."
 
 
-_TIME_INDEX_BUILDERS = [_idx_netflix, _idx_bollywood, _idx_flight, _idx_workday]
+def _idx_ipl(total_s: float, period_word: str) -> str | None:
+    if total_s <= 0:
+        return None
+    n = max(1, round((total_s / 3600) / 3.5))
+    match = "IPL match" if n == 1 else "IPL matches"
+    return f"🏏 *The IPL Match Index*: You spent {_format_hm(total_s)} moving this {period_word} — that's {n} {match}, strategic timeouts included."
+
+
+def _idx_mumbai_commute(total_s: float, period_word: str) -> str | None:
+    if total_s <= 0:
+        return None
+    n = max(1, round((total_s / 3600) / 1.5))
+    trip = "one-way Mumbai office commute" if n == 1 else "one-way Mumbai office commutes"
+    return f"🚆 *The Mumbai Commute Index*: {_format_hm(total_s)} moving this {period_word} — that's {n} {trip}, except you were the one actually moving."
+
+
+def _idx_ramayan(total_s: float, period_word: str) -> str | None:
+    if total_s <= 0:
+        return None
+    n = max(1, round((total_s / 60) / 45))
+    ep = "episode" if n == 1 else "episodes"
+    return f"📺 *The Ramayan Rerun Index*: {_format_hm(total_s)} of activity this {period_word} — that's {n} {ep} of the 90s Ramayan, no ad breaks for you though."
+
+
+def _idx_test_match(total_s: float, period_word: str) -> str | None:
+    if total_s <= 0:
+        return None
+    n = (total_s / 3600) / 6
+    return f"🏟️ *The Test Match Day Index*: {_format_hm(total_s)} moving this {period_word} — that's {n:.1f} full days of Test cricket, tea break included."
+
+
+_TIME_INDEX_BUILDERS = [
+    _idx_netflix, _idx_bollywood, _idx_flight, _idx_workday,
+    _idx_ipl, _idx_mumbai_commute, _idx_ramayan, _idx_test_match,
+]
 
 
 def _pick_line(builders: list, *args) -> str | None:

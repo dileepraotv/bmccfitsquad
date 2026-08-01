@@ -103,7 +103,7 @@ def key_monthly_reconcile(user_id, period: str) -> str:
 # v11: recap switched from a rendered PNG card (image + separate caption) to
 # a single monospace text message — old image/caption key pairs are simply
 # abandoned rather than migrated.
-_RECAP_CACHE_VERSION = 14
+_RECAP_CACHE_VERSION = 15
 
 
 def key_recap_text(user_id, year: int, month: int) -> str:
