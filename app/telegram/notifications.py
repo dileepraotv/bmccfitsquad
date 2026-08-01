@@ -192,13 +192,19 @@ _ELEVATION_ROAST: list[str] = [
 ]
 
 # "Other Activities" (Yoga, Racket Sports, Strength Training, Hiking) have no
-# distance/pace threshold defined, so Roast Mode never roasts them — but a
-# solid time-on-feet effort still earns a kudos line instead of the plain
-# rotating greeting.
-_OTHER_SPORT_KUDOS_MIN_SECONDS = 30 * 60
+# distance/pace threshold defined, so they're judged on time instead: under
+# 30 minutes gets roasted, 30 minutes or more earns a kudos line.
+_OTHER_SPORT_ROAST_MAX_SECONDS = 30 * 60
 _OTHER_SPORT_RAW_TYPES: set[str] = {
     t for sport in OTHER_ACTIVITY_SPORTS for t in SPORT_ACTIVITY_TYPES.get(sport, [])
 }
+
+_OTHER_SPORT_ROAST: list[str] = [
+    "{minutes} minutes? That's a warm-up, not a session.",
+    "Blink and you'd have missed the whole workout.",
+    "That barely counts as showing up.",
+    "Short and not-so-sweet — give it a real effort next time.",
+]
 
 
 def _roast_or_kudos_line(
@@ -213,14 +219,19 @@ def _roast_or_kudos_line(
     Ride/Run/Swim/Walk are judged on distance vs. a per-sport threshold.
     Ride/Run/Walk additionally get roasted for a suspiciously flat route even
     if the distance itself clears the bar. Everything else ("Other
-    Activities") only ever gets a kudos line, and only past 30 minutes.
+    Activities") is judged on time: under 30 minutes is roasted, 30+ earns
+    a kudos line.
     """
     bucket = _ROAST_BUCKET_BY_TYPE.get(activity_type)
 
     if bucket is None:
-        if activity_type in _OTHER_SPORT_RAW_TYPES and (moving_time_s or 0) >= _OTHER_SPORT_KUDOS_MIN_SECONDS:
-            return random.choice(_KUDOS_GENERAL)
-        return None
+        if activity_type not in _OTHER_SPORT_RAW_TYPES:
+            return None
+        moving_time_s = moving_time_s or 0
+        if moving_time_s < _OTHER_SPORT_ROAST_MAX_SECONDS:
+            minutes = max(1, round(moving_time_s / 60))
+            return random.choice(_OTHER_SPORT_ROAST).format(minutes=minutes)
+        return random.choice(_KUDOS_GENERAL)
 
     threshold_m = _ROAST_THRESHOLDS_M[bucket]
     distance_m = distance_m or 0
