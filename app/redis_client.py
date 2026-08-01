@@ -97,20 +97,29 @@ def key_monthly_reconcile(user_id, period: str) -> str:
     return f"reconcile:monthly:{user_id}:{period}"
 
 
-# Bump this whenever render_recap_text()'s output format changes so stale
-# cached renders from before the change are transparently bypassed instead
-# of being served for up to the full cache TTL (see _RECAP_CACHE_TTL_SECONDS).
-# v11: recap switched from a rendered PNG card (image + separate caption) to
-# a single monospace text message — old image/caption key pairs are simply
-# abandoned rather than migrated.
-_RECAP_CACHE_VERSION = 15
+# Recap text is no longer cached (see app/stats/recap.py) — removed
+# key_recap_text/key_yearly_recap_text/_RECAP_CACHE_VERSION.
 
 
-def key_recap_text(user_id, year: int, month: int) -> str:
-    """Cached recap message text for one user + calendar month."""
-    return f"recap:v{_RECAP_CACHE_VERSION}:text:{user_id}:{year}-{month:02d}"
+# Shared TTL for the rendered /leaderboard text — a shared, expensive
+# aggregation with no per-user staleness concern, so a short blanket
+# expiry (rather than event-based invalidation) is the simplest fit.
+_LEADERBOARD_CACHE_TTL_SECONDS = 180
 
 
-def key_yearly_recap_text(user_id, year: int) -> str:
-    """Cached yearly recap message text for one user + year."""
-    return f"yearrecap:v{_RECAP_CACHE_VERSION}:text:{user_id}:{year}"
+def key_leaderboard(month_key: str) -> str:
+    """Cached rendered leaderboard text for one calendar month ("YYYY-MM")."""
+    return f"leaderboard:v1:{month_key}"
+
+
+# Short TTL: the same per-goal achieved-count query is run independently by
+# both the activity-notification goal footer and the /goals status screen,
+# often within seconds of each other. A new activity for that user always
+# recomputes (and re-caches) a fresh count immediately, so this rarely
+# serves anything more than a few seconds stale.
+_GOAL_COUNT_CACHE_TTL_SECONDS = 60
+
+
+def key_goal_count(goal_id) -> str:
+    """Cached achieved-activity-count for one goal's current period."""
+    return f"goal:count:v1:{goal_id}"

@@ -14,8 +14,13 @@ Public API
 
   get_or_build_recap(db, user, year, month) -> str
   get_or_build_yearly_recap(db, user, year) -> str
-      Cached (Redis, short TTL) end-to-end text message for the athlete —
-      the value used directly as the Telegram message body.
+      Fetch-and-compute end-to-end text message for the athlete — the
+      value used directly as the Telegram message body. Not cached: once
+      recap rendering stopped being an image-render step, the only real
+      cost left is the DB aggregation itself, and a short-TTL cache barely
+      protects against that (see git history for the caching this
+      replaced, and app/models.py for the (user_id, activity_date) index
+      that keeps that aggregation cheap).
 
   month_bounds(year, month) -> tuple[datetime, datetime]
       UTC (start, end-exclusive) bounds for a calendar month.
@@ -36,15 +41,6 @@ from app.utils import SPORT_ACTIVITY_TYPES as _SPORT_ACTIVITY_TYPES
 from app.utils import format_kv_lines
 
 logger = logging.getLogger(__name__)
-
-# Deliberately short — this exists purely to absorb an accidental double-tap
-# of /recap or /yearrecap (or the scheduled send immediately followed by a
-# manual check within the same minute), not to avoid the underlying cost.
-# The DB aggregation only hits our own indexed Postgres tables (no Strava API
-# calls, no external quota at risk) and text formatting is essentially free,
-# so there's no real cost benefit to caching longer — and a long TTL only
-# creates a class of "why hasn't this updated" bugs.
-_RECAP_CACHE_TTL_SECONDS = 60
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -116,63 +112,22 @@ def next_month_name(year: int, month: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Cached fetch — a completed month's/year's recap never changes once
-# generated, so repeat requests (manual re-runs, the scheduled send picking
-# up a period a user already peeked at) reuse the same text instead of
-# paying the DB aggregation cost again.
+# Fetch-and-compute — no caching layer. Each call re-aggregates from
+# Postgres; the (user_id, activity_date) index keeps that cheap, and a
+# rendered recap has no shelf life worth protecting with a cache.
 # ---------------------------------------------------------------------------
 
 async def get_or_build_recap(db: AsyncSession, user: User, year: int, month: int) -> str:
-    """Return the full recap message text for this user + month, using the
-    Redis cache when available and populating it otherwise."""
-    from app.redis_client import get_redis, key_recap_text
-
-    redis = await get_redis()
-    key = key_recap_text(user.id, year, month)
-
-    cached = await redis.get(key)
-    if cached:
-        return cached
-
+    """Return the full recap message text for this user + month."""
     data = await compute_monthly_recap(db, user, year, month)
     upcoming = next_month_name(year, month)
-    text = build_recap_message(data, user.telegram_first_name or "there", upcoming)
-
-    try:
-        await redis.set(key, text, ex=_RECAP_CACHE_TTL_SECONDS)
-    except Exception:
-        logger.warning("recap cache: failed to write cache for %s", key)
-
-    return text
+    return build_recap_message(data, user.telegram_first_name or "there", upcoming)
 
 
 async def get_or_build_yearly_recap(db: AsyncSession, user: User, year: int) -> str:
-    """Return the full yearly recap message text for this user + year, using
-    the Redis cache when available and populating it otherwise.
-
-    With only a 1-minute TTL (see _RECAP_CACHE_TTL_SECONDS), an in-progress
-    /yearrecap preview and a genuinely completed year can safely share the
-    same short-lived cache — there's no realistic way a preview taken
-    months earlier is still sitting in the cache by the time the real
-    scheduled send happens on 31 December."""
-    from app.redis_client import get_redis, key_yearly_recap_text
-
-    redis = await get_redis()
-    key = key_yearly_recap_text(user.id, year)
-
-    cached = await redis.get(key)
-    if cached:
-        return cached
-
+    """Return the full yearly recap message text for this user + year."""
     data = await compute_yearly_recap(db, user, year)
-    text = build_recap_message(data, user.telegram_first_name or "there", str(year + 1))
-
-    try:
-        await redis.set(key, text, ex=_RECAP_CACHE_TTL_SECONDS)
-    except Exception:
-        logger.warning("recap cache: failed to write cache for %s", key)
-
-    return text
+    return build_recap_message(data, user.telegram_first_name or "there", str(year + 1))
 
 
 # ---------------------------------------------------------------------------

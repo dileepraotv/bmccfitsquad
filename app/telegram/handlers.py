@@ -22,7 +22,7 @@ import random
 import uuid as _uuid_mod
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import and_, case, func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.ext import (
@@ -505,8 +505,41 @@ def _leaderboard_metric_display(sport: str, value: float) -> str:
 
 
 async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/leaderboard — a shared, month-wide aggregation across every member,
+    so (unlike per-user data such as /stats or /recap) the exact same
+    rendered text is correct for whoever asks. Cached for a few minutes:
+    high payoff for negligible staleness, since several members often check
+    it in quick succession after group activity."""
+    now = datetime.now(timezone.utc)
+    month_key = f"{now.year}-{now.month:02d}"
+
+    from app.redis_client import _LEADERBOARD_CACHE_TTL_SECONDS, get_redis, key_leaderboard
+
+    redis = await get_redis()
+    cache_key = key_leaderboard(month_key)
+    try:
+        cached = await redis.get(cache_key)
+    except Exception:
+        cached = None
+    if cached:
+        await update.message.reply_text(cached, parse_mode="MarkdownV2")
+        return
+
+    text = await _build_leaderboard_text(now)
+
+    try:
+        await redis.set(cache_key, text, ex=_LEADERBOARD_CACHE_TTL_SECONDS)
+    except Exception:
+        logger.warning("leaderboard cache: failed to write cache for %s", cache_key)
+
+    await update.message.reply_text(text, parse_mode="MarkdownV2")
+
+
+async def _build_leaderboard_text(now: datetime) -> str:
+    """Compute the full /leaderboard message text for the calendar month
+    containing *now*. Pulled out of cmd_leaderboard so the cache-miss path
+    only touches the DB, never the Telegram Update object."""
     async with AsyncSessionLocal() as db:
-        now = datetime.now(timezone.utc)
         month_start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
 
         sport_sums = [
@@ -532,11 +565,7 @@ async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         entries = rows.all()
 
     if not entries:
-        await update.message.reply_text(
-            "🏆 No activity recorded this month yet\\.\nConnect Strava with /connect and get riding\\!",
-            parse_mode="MarkdownV2",
-        )
-        return
+        return "🏆 No activity recorded this month yet\\.\nConnect Strava with /connect and get riding\\!"
 
     board = []
     for first_name, athlete_name, *raw_values in entries:
@@ -564,11 +593,7 @@ async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         })
 
     if not board:
-        await update.message.reply_text(
-            "🏆 No activity recorded this month yet\\.\nConnect Strava with /connect and get riding\\!",
-            parse_mode="MarkdownV2",
-        )
-        return
+        return "🏆 No activity recorded this month yet\\.\nConnect Strava with /connect and get riding\\!"
 
     board.sort(key=lambda e: e["total_points"], reverse=True)
     board = board[:10]
@@ -617,7 +642,7 @@ async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"{per_30min_lines}\n\n"
         "_Multi\\-sport bonus: 2 sports \\+5% · 3 sports \\+10% · 4\\+ sports \\+15%_"
     )
-    await update.message.reply_text("\n".join(lines), parse_mode="MarkdownV2")
+    return "\n".join(lines)
 
 
 async def cmd_recap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -840,37 +865,10 @@ def _sport_display_label(activity_type: str) -> str:
 # Sport → Strava activity_type mapping now lives in app.utils.SPORT_ACTIVITY_TYPES
 # (imported above as _SPORT_ACTIVITY_TYPES) so goal progress always counts the
 # same activities as /stats and the notification goal-progress footer.
-
-def _parse_category_threshold(category: str) -> float:
-    """Convert a stored category string to minimum metres for activity counting.
-
-    Examples:
-        "100 km"  → 100_000.0
-        "1500 m"  → 1_500.0
-        "21.1 km" → 21_100.0
-    Falls back to 0 if unparseable so all activities of that type are counted.
-    """
-    try:
-        parts = category.strip().split()
-        val = float(parts[0].replace(",", "."))
-        unit = parts[1].lower() if len(parts) > 1 else "km"
-        return val * 1_000 if unit == "km" else val
-    except (IndexError, ValueError):
-        return 0.0
-
-
-def _parse_duration_threshold_s(category: str) -> float:
-    """Convert a stored duration category string like "30 min" to seconds.
-
-    Used for the "Other Activities" sports (Yoga, Racket Sports, Strength
-    Training) which have no meaningful GPS distance. Falls back to 0 if
-    unparseable so all activities of that type are counted.
-    """
-    try:
-        val = float(category.strip().split()[0].replace(",", "."))
-        return val * 60
-    except (IndexError, ValueError):
-        return 0.0
+#
+# Threshold parsing + achieved-count querying (_parse_category_threshold,
+# _parse_duration_threshold_s) now live once in app.tasks, shared via
+# get_goal_achieved_count() — see its use in _show_goal_status below.
 
 _GOAL_PERIODS = [
     "This Month",
@@ -1388,39 +1386,10 @@ async def _show_goal_status(query) -> None:
             "",
         ]
 
+        from app.tasks import get_goal_achieved_count
+
         for g in goals:
-            start_dt = datetime(
-                g.start_date.year, g.start_date.month, g.start_date.day, tzinfo=timezone.utc
-            )
-            # end_date is inclusive (last day of period); add 1 day for exclusive SQL upper bound
-            end_dt = datetime(
-                g.end_date.year, g.end_date.month, g.end_date.day, tzinfo=timezone.utc
-            ) + timedelta(days=1)
-            act_types = _SPORT_ACTIVITY_TYPES.get(g.activity_type, [g.activity_type])
-
-            # Duration-based sports (Yoga, Racket Sports, Strength Training) have
-            # no meaningful GPS distance — compare moving time instead of km/m.
-            if g.activity_type in _DURATION_BASED_SPORTS:
-                threshold_s = _parse_duration_threshold_s(g.category)
-                metric_filter = Activity.moving_time_seconds >= threshold_s
-            else:
-                # Parse threshold from stored category string, e.g. "100 km" → 100_000 m
-                threshold_m = _parse_category_threshold(g.category)
-                metric_filter = Activity.distance_meters >= threshold_m
-
-            count_result = await db.execute(
-                select(func.count(Activity.id))
-                .where(
-                    and_(
-                        Activity.user_id == user.id,
-                        Activity.activity_type.in_(act_types),
-                        Activity.activity_date >= start_dt,
-                        Activity.activity_date < end_dt,
-                        metric_filter,
-                    )
-                )
-            )
-            achieved = count_result.scalar_one() or 0
+            achieved = await get_goal_achieved_count(db, user, g)
             pct = min(100, round(achieved / g.target_count * 100))
 
             # Compact progress bar — 10 segments
@@ -1904,6 +1873,11 @@ async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TY
                 group.notifications_enabled = False
                 await db.commit()
             logger.info("Group chat deactivated: chat_id=%s", chat.id)
+
+    # Invalidate the in-process notification group-chat cache (app/tasks.py)
+    # so the next activity notification doesn't broadcast to a stale list.
+    import app.tasks as _tasks
+    _tasks._group_chats_cache = None
 
 
 # ---------------------------------------------------------------------------

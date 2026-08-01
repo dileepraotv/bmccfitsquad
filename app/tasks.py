@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -58,6 +59,33 @@ def fire_and_forget(coro) -> asyncio.Task:
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
     return task
+
+
+# ---------------------------------------------------------------------------
+# In-process GroupChat cache
+# ---------------------------------------------------------------------------
+# The notification-enabled group chat list changes only when someone
+# explicitly adds/removes the bot or toggles notifications — essentially
+# never compared to how often it's read (every single new activity). A
+# plain module-level cache (not Redis) is enough since it only needs to be
+# correct within one process, and skips a network round-trip entirely
+# rather than trading a Postgres query for a Redis one.
+
+_group_chats_cache: list[GroupChat] | None = None
+_group_chats_cache_at: float = 0.0
+_GROUP_CHATS_CACHE_TTL_S = 300
+
+
+async def _get_notification_group_chats(db) -> list[GroupChat]:
+    global _group_chats_cache, _group_chats_cache_at
+    now = time.monotonic()
+    if _group_chats_cache is not None and (now - _group_chats_cache_at) < _GROUP_CHATS_CACHE_TTL_S:
+        return _group_chats_cache
+
+    result = await db.execute(select(GroupChat).where(GroupChat.notifications_enabled.is_(True)))
+    _group_chats_cache = list(result.scalars().all())
+    _group_chats_cache_at = now
+    return _group_chats_cache
 
 
 # ---------------------------------------------------------------------------
@@ -116,10 +144,7 @@ async def _send_activity_notification_async(
             or f"Athlete {user.telegram_user_id}"
         )
 
-        chats_result = await db.execute(
-            select(GroupChat).where(GroupChat.notifications_enabled.is_(True))
-        )
-        group_chats: list[GroupChat] = chats_result.scalars().all()
+        group_chats: list[GroupChat] = await _get_notification_group_chats(db)
 
         goal_lines = await _build_goal_lines(db, user)
         text = await format_activity_notification(
@@ -663,6 +688,65 @@ def _sport_display_label(activity_type: str) -> str:
     return _SPORT_TYPE_MAP_REVERSE.get(activity_type, activity_type)
 
 
+async def get_goal_achieved_count(db, user: User, goal: Goal) -> int:
+    """Count of activities satisfying *goal* so far this period.
+
+    Cached briefly per-goal (see key_goal_count) since this exact query is
+    run independently by both the activity-notification goal footer
+    (_build_goal_lines, below) and the /goals status screen
+    (handlers._show_goal_status) — often within seconds of each other for
+    the same goal. A fresh activity for this user always recomputes and
+    re-caches before the cache is read again, so staleness in practice is
+    bounded by the TTL, not by "did an activity get added since".
+    """
+    from app.redis_client import get_redis, key_goal_count
+    from app.redis_client import _GOAL_COUNT_CACHE_TTL_SECONDS as _TTL
+
+    redis = await get_redis()
+    cache_key = key_goal_count(goal.id)
+    try:
+        cached = await redis.get(cache_key)
+        if cached is not None:
+            return int(cached)
+    except Exception:
+        pass
+
+    start_dt = datetime(
+        goal.start_date.year, goal.start_date.month, goal.start_date.day, tzinfo=timezone.utc
+    )
+    end_dt = datetime(
+        goal.end_date.year, goal.end_date.month, goal.end_date.day, tzinfo=timezone.utc
+    ) + timedelta(days=1)
+    act_types = _SPORT_ACTIVITY_TYPES.get(goal.activity_type, [goal.activity_type])
+
+    if goal.activity_type in _DURATION_BASED_SPORTS:
+        threshold_s = _parse_duration_threshold_s(goal.category)
+        metric_filter = Activity.moving_time_seconds >= threshold_s
+    else:
+        threshold_m = _parse_category_threshold(goal.category)
+        metric_filter = Activity.distance_meters >= threshold_m
+
+    count_result = await db.execute(
+        select(func.count(Activity.id)).where(
+            and_(
+                Activity.user_id == user.id,
+                Activity.activity_type.in_(act_types),
+                Activity.activity_date >= start_dt,
+                Activity.activity_date < end_dt,
+                metric_filter,
+            )
+        )
+    )
+    achieved = count_result.scalar_one() or 0
+
+    try:
+        await redis.set(cache_key, str(achieved), ex=_TTL)
+    except Exception:
+        logger.warning("goal count cache: failed to write cache for goal_id=%s", goal.id)
+
+    return achieved
+
+
 async def _build_goal_lines(db, user: User) -> list[tuple[str, str]]:
     """Return (label, value) pairs for the notification's goal-progress
     footer — e.g. ("🧘 Yoga 30 min", "3/8") — so they render as an aligned
@@ -676,34 +760,7 @@ async def _build_goal_lines(db, user: User) -> list[tuple[str, str]]:
 
     lines: list[tuple[str, str]] = []
     for i, g in enumerate(goals, start=1):
-        start_dt = datetime(
-            g.start_date.year, g.start_date.month, g.start_date.day, tzinfo=timezone.utc
-        )
-        end_dt = datetime(
-            g.end_date.year, g.end_date.month, g.end_date.day, tzinfo=timezone.utc
-        ) + timedelta(days=1)
-
-        act_types = _SPORT_ACTIVITY_TYPES.get(g.activity_type, [g.activity_type])
-
-        if g.activity_type in _DURATION_BASED_SPORTS:
-            threshold_s = _parse_duration_threshold_s(g.category)
-            metric_filter = Activity.moving_time_seconds >= threshold_s
-        else:
-            threshold_m = _parse_category_threshold(g.category)
-            metric_filter = Activity.distance_meters >= threshold_m
-
-        count_result = await db.execute(
-            select(func.count(Activity.id)).where(
-                and_(
-                    Activity.user_id == user.id,
-                    Activity.activity_type.in_(act_types),
-                    Activity.activity_date >= start_dt,
-                    Activity.activity_date < end_dt,
-                    metric_filter,
-                )
-            )
-        )
-        achieved = count_result.scalar_one() or 0
+        achieved = await get_goal_achieved_count(db, user, g)
 
         sport_label = _sport_display_label(g.activity_type)
         sport_emoji = {
@@ -797,6 +854,12 @@ async def _sync_recent_activities_for_user(
     both need the exact same "fetch, dedup, insert, notify" pipeline, just
     triggered for different reasons (hence the *source* label in logs).
 
+    Batches the dedup checks (one pipelined Redis round-trip + one DB query
+    for the whole page of activities, instead of one Redis EXISTS + one DB
+    session per activity) since this is the hot path during an outage-gap
+    catchup, where a single tick can be processing many missed activities
+    across many users against a 5-connection Postgres pool.
+
     Returns (activities_seen, new_activities_inserted).
     """
     from app.redis_client import key_activity_seen
@@ -809,20 +872,37 @@ async def _sync_recent_activities_for_user(
         user_id_str = str(user_db.id)
 
     activities = await fetch_activities(access_token, after=after_ts)
+    if not activities:
+        return (0, 0)
+
+    strava_ids = [int(a["id"]) for a in activities]
+    dedup_keys = [key_activity_seen(sid) for sid in strava_ids]
+    try:
+        pipe = redis.pipeline()
+        for k in dedup_keys:
+            pipe.exists(k)
+        seen_flags = await pipe.execute()
+    except Exception:
+        logger.warning("catchup_sync[%s]: batched dedup check failed, falling back to no pre-filter", source)
+        seen_flags = [False] * len(dedup_keys)
+    already_seen_ids = {sid for sid, flag in zip(strava_ids, seen_flags) if flag}
+
+    candidates = [a for a in activities if int(a["id"]) not in already_seen_ids]
+    if not candidates:
+        return (len(activities), 0)
+
     new_count = 0
-
-    for data in activities:
-        strava_id = int(data["id"])
-        dedup_key = key_activity_seen(strava_id)
-
-        if await redis.exists(dedup_key):
-            continue
-
-        async with AsyncSessionLocal() as db:
-            existing = await db.execute(
-                select(Activity.id).where(Activity.strava_activity_id == strava_id)
+    async with AsyncSessionLocal() as db:
+        existing_rows = await db.execute(
+            select(Activity.strava_activity_id).where(
+                Activity.strava_activity_id.in_([int(a["id"]) for a in candidates])
             )
-            if existing.scalar_one_or_none() is not None:
+        )
+        already_in_db = {row[0] for row in existing_rows}
+
+        for data in candidates:
+            strava_id = int(data["id"])
+            if strava_id in already_in_db:
                 continue
 
             activity_date = _parse_strava_date(
@@ -865,19 +945,23 @@ async def _sync_recent_activities_for_user(
                 exclude_strava_id=strava_id,
             )
 
-        await redis.set(dedup_key, "1", ex=_DEDUP_TTL_SECONDS, nx=True)
-        fire_and_forget(send_activity_notification(activity_data=data, user_id=user_id_str))
-        if possible_duplicate is not None:
-            fire_and_forget(send_possible_duplicate_alert(
-                user_id=user_id_str,
-                strava_ids=[possible_duplicate.strava_activity_id, strava_id],
-                activity_type=data.get("sport_type") or data.get("type") or "Unknown",
-            ))
-        new_count += 1
-        logger.info(
-            "catchup_sync[%s]: notifying missed activity strava_id=%s user_id=%s",
-            source, strava_id, user_id_str,
-        )
+            dedup_key = key_activity_seen(strava_id)
+            try:
+                await redis.set(dedup_key, "1", ex=_DEDUP_TTL_SECONDS, nx=True)
+            except Exception:
+                logger.warning("catchup_sync[%s]: failed to set dedup key for strava_id=%s", source, strava_id)
+            fire_and_forget(send_activity_notification(activity_data=data, user_id=user_id_str))
+            if possible_duplicate is not None:
+                fire_and_forget(send_possible_duplicate_alert(
+                    user_id=user_id_str,
+                    strava_ids=[possible_duplicate.strava_activity_id, strava_id],
+                    activity_type=data.get("sport_type") or data.get("type") or "Unknown",
+                ))
+            new_count += 1
+            logger.info(
+                "catchup_sync[%s]: notifying missed activity strava_id=%s user_id=%s",
+                source, strava_id, user_id_str,
+            )
 
     return (len(activities), new_count)
 

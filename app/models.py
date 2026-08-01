@@ -13,6 +13,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     Text,
 )
@@ -94,6 +95,16 @@ class Activity(Base):
     """A Strava activity that has been synced for a user."""
 
     __tablename__ = "activities"
+    __table_args__ = (
+        # Backs stats/goals/recap: per-user date-range aggregation
+        # (activity_date filtered/ordered within one user_id).
+        Index("ix_activities_user_id_activity_date", "user_id", "activity_date"),
+        # Backs the leaderboard: a date-range scan across *all* users
+        # (activity_date >= month_start, grouped by user) with no user_id
+        # filter, so it needs activity_date leading rather than user_id.
+        # See alembic/versions/0004_activity_date_index.py.
+        Index("ix_activities_activity_date", "activity_date"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=_uuid
