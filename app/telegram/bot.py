@@ -110,7 +110,7 @@ async def setup_bot() -> None:
         BotCommand("start",        "Welcome message and main menu"),
         BotCommand("stats",        "View activity stats by sport and period"),
         BotCommand("goals",        "Set, delete or check your fitness goals"),
-        BotCommand("recap",        "Your most recently completed month, recapped"),
+        BotCommand("recap",        "This month's stats so far, recapped"),
         BotCommand("yearrecap",    "Preview your year in review so far"),
         BotCommand("sync",         "Fetch latest activities (fast, day-to-day)"),
         BotCommand("fullsync",     "Rebuild full history (use if stats look wrong)"),

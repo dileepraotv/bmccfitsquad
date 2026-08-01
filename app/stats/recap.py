@@ -1,30 +1,30 @@
-"""Monthly recap: data aggregation + rendered card image.
+"""Monthly/yearly recap: data aggregation + monospace Telegram text message.
 
 Public API
 ----------
   compute_monthly_recap(db, user, year, month) -> dict
-      Aggregates Ride/Run/Walk/Swim distance + count for the given calendar
-      month, trend vs the previous month, any new personal records set that
-      month, and the athlete's current activity streak as of month end.
+      Aggregates Ride/Run/Walk/Swim/"Other Activities" distance, elevation,
+      moving time, and calories for the given calendar month (up to *now* if
+      the month is still in progress), trend vs the previous month, any new
+      personal records set that period, and the athlete's current activity
+      streak as of the period end.
 
-  render_recap_card(data: dict) -> bytes
-      Renders the recap dict into a PNG card (dark background, BMCC crest
-      watermark, one row per sport, a highlights strip for PRs/streaks).
+  compute_yearly_recap(db, user, year) -> dict
+      Same shape as compute_monthly_recap, trended against the prior year.
+
+  get_or_build_recap(db, user, year, month) -> str
+  get_or_build_yearly_recap(db, user, year) -> str
+      Cached (Redis, short TTL) end-to-end text message for the athlete —
+      the value used directly as the Telegram message body.
 
   month_bounds(year, month) -> tuple[datetime, datetime]
       UTC (start, end-exclusive) bounds for a calendar month.
-
-  most_recently_completed_month(reference=None) -> tuple[int, int]
-      (year, month) of the last full calendar month relative to `reference`
-      (defaults to now). Used as the default target for /recap.
 """
 from __future__ import annotations
 
-import base64
 import calendar
-import io
 import logging
-import pathlib
+import random
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
@@ -39,26 +39,23 @@ logger = logging.getLogger(__name__)
 # Deliberately short — this exists purely to absorb an accidental double-tap
 # of /recap or /yearrecap (or the scheduled send immediately followed by a
 # manual check within the same minute), not to avoid the underlying cost.
-# Rendering is cheap (Pillow draw ~100ms) and the DB aggregation only hits
-# our own indexed Postgres tables (no Strava API calls, no external quota
-# at risk), so there's no real cost benefit to caching longer — and a long
-# TTL only creates a class of "why hasn't this updated" bugs (icons, watermark,
-# rest_days fixes all needed a manual cache-version bump to take effect
-# immediately). A 1-minute TTL keeps that risk window negligible for both
-# a completed month/year and an in-progress /yearrecap preview alike.
+# The DB aggregation only hits our own indexed Postgres tables (no Strava API
+# calls, no external quota at risk) and text formatting is essentially free,
+# so there's no real cost benefit to caching longer — and a long TTL only
+# creates a class of "why hasn't this updated" bugs.
 _RECAP_CACHE_TTL_SECONDS = 60
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-# Base disciplines shown on the card — "RideEndurance" is a filtered subset
+# Base disciplines shown on the recap — "RideEndurance" is a filtered subset
 # of "Ride" (200km+ rides) used only for goals/stats, not a separate sport.
 _RECAP_SPORTS: list[str] = ["Ride", "Run", "Walk", "Swim"]
 
-# "Other Activities" sports — these only earn a row on the card for a given
-# period if the athlete actually logged one, so the card stays clean for the
-# majority of members who only train the four core sports above.
+# "Other Activities" sports — these only earn a row on the recap for a given
+# period if the athlete actually logged one, so the message stays short for
+# the majority of members who only train the four core sports above.
 _RECAP_OTHER_SPORTS: list[str] = ["Hiking", "Yoga", "RacketSports", "StrengthTraining"]
 
 _SPORT_LABELS: dict[str, str] = {
@@ -66,61 +63,27 @@ _SPORT_LABELS: dict[str, str] = {
     "Hiking": "HIKE", "Yoga": "YOGA", "RacketSports": "RACKET", "StrengthTraining": "STRENGTH",
 }
 
-# (accent RGB, unit) per sport — Ride/Run/Walk/Hiking in km, Swim in metres,
-# the duration-based "Other Activities" sports in hours.
-# Muted palette to match the approved reference design (icons carry the
-# accent color; the sport label text stays a single uniform gold — see
-# _LABEL_COLOR — rather than repeating each accent on the text itself).
-_SPORT_STYLE: dict[str, dict] = {
-    "Ride": {"color": (196, 156, 92),  "unit": "km"},   # muted gold
-    "Run":  {"color": (196, 122, 76),  "unit": "km"},   # muted terracotta
-    "Walk": {"color": (116, 148, 92),  "unit": "km"},   # muted sage
-    "Swim": {"color": (76, 110, 158),  "unit": "m"},    # muted steel blue
-    "Hiking":           {"color": (150, 120, 80),  "unit": "km"},   # muted umber
-    "Yoga":             {"color": (150, 120, 170), "unit": "hrs"},  # muted lavender
-    "RacketSports":     {"color": (90, 150, 150),  "unit": "hrs"},  # muted teal
-    "StrengthTraining": {"color": (170, 90, 90),   "unit": "hrs"},  # muted brick
+_RECAP_EMOJI: dict[str, str] = {
+    "Ride": "🚴", "Run": "🏃", "Walk": "🚶", "Swim": "🏊",
+    "Hiking": "🥾", "Yoga": "🧘", "RacketSports": "🏸", "StrengthTraining": "🏋️",
 }
 
-_LABEL_COLOR = (204, 175, 133)  # uniform warm tan/gold for all sport labels
+# Ride/Run/Walk/Hiking share GPS distance (km), elevation, and calories.
+# Swim is distance-based but in metres, with no meaningful elevation.
+# Yoga/RacketSports/StrengthTraining are duration-based (see
+# DURATION_BASED_SPORTS) — their headline value is hours, detail is minutes.
+_KM_SPORTS: set[str] = {"Ride", "Run", "Walk", "Hiking"}
+
+_SPORT_UNIT: dict[str, str] = {
+    "Ride": "km", "Run": "km", "Walk": "km", "Hiking": "km", "Swim": "m",
+    "Yoga": "hrs", "RacketSports": "hrs", "StrengthTraining": "hrs",
+}
 
 _MIN_STREAK_TO_SHOW = 3  # days — shorter streaks aren't worth calling out
 
-_DATA_DIR   = pathlib.Path("data")
-_LOGO_PATH  = _DATA_DIR / "bmcc_logo.jpg"
-_CREST_PATH = _DATA_DIR / "bmcc_crest.png"
-_ICON_DIR   = _DATA_DIR / "icons"
-_ICON_PATHS = {
-    "Ride":             _ICON_DIR / "ride.png",
-    "Run":              _ICON_DIR / "run.png",
-    "Walk":             _ICON_DIR / "walk.png",
-    "Swim":             _ICON_DIR / "swim.png",
-    "Hiking":           _ICON_DIR / "hiking.png",
-    "Yoga":             _ICON_DIR / "yoga.png",
-    "RacketSports":     _ICON_DIR / "racket.png",
-    "StrengthTraining": _ICON_DIR / "strength.png",
-}
-# Fallback drawn monogram badge (see _paste_fallback_icon) — only used if a
-# bundled line-art PNG above is ever missing on disk.
-_FALLBACK_MONOGRAM = {
-    "Hiking": "H", "Yoga": "Y", "RacketSports": "R", "StrengthTraining": "S",
-}
-_FONT_DIR   = _DATA_DIR / "fonts"
-_FONT_BOLD  = _FONT_DIR / "DejaVuSans-Bold.ttf"
-_FONT_REG   = _FONT_DIR / "DejaVuSans.ttf"
-
-_WHITE = (255, 255, 255)
-_GRAY  = (140, 140, 140)
-_DIM_GRAY = (70, 70, 70)
-_GREEN = (110, 200, 110)
-_RED   = (215, 95, 95)
-_GOLD  = (212, 175, 55)
-_BG_BLACK = (0, 0, 0)
-_BG_NAVY  = (8, 14, 33)  # yearly recap card background — everything else unchanged
-
 
 # ---------------------------------------------------------------------------
-# Month arithmetic
+# Month/year arithmetic
 # ---------------------------------------------------------------------------
 
 def month_bounds(year: int, month: int) -> tuple[datetime, datetime]:
@@ -144,16 +107,6 @@ def year_bounds(year: int) -> tuple[datetime, datetime]:
     return datetime(year, 1, 1, tzinfo=timezone.utc), datetime(year + 1, 1, 1, tzinfo=timezone.utc)
 
 
-def most_recently_completed_month(reference: datetime | None = None) -> tuple[int, int]:
-    """(year, month) of the last full calendar month relative to `reference`.
-
-    Always the previous month — the current month, even on its last day,
-    isn't "completed" until it ends.
-    """
-    now = reference or datetime.now(timezone.utc)
-    return _previous_month(now.year, now.month)
-
-
 def next_month_name(year: int, month: int) -> str:
     """Full month name of the month immediately after (year, month)."""
     if month == 12:
@@ -162,122 +115,38 @@ def next_month_name(year: int, month: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Caption text
+# Cached fetch — a completed month's/year's recap never changes once
+# generated, so repeat requests (manual re-runs, the scheduled send picking
+# up a period a user already peeked at) reuse the same text instead of
+# paying the DB aggregation cost again.
 # ---------------------------------------------------------------------------
 
-# Natural-language phrase for the caption's "led by X <unit> ___" clause.
-# The bare f"on the {sport.lower()}" fallback used for the 4 core sports
-# reads fine ("on the ride"), but produces "on the racketsports" /
-# "on the strengthtraining" for the umbrella "Other Activities" sports —
-# these need an explicit, readable phrase instead.
-_CAPTION_SPORT_PHRASE: dict[str, str] = {
-    "Yoga": "on the mat",
-    "RacketSports": "on the court",
-    "StrengthTraining": "in the gym",
-    "Hiking": "on the hike",
-}
-
-
-def _caption_sport_phrase(sport: str) -> str:
-    if sport in _CAPTION_SPORT_PHRASE:
-        return _CAPTION_SPORT_PHRASE[sport]
-    return f"on the {sport.lower()}"
-
-
-def build_recap_caption(data: dict, first_name: str) -> str:
-    """Build the DM text sent alongside the recap card, ending with the
-    goal-setting prompt for the upcoming month."""
-    month_name = data["month_label"].split()[0]
-    total = data["total_activities"]
-
-    if total == 0:
-        opener = f"👀 {month_name} was a quiet one, {first_name}."
-        body = "Fresh month, fresh start — let's get moving."
-    else:
-        opener = f"🏆 {month_name} wrapped up strong, {first_name}!"
-        top = data.get("top_sport_label")
-        lead = ""
-        if top:
-            top_stat = next(s for s in data["sports"] if s["key"] == top)
-            lead = f", led by {top_stat['value_text']} {top_stat['unit']} {_caption_sport_phrase(top)}"
-        plural = "activity" if total == 1 else "activities"
-        body = f"{total} {plural} this month{lead}."
-
-    lines = [opener, "", body]
-    if data["highlights"]:
-        lines.append("")
-        lines.extend(f"• {h}" for h in data["highlights"])
-
-    upcoming = next_month_name(data["year"], data["month"])
-    lines += ["", f"Want to set a goal for {upcoming}?"]
-    return "\n".join(lines)
-
-
-def build_yearly_recap_caption(data: dict, first_name: str) -> str:
-    """Build the DM text sent alongside the yearly recap card, ending with
-    the goal-setting prompt for the upcoming year."""
-    year = data["year"]
-    total = data["total_activities"]
-
-    if total == 0:
-        opener = f"👀 {year} was a quiet one, {first_name}."
-        body = "New year, fresh start — let's get moving."
-    else:
-        opener = f"🏆 {year} wrapped up strong, {first_name}!"
-        top = data.get("top_sport_label")
-        lead = ""
-        if top:
-            top_stat = next(s for s in data["sports"] if s["key"] == top)
-            lead = f", led by {top_stat['value_text']} {top_stat['unit']} {_caption_sport_phrase(top)}"
-        plural = "activity" if total == 1 else "activities"
-        body = f"{total} {plural} this year{lead}."
-
-    lines = [opener, "", body]
-    if data["highlights"]:
-        lines.append("")
-        lines.extend(f"• {h}" for h in data["highlights"])
-
-    lines += ["", f"Want to set a goal for {year + 1}?"]
-    return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# Cached fetch — a completed month's card never changes once generated, so
-# repeat requests (manual /recap re-runs, the scheduled send picking up a
-# month a user already peeked at) reuse the same render instead of paying
-# the DB + Pillow cost again.
-# ---------------------------------------------------------------------------
-
-async def get_or_build_recap(db: AsyncSession, user: User, year: int, month: int) -> tuple[bytes, str]:
-    """Return (image_png_bytes, caption_text) for this user + month, using
-    the Redis cache when available and populating it otherwise."""
-    from app.redis_client import get_redis, key_recap_caption, key_recap_image
+async def get_or_build_recap(db: AsyncSession, user: User, year: int, month: int) -> str:
+    """Return the full recap message text for this user + month, using the
+    Redis cache when available and populating it otherwise."""
+    from app.redis_client import get_redis, key_recap_text
 
     redis = await get_redis()
-    img_key, cap_key = key_recap_image(user.id, year, month), key_recap_caption(user.id, year, month)
+    key = key_recap_text(user.id, year, month)
 
-    cached_img_b64, cached_caption = await redis.get(img_key), await redis.get(cap_key)
-    if cached_img_b64 and cached_caption:
-        try:
-            return base64.b64decode(cached_img_b64), cached_caption
-        except Exception:
-            logger.warning("recap cache: corrupt cached image for %s — regenerating", img_key)
+    cached = await redis.get(key)
+    if cached:
+        return cached
 
     data = await compute_monthly_recap(db, user, year, month)
-    image_bytes = render_recap_card(data)
-    caption = build_recap_caption(data, user.telegram_first_name or "there")
+    upcoming = next_month_name(year, month)
+    text = build_recap_message(data, user.telegram_first_name or "there", upcoming)
 
     try:
-        await redis.set(img_key, base64.b64encode(image_bytes).decode("ascii"), ex=_RECAP_CACHE_TTL_SECONDS)
-        await redis.set(cap_key, caption, ex=_RECAP_CACHE_TTL_SECONDS)
+        await redis.set(key, text, ex=_RECAP_CACHE_TTL_SECONDS)
     except Exception:
-        logger.warning("recap cache: failed to write cache for %s", img_key)
+        logger.warning("recap cache: failed to write cache for %s", key)
 
-    return image_bytes, caption
+    return text
 
 
-async def get_or_build_yearly_recap(db: AsyncSession, user: User, year: int) -> tuple[bytes, str]:
-    """Return (image_png_bytes, caption_text) for this user + year, using
+async def get_or_build_yearly_recap(db: AsyncSession, user: User, year: int) -> str:
+    """Return the full yearly recap message text for this user + year, using
     the Redis cache when available and populating it otherwise.
 
     With only a 1-minute TTL (see _RECAP_CACHE_TTL_SECONDS), an in-progress
@@ -285,29 +154,24 @@ async def get_or_build_yearly_recap(db: AsyncSession, user: User, year: int) -> 
     same short-lived cache — there's no realistic way a preview taken
     months earlier is still sitting in the cache by the time the real
     scheduled send happens on 31 December."""
-    from app.redis_client import get_redis, key_yearly_recap_caption, key_yearly_recap_image
+    from app.redis_client import get_redis, key_yearly_recap_text
 
     redis = await get_redis()
-    img_key, cap_key = key_yearly_recap_image(user.id, year), key_yearly_recap_caption(user.id, year)
+    key = key_yearly_recap_text(user.id, year)
 
-    cached_img_b64, cached_caption = await redis.get(img_key), await redis.get(cap_key)
-    if cached_img_b64 and cached_caption:
-        try:
-            return base64.b64decode(cached_img_b64), cached_caption
-        except Exception:
-            logger.warning("recap cache: corrupt cached yearly image for %s — regenerating", img_key)
+    cached = await redis.get(key)
+    if cached:
+        return cached
 
     data = await compute_yearly_recap(db, user, year)
-    image_bytes = render_recap_card(data, bg_color=_BG_NAVY)
-    caption = build_yearly_recap_caption(data, user.telegram_first_name or "there")
+    text = build_recap_message(data, user.telegram_first_name or "there", str(year + 1))
 
     try:
-        await redis.set(img_key, base64.b64encode(image_bytes).decode("ascii"), ex=_RECAP_CACHE_TTL_SECONDS)
-        await redis.set(cap_key, caption, ex=_RECAP_CACHE_TTL_SECONDS)
+        await redis.set(key, text, ex=_RECAP_CACHE_TTL_SECONDS)
     except Exception:
-        logger.warning("recap cache: failed to write cache for %s", img_key)
+        logger.warning("recap cache: failed to write cache for %s", key)
 
-    return image_bytes, caption
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -323,13 +187,19 @@ def _sport_metric_column(sport: str):
 
 async def _sport_month_stats(
     db: AsyncSession, user_id, sport: str, start: datetime, end: datetime,
-) -> tuple[float, int, float, float]:
+) -> tuple[float, int, float, float, float, float]:
     """Return (total_metric, activity_count, max_single_activity_metric,
-    total_moving_time_s) — metric is metres for distance sports, seconds for
-    duration sports. total_moving_time_s is *always* seconds regardless of
-    sport, so callers can compare "how much this sport dominated the period"
-    across sports that use different display units (e.g. Ride's km vs
-    Yoga's hours) — see _build_sport_row's effort_seconds."""
+    total_moving_time_s, total_elevation_m, total_calories_kcal).
+
+    metric is metres for distance sports, seconds for duration sports.
+    total_moving_time_s is *always* seconds regardless of sport, so callers
+    can compare "how much this sport dominated the period" across sports
+    that use different display units (e.g. Ride's km vs Yoga's hours) — see
+    _build_sport_row's effort_seconds. Elevation/calories are fetched for
+    every sport uniformly (harmless zeros for sports where they don't
+    apply) so the recap's "fun index" totals can sum across all of them
+    without a second query.
+    """
     types = _SPORT_ACTIVITY_TYPES[sport]
     metric_col = _sport_metric_column(sport)
     result = await db.execute(
@@ -338,6 +208,8 @@ async def _sport_month_stats(
             func.count(Activity.id),
             func.coalesce(func.max(metric_col), 0.0),
             func.coalesce(func.sum(Activity.moving_time_seconds), 0.0),
+            func.coalesce(func.sum(Activity.elevation_gain), 0.0),
+            func.coalesce(func.sum(Activity.calories), 0.0),
         ).where(
             Activity.user_id == user_id,
             Activity.activity_type.in_(types),
@@ -345,8 +217,11 @@ async def _sport_month_stats(
             Activity.activity_date < end,
         )
     )
-    total, count, mx, total_time_s = result.one()
-    return float(total or 0.0), int(count or 0), float(mx or 0.0), float(total_time_s or 0.0)
+    total, count, mx, total_time_s, elevation_m, calories = result.one()
+    return (
+        float(total or 0.0), int(count or 0), float(mx or 0.0),
+        float(total_time_s or 0.0), float(elevation_m or 0.0), float(calories or 0.0),
+    )
 
 
 async def _sport_best_before(db: AsyncSession, user_id, sport: str, before: datetime) -> float:
@@ -426,7 +301,7 @@ def _trend(current_m: float, previous_m: float) -> tuple[str, str]:
 
 def _format_metric_value(total: float, unit: str) -> str:
     """Render a raw metric total (metres, or seconds for duration sports)
-    into the display string shown as the card's big number."""
+    into the display string shown as the recap's headline number."""
     if unit == "m":
         return f"{int(round(total)):,}"
     if unit == "hrs":
@@ -446,31 +321,44 @@ def _format_pr_value(mx: float, unit: str) -> str:
     return f"{mx / 1000:.1f} km"
 
 
+def _format_hm(seconds: float) -> str:
+    """Convert seconds to a short "9h 12m" (or "45m" if under an hour)
+    display string, used for moving-time lines throughout the recap."""
+    total_min = round(max(0.0, seconds) / 60)
+    h, m = divmod(total_min, 60)
+    if h > 0:
+        return f"{h}h {m:02d}m"
+    return f"{m}m"
+
+
 async def _build_sport_row(
     db: AsyncSession, user: User, sport: str, start: datetime, end: datetime,
     prev_start: datetime, prev_end: datetime,
-) -> tuple[dict, float, str | None, float]:
-    """Return (row_dict, total_metric, pr_highlight_or_None, effort_seconds)
-    for one sport over one period. Shared by the monthly and yearly recap
-    aggregators. effort_seconds is total moving time regardless of sport —
-    used by callers to pick the period's "top sport" fairly across sports
-    that display different units (km vs hrs), instead of only ever being
-    able to compare within the 4 core distance sports."""
-    style = _SPORT_STYLE[sport]
-    unit = style["unit"]
-    total, count, mx, effort_seconds = await _sport_month_stats(db, user.id, sport, start, end)
-    prev_total, _prev_count, _prev_max, _prev_effort = await _sport_month_stats(db, user.id, sport, prev_start, prev_end)
+) -> tuple[dict, str | None, float]:
+    """Return (row_dict, pr_highlight_or_None, effort_seconds) for one sport
+    over one period. Shared by the monthly and yearly recap aggregators.
+    effort_seconds is total moving time regardless of sport — used by
+    callers to pick the period's "top sport" fairly across sports that
+    display different units (km vs hrs)."""
+    unit = _SPORT_UNIT[sport]
+    total, count, mx, effort_seconds, elevation_m, calories = await _sport_month_stats(
+        db, user.id, sport, start, end
+    )
+    prev_total, *_rest = await _sport_month_stats(db, user.id, sport, prev_start, prev_end)
     trend_label, trend_color = _trend(total, prev_total)
 
     row = {
         "key":         sport,
         "label":       _SPORT_LABELS[sport],
-        "color":       style["color"],
         "value_text":  _format_metric_value(total, unit),
         "unit":        unit,
         "count":       count,
         "trend_label": trend_label,
         "trend_color": trend_color,
+        "moving_time_s": effort_seconds,
+        "elevation_m": elevation_m,
+        "calories":    calories,
+        "_raw_total":  total,
     }
 
     highlight = None
@@ -480,17 +368,15 @@ async def _build_sport_row(
             noun = "session" if sport in _DURATION_BASED_SPORTS else sport
             highlight = f"New PR: Longest {noun} — {_format_pr_value(mx, unit)}"
 
-    return row, total, highlight, effort_seconds
+    return row, highlight, effort_seconds
 
 
-async def compute_monthly_recap(db: AsyncSession, user: User, year: int, month: int) -> dict:
-    """Aggregate this athlete's recap for a calendar month — the four core
-    sports always appear; "Other Activities" sports only appear if the
-    athlete actually logged one that month."""
-    start, end = month_bounds(year, month)
-    prev_year, prev_month = _previous_month(year, month)
-    prev_start, prev_end = month_bounds(prev_year, prev_month)
-
+async def _aggregate_recap(
+    db: AsyncSession, user: User, start: datetime, end: datetime,
+    prev_start: datetime, prev_end: datetime, trend_suffix: str,
+) -> dict:
+    """Shared aggregation body for a monthly or yearly recap — builds every
+    sport row, highlights, and the period-wide fun-index totals."""
     sports: list[dict] = []
     highlights: list[str] = []
     total_activities = 0
@@ -498,7 +384,7 @@ async def compute_monthly_recap(db: AsyncSession, user: User, year: int, month: 
     top_sport_effort = 0.0
 
     for sport in _RECAP_SPORTS:
-        row, _total, highlight, effort = await _build_sport_row(db, user, sport, start, end, prev_start, prev_end)
+        row, highlight, effort = await _build_sport_row(db, user, sport, start, end, prev_start, prev_end)
         sports.append(row)
         total_activities += row["count"]
         if effort > top_sport_effort:
@@ -508,7 +394,7 @@ async def compute_monthly_recap(db: AsyncSession, user: User, year: int, month: 
             highlights.append(highlight)
 
     for sport in _RECAP_OTHER_SPORTS:
-        row, _total, highlight, effort = await _build_sport_row(db, user, sport, start, end, prev_start, prev_end)
+        row, highlight, effort = await _build_sport_row(db, user, sport, start, end, prev_start, prev_end)
         if row["count"] <= 0:
             continue
         sports.append(row)
@@ -523,29 +409,61 @@ async def compute_monthly_recap(db: AsyncSession, user: User, year: int, month: 
     if streak >= _MIN_STREAK_TO_SHOW:
         highlights.append(f"{streak}-day activity streak")
 
-    days_in_month = (end - start).days
-    active_days = await _distinct_active_days(db, user.id, start, end)
-    rest_days = max(0, days_in_month - active_days)
-
-    month_label = f"{calendar.month_name[month]} {year}"
-    prev_month_abbr = calendar.month_abbr[prev_month]
-    # Fill in "vs <month>" only for badges that carry a real percentage —
-    # not "New!" / "None" / "—", which already stand on their own.
     for s in sports:
         if s["trend_label"].endswith("%"):
-            s["trend_label"] = f"{s['trend_label']} vs {prev_month_abbr}"
+            s["trend_label"] = f"{s['trend_label']} {trend_suffix}"
+
+    total_distance_km = sum(s["_raw_total"] / 1000 for s in sports if s["key"] in _KM_SPORTS)
+    total_elevation_m = sum(s["elevation_m"] for s in sports if s["key"] in _KM_SPORTS)
+    total_moving_time_s = sum(s["moving_time_s"] for s in sports)
+    total_calories = sum(s["calories"] for s in sports)
 
     return {
-        "year": year,
-        "month": month,
-        "month_label": month_label,
-        "athlete_name": user.strava_athlete_name or user.telegram_first_name,
         "sports": sports,
         "highlights": highlights,
         "total_activities": total_activities,
         "top_sport_label": top_sport_label,
+        "total_distance_km": total_distance_km,
+        "total_elevation_m": total_elevation_m,
+        "total_moving_time_s": total_moving_time_s,
+        "total_calories": total_calories,
+    }
+
+
+async def compute_monthly_recap(db: AsyncSession, user: User, year: int, month: int) -> dict:
+    """Aggregate this athlete's recap for a calendar month, up to *now* if
+    the month is still in progress — the four core sports always appear;
+    "Other Activities" sports only appear if the athlete actually logged
+    one that month."""
+    start, end = month_bounds(year, month)
+    prev_year, prev_month = _previous_month(year, month)
+    prev_start, prev_end = month_bounds(prev_year, prev_month)
+    prev_month_abbr = calendar.month_abbr[prev_month]
+
+    agg = await _aggregate_recap(db, user, start, end, prev_start, prev_end, f"vs {prev_month_abbr}")
+
+    # A completed past month uses its full day count as the rest-day
+    # denominator. But an in-progress current month (the point-in-time
+    # /recap preview) would otherwise count every day from today through
+    # month-end as a "rest day" it hasn't even happened yet — cap the
+    # denominator at days actually elapsed (inclusive of today) instead,
+    # same fix already applied to the yearly recap below.
+    now = datetime.now(timezone.utc)
+    if now >= end:
+        days_in_month = (end - start).days
+    else:
+        days_in_month = (now.date() - start.date()).days + 1
+    active_days = await _distinct_active_days(db, user.id, start, end)
+    rest_days = max(0, days_in_month - active_days)
+
+    return {
+        "year": year,
+        "month": month,
+        "month_label": f"{calendar.month_name[month]} {year}",
+        "athlete_name": user.strava_athlete_name or user.telegram_first_name,
         "active_days": active_days,
         "rest_days": rest_days,
+        **agg,
     }
 
 
@@ -556,44 +474,11 @@ async def compute_yearly_recap(db: AsyncSession, user: User, year: int) -> dict:
     start, end = year_bounds(year)
     prev_start, prev_end = year_bounds(year - 1)
 
-    sports: list[dict] = []
-    highlights: list[str] = []
-    total_activities = 0
-    top_sport_label = None
-    top_sport_effort = 0.0
+    agg = await _aggregate_recap(db, user, start, end, prev_start, prev_end, f"vs {year - 1}")
 
-    for sport in _RECAP_SPORTS:
-        row, _total, highlight, effort = await _build_sport_row(db, user, sport, start, end, prev_start, prev_end)
-        sports.append(row)
-        total_activities += row["count"]
-        if effort > top_sport_effort:
-            top_sport_effort = effort
-            top_sport_label = sport
-        if highlight:
-            highlights.append(highlight)
-
-    for sport in _RECAP_OTHER_SPORTS:
-        row, _total, highlight, effort = await _build_sport_row(db, user, sport, start, end, prev_start, prev_end)
-        if row["count"] <= 0:
-            continue
-        sports.append(row)
-        total_activities += row["count"]
-        if effort > top_sport_effort:
-            top_sport_effort = effort
-            top_sport_label = sport
-        if highlight:
-            highlights.append(highlight)
-
-    streak = await _current_streak_days(db, user.id, end)
-    if streak >= _MIN_STREAK_TO_SHOW:
-        highlights.append(f"{streak}-day activity streak")
-
-    # For a completed past year, the full 365/366-day span is correct. But
     # /yearrecap is explicitly a preview of the *current, still in-progress*
     # year — using the full year length there wrongly counts every day from
     # today through Dec 31 as a "rest day" it hasn't even happened yet.
-    # Cap the denominator at days actually elapsed (inclusive of today) once
-    # we detect the year isn't over yet.
     now = datetime.now(timezone.utc)
     if now >= end:
         days_in_year = (end - start).days
@@ -602,266 +487,268 @@ async def compute_yearly_recap(db: AsyncSession, user: User, year: int) -> dict:
     active_days = await _distinct_active_days(db, user.id, start, end)
     rest_days = max(0, days_in_year - active_days)
 
-    for s in sports:
-        if s["trend_label"].endswith("%"):
-            s["trend_label"] = f"{s['trend_label']} vs {year - 1}"
-
     return {
         "year": year,
-        "title": f"{year} YEAR IN REVIEW",
         "athlete_name": user.strava_athlete_name or user.telegram_first_name,
-        "sports": sports,
-        "highlights": highlights,
-        "total_activities": total_activities,
-        "top_sport_label": top_sport_label,
         "active_days": active_days,
         "rest_days": rest_days,
+        **agg,
     }
 
 
 # ---------------------------------------------------------------------------
-# Card rendering
+# "Fun index" — personal calorie/distance/elevation/time comparisons.
+# Each builder returns a formatted line or None if its specific stat isn't
+# available (e.g. Everest needs elevation, Moonwalk needs a big distance) —
+# the picker shuffles the pool and returns the first line that renders.
+# Roast-flavored comparisons (Slowpoke, Nap) are deliberately excluded here;
+# this section is celebratory, separate from the opt-out Roast Mode feature
+# on activity notifications.
 # ---------------------------------------------------------------------------
 
-def _font(path: pathlib.Path, size: int):
-    from PIL import ImageFont
-    try:
-        return ImageFont.truetype(str(path), size)
-    except OSError:
-        return ImageFont.load_default(size=size)
+def _idx_pizza(total_kcal: float, period_word: str) -> str | None:
+    n = max(1, round(total_kcal / 2024))
+    noun = "large pepperoni pizza" if n == 1 else "large pepperoni pizzas"
+    return f"🍕 *The Pizza Index*: You burned {int(round(total_kcal)):,} calories this {period_word} — that's about {n} {noun}."
 
 
-def _sanitize_for_font(text: str) -> str:
-    """Strip characters the bundled DejaVu Sans font can't render (emoji,
-    dingbats, etc.) so they don't show up as empty tofu boxes on the card.
-    Keeps all Latin script (including accents) — only drops codepoints
-    above the Latin Extended block, which is exclusively symbols/emoji."""
-    return "".join(ch for ch in text if ord(ch) < 0x2000).strip() or text[:1]
+def _idx_burger(total_kcal: float, period_word: str) -> str | None:
+    n = max(1, round(total_kcal / 563))
+    noun = "Big Mac" if n == 1 else "Big Macs"
+    return f"🍔 *The Burger Index*: You burned {int(round(total_kcal)):,} calories this {period_word} — that's about {n} {noun}, guilt-free."
 
 
-def _trend_rgb(color_key: str) -> tuple[int, int, int]:
-    return {"up": _GREEN, "down": _RED, "flat": _GRAY, "new": _GRAY}.get(color_key, _GRAY)
+def _idx_chai(total_kcal: float, period_word: str) -> str | None:
+    n = max(1, round(total_kcal / 50))
+    return f"☕ *The Chai Index*: {int(round(total_kcal)):,} calories burned this {period_word} — that's {n} cup{'s' if n != 1 else ''} of chai, sugar included."
+
+
+def _idx_chocolate(total_kcal: float, period_word: str) -> str | None:
+    n = max(1, round(total_kcal / 150))
+    return f"🍫 *The Chocolate Index*: {int(round(total_kcal)):,} calories burned this {period_word} — that's {n} bar{'s' if n != 1 else ''} of Dairy Milk. Worth it."
+
+
+def _idx_thali(total_kcal: float, period_word: str) -> str | None:
+    n = max(1, round(total_kcal / 1233))
+    noun = "butter chicken thali" if n == 1 else "butter chicken thalis"
+    return f"🍛 *The Thali Index*: {int(round(total_kcal)):,} calories burned this {period_word} — that's {n} full {noun}."
+
+
+def _idx_beer(total_kcal: float, period_word: str) -> str | None:
+    n = max(1, round(total_kcal / 210))
+    return f"🍺 *The Beer Index*: {int(round(total_kcal)):,} calories burned this {period_word} — that's {n} pint{'s' if n != 1 else ''}, earned honestly."
+
+
+def _idx_jalebi(total_kcal: float, period_word: str) -> str | None:
+    n = max(1, round(total_kcal / 150))
+    noun = "jalebi" if n == 1 else "jalebis"
+    return f"🍩 *The Jalebi Index*: {int(round(total_kcal)):,} calories burned this {period_word} — that's roughly {n} {noun}."
+
+
+_CALORIE_INDEX_BUILDERS = [_idx_pizza, _idx_burger, _idx_chai, _idx_chocolate, _idx_thali, _idx_beer, _idx_jalebi]
+
+
+def _idx_commute(total_km: float, elevation_m: float, period_word: str) -> str | None:
+    if total_km <= 0:
+        return None
+    pct = total_km / 2800 * 100
+    return f"🛣️ *The Commute Index*: You covered {total_km:.0f} km this {period_word} — that's {pct:.0f}% of a Mumbai–Delhi round trip."
+
+
+def _idx_globe(total_km: float, elevation_m: float, period_word: str) -> str | None:
+    if total_km <= 0:
+        return None
+    pct = total_km / 40_075 * 100
+    return f"🌍 *The Globe Index*: {total_km:.0f} km covered this {period_word} — that's {pct:.1f}% of the way around the Earth."
+
+
+def _idx_everest(total_km: float, elevation_m: float, period_word: str) -> str | None:
+    if elevation_m <= 0:
+        return None
+    n = max(1, round(elevation_m / 8849))
+    climbs = "climb" if n == 1 else "climbs"
+    return f"🏔️ *The Everest Index*: You climbed {int(round(elevation_m)):,} m of elevation this {period_word} — that's {n} Mount Everest {climbs}, base camp to summit."
+
+
+def _idx_marathon(total_km: float, elevation_m: float, period_word: str) -> str | None:
+    if total_km <= 0:
+        return None
+    n = total_km / 42.195
+    return f"🎽 *The Marathon Index*: {total_km:.0f} km logged this {period_word} — that's {n:.1f} marathons back to back."
+
+
+def _idx_stadium(total_km: float, elevation_m: float, period_word: str) -> str | None:
+    if total_km <= 0:
+        return None
+    fields = round(total_km * 1000 / 105)
+    return f"⚽ *The Stadium Index*: {total_km:.0f} km covered this {period_word} — that's {fields:,} football fields laid end to end."
+
+
+def _idx_moonwalk(total_km: float, elevation_m: float, period_word: str) -> str | None:
+    if total_km <= 0:
+        return None
+    years = max(1, round(384_400 / total_km))
+    return f"🌕 *The Moonwalk Index*: You covered {total_km:.0f} km this {period_word} — at this rate, the Moon is only {years} years away."
+
+
+_DISTANCE_INDEX_BUILDERS = [_idx_commute, _idx_globe, _idx_everest, _idx_marathon, _idx_stadium]
+# Only makes sense at yearly scale — a monthly total projected to the Moon
+# always reads as an absurdly large number of years.
+_DISTANCE_INDEX_BUILDERS_YEARLY = _DISTANCE_INDEX_BUILDERS + [_idx_moonwalk]
+
+
+def _idx_netflix(total_s: float, period_word: str) -> str | None:
+    if total_s <= 0:
+        return None
+    n = max(1, round((total_s / 60) / 22))
+    ep = "episode" if n == 1 else "episodes"
+    return f"🎬 *The Netflix Index*: You spent {_format_hm(total_s)} moving this {period_word} — that's {n} {ep} of a 22-min sitcom you didn't watch."
+
+
+def _idx_bollywood(total_s: float, period_word: str) -> str | None:
+    if total_s <= 0:
+        return None
+    n = max(1, round((total_s / 60) / 150))
+    mv = "movie" if n == 1 else "movies"
+    return f"🎥 *The Bollywood Index*: {_format_hm(total_s)} of activity this {period_word} — that's {n} full Bollywood {mv}, interval included."
+
+
+def _idx_flight(total_s: float, period_word: str) -> str | None:
+    if total_s <= 0:
+        return None
+    n = (total_s / 3600) / 9
+    return f"✈️ *The Flight Index*: {_format_hm(total_s)} moving this {period_word} — that's {n:.1f} Mumbai–London flights."
+
+
+def _idx_workday(total_s: float, period_word: str) -> str | None:
+    if total_s <= 0:
+        return None
+    n = (total_s / 3600) / 8
+    return f"💼 *The Workday Index*: {_format_hm(total_s)} logged this {period_word} — that's {n:.1f} full work days spent moving instead of in meetings."
+
+
+_TIME_INDEX_BUILDERS = [_idx_netflix, _idx_bollywood, _idx_flight, _idx_workday]
+
+
+def _pick_line(builders: list, *args) -> str | None:
+    pool = builders[:]
+    random.shuffle(pool)
+    for builder in pool:
+        line = builder(*args)
+        if line:
+            return line
+    return None
+
+
+def build_fun_facts_lines(data: dict, period_word: str, is_yearly: bool) -> list[str]:
+    """Pick one comparison per category (calories / distance-elevation /
+    time) from the athlete's own totals for the period. A category is
+    skipped entirely if its underlying stat is zero."""
+    lines: list[str] = []
+
+    cal_line = _pick_line(_CALORIE_INDEX_BUILDERS, data.get("total_calories", 0.0), period_word)
+    if cal_line:
+        lines.append(cal_line)
+
+    distance_builders = _DISTANCE_INDEX_BUILDERS_YEARLY if is_yearly else _DISTANCE_INDEX_BUILDERS
+    dist_line = _pick_line(
+        distance_builders, data.get("total_distance_km", 0.0), data.get("total_elevation_m", 0.0), period_word,
+    )
+    if dist_line:
+        lines.append(dist_line)
+
+    time_line = _pick_line(_TIME_INDEX_BUILDERS, data.get("total_moving_time_s", 0.0), period_word)
+    if time_line:
+        lines.append(time_line)
+
+    return lines
 
 
 # ---------------------------------------------------------------------------
-# Sport icons — bundled line-art PNGs (approved reference assets), keyed
-# onto a transparent alpha so they composite cleanly over the dark card
-# regardless of their own flat near-black/charcoal backdrop.
+# Message rendering
 # ---------------------------------------------------------------------------
 
-def _load_art_rgba(path: pathlib.Path, max_size: int, midpoint: int = 40, ramp: int = 20):
-    """Load a flat-background line-art PNG and turn its backdrop transparent,
-    using luminosity thresholding (the source assets are two-tone: a dark
-    flat backdrop + bright line art, so a midpoint cut with a short
-    anti-aliasing ramp reproduces a clean cutout without any fringing)."""
-    from PIL import Image
-
-    img = Image.open(path).convert("RGB")
-    img.thumbnail((max_size, max_size), Image.LANCZOS)
-    lo, hi = max(0, midpoint - ramp), min(255, midpoint + ramp)
-    span = max(1, hi - lo)
-    lut = [0 if v <= lo else 255 if v >= hi else int((v - lo) * 255 / span) for v in range(256)]
-    alpha = img.convert("L").point(lut)
-    rgba = img.convert("RGBA")
-    rgba.putalpha(alpha)
-    return rgba
+def _trend_arrow(color_key: str) -> str:
+    return {"up": "↑", "down": "↓", "flat": "–", "new": "–"}.get(color_key, "–")
 
 
-def _paste_icon(img, sport_key: str, box, color: tuple[int, int, int] | None = None) -> None:
-    """Paste the bundled icon for `sport_key` centered within `box`
-    (x0, y0, x1, y1), preserving its native aspect ratio. Sports with no
-    bundled line-art PNG (the "Other Activities" sports) fall back to a
-    drawn monogram badge in their accent color instead."""
-    path = _ICON_PATHS.get(sport_key)
-    if path is None or not path.exists():
-        _paste_fallback_icon(img, sport_key, box, color)
-        return
-    x0, y0, x1, y1 = box
-    size = int(max(x1 - x0, y1 - y0))
-    icon = _load_art_rgba(path, size)
-    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-    px = int(cx - icon.width / 2)
-    py = int(cy - icon.height / 2)
-    img.paste(icon, (px, py), icon)
+def _sport_header_line(row: dict, label_w: int, value_w: int) -> str:
+    emoji = _RECAP_EMOJI.get(row["key"], "")
+    label = row["label"].ljust(label_w)
+    value = f"{row['value_text']} {row['unit']}".ljust(value_w)
+    arrow = _trend_arrow(row["trend_color"])
+    return f"`{emoji} {label} {value} ({arrow} {row['trend_label']})`"
 
 
-def _paste_fallback_icon(img, sport_key: str, box, color: tuple[int, int, int] | None) -> None:
-    """Draw a simple ringed-monogram badge for sports with no bundled icon."""
-    from PIL import ImageDraw
-
-    x0, y0, x1, y1 = box
-    size = max(x1 - x0, y1 - y0)
-    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-    ring_color = color or _GRAY
-    draw = ImageDraw.Draw(img)
-    r = size / 2 * 0.82
-    draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=ring_color, width=5)
-
-    letter = _FALLBACK_MONOGRAM.get(sport_key, sport_key[:1])
-    f = _font(_FONT_BOLD, int(size * 0.4))
-    bbox = draw.textbbox((0, 0), letter, font=f)
-    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    draw.text((cx - tw / 2 - bbox[0], cy - th / 2 - bbox[1]), letter, font=f, fill=ring_color)
+def _sport_detail_line(row: dict) -> str:
+    key = row["key"]
+    if key in _KM_SPORTS:
+        noun = "activity" if row["count"] == 1 else "activities"
+        elevation = f"{int(round(row['elevation_m'])):,}"
+        moving = _format_hm(row["moving_time_s"])
+        calories = f"{int(round(row['calories'])):,}"
+        return f"`   {row['count']} {noun} · {elevation} m elev · {moving} moving · {calories} kcal`"
+    if key == "Swim":
+        noun = "activity" if row["count"] == 1 else "activities"
+        active_min = round(row["moving_time_s"] / 60)
+        return f"`   {row['count']} {noun} · {active_min} active min`"
+    noun = "session" if row["count"] == 1 else "sessions"
+    minutes = round(row["moving_time_s"] / 60)
+    return f"`   {row['count']} {noun} · {minutes} min`"
 
 
-def _draw_centered_text(draw, xy_center, text, font, fill, letter_spacing: int = 0):
-    """Draw text horizontally centered at xy_center, optionally with extra
-    letter-spacing (rendered by drawing each glyph separately)."""
-    x_center, y = xy_center
-    if letter_spacing <= 0:
-        w = draw.textlength(text, font=font)
-        draw.text((x_center - w / 2, y), text, font=font, fill=fill)
-        return
-    widths = [draw.textlength(ch, font=font) for ch in text]
-    total = sum(widths) + letter_spacing * (len(text) - 1)
-    x = x_center - total / 2
-    for ch, w in zip(text, widths):
-        draw.text((x, y), ch, font=font, fill=fill)
-        x += w + letter_spacing
+def render_recap_text(data: dict) -> str:
+    """Render the recap dict into the monospace stats block — title,
+    athlete name, active/rest days, and one header+detail line pair per
+    sport. Every stat-bearing line is wrapped in its own inline `code` span
+    (not a fenced ``` block) so it stays monospace-aligned without
+    triggering Telegram's narrower boxed rendering + "Copy" button — the
+    same convention already used for activity notifications and /stats."""
+    is_yearly = "month_label" not in data
+    header_title = f"{data['year']} Year in Review" if is_yearly else f"{data['month_label']} Recap"
 
+    sports = data["sports"]
+    label_w = max((len(s["label"]) for s in sports), default=4)
+    value_w = max((len(f"{s['value_text']} {s['unit']}") for s in sports), default=4)
 
-def render_recap_card(data: dict, bg_color: tuple[int, int, int] = _BG_BLACK) -> bytes:
-    """Render the recap dict into a PNG card. Returns raw PNG bytes.
+    lines: list[str] = [
+        f"🏆 *{header_title}*",
+        f"_{data['athlete_name']}_",
+        "",
+        f"`Active Days : {data['active_days']}   Rest Days : {data['rest_days']}`",
+    ]
 
-    Drawn onto a generously tall canvas, then cropped to the actual content
-    height at the end — so the card is the same height regardless of how
-    many highlight lines there are, with no leftover empty space at the
-    bottom (and no risk of clipping when there are several highlights).
+    for sport in sports:
+        lines.append("")
+        lines.append(_sport_header_line(sport, label_w, value_w))
+        lines.append(_sport_detail_line(sport))
 
-    `bg_color` only swaps the canvas background (e.g. navy for the yearly
-    recap vs black for the monthly one) — every other visual element is
-    identical between the two card types.
-    """
-    from PIL import Image, ImageDraw
-
-    # MAX_H is a generous upper bound only — the canvas is cropped to actual
-    # content height at the end. Raised from 2000 to comfortably fit the four
-    # core sports plus all four "Other Activities" rows in the same card.
-    W, MAX_H = 1080, 3200
-    img = Image.new("RGB", (W, MAX_H), bg_color)
-    draw = ImageDraw.Draw(img)
-
-    f_title     = _font(_FONT_BOLD, 42)
-    f_subtitle  = _font(_FONT_REG, 32)
-    f_daysline  = _font(_FONT_REG, 31)
-    f_sport     = _font(_FONT_BOLD, 28)
-    f_value     = _font(_FONT_BOLD, 68)
-    f_unit      = _font(_FONT_REG, 30)
-    f_count     = _font(_FONT_REG, 24)
-    f_trend     = _font(_FONT_BOLD, 28)
-    f_highlight = _font(_FONT_BOLD, 26)
-    f_tagline   = _font(_FONT_REG, 26)
-
-    margin = 80
-
-    # --- Header --------------------------------------------------------------
-    y = 70
-    title = data.get("title") or (data["month_label"].upper() + " RECAP")
-    _draw_centered_text(
-        draw, (W / 2, y), title,
-        f_title, _WHITE, letter_spacing=6,
-    )
-    y += 60
-    _draw_centered_text(
-        draw, (W / 2, y), _sanitize_for_font(data["athlete_name"]), f_subtitle, _GRAY,
-    )
-    y += 50
-    active, rest = data["active_days"], data["rest_days"]
-    _draw_centered_text(
-        draw, (W / 2, y),
-        f"{active} active day{'s' if active != 1 else ''}  \u00b7  "
-        f"{rest} rest day{'s' if rest != 1 else ''}",
-        f_daysline, _GOLD,
-    )
-    y += 70
-
-    # --- Sport rows ------------------------------------------------------------
-    row_height = 230
-    icon_size = 100
-    # Gap below each divider line before the next row's content starts —
-    # without this, a label sits almost flush against the line above it.
-    row_top_pad = 26
-    # Icon is vertically centered on the row's visual anchor (the big
-    # number), not on the row's raw top edge — otherwise icons of
-    # different silhouettes read as "off-center" against the text block.
-    icon_anchor_offset = 54
-
-    for sport in data["sports"]:
-        row_start = y
-        content_top = row_start + row_top_pad
-        icon_cy = content_top + icon_anchor_offset
-        icon_box = (margin, icon_cy - icon_size / 2, margin + icon_size, icon_cy + icon_size / 2)
-        _paste_icon(img, sport["key"], icon_box, sport.get("color"))
-
-        text_x = margin + icon_size + 30
-
-        draw.text((text_x, content_top - 6), sport["label"], font=f_sport, fill=_LABEL_COLOR)
-
-        value_y = content_top + 36
-        draw.text((text_x, value_y), sport["value_text"], font=f_value, fill=_WHITE)
-        value_w = draw.textlength(sport["value_text"], font=f_value)
-        draw.text((text_x + value_w + 12, value_y + 30), sport["unit"], font=f_unit, fill=_GRAY)
-
-        if sport["key"] in _DURATION_BASED_SPORTS:
-            count_label = "session" if sport["count"] == 1 else "sessions"
-        else:
-            count_label = "activity" if sport["count"] == 1 else "activities"
-        draw.text(
-            (text_x, content_top + 132), f"{sport['count']} {count_label}",
-            font=f_count, fill=_GRAY,
-        )
-
-        # Trend pill, right-aligned, vertically centered on the row
-        trend_color = _trend_rgb(sport["trend_color"])
-        arrow = {"up": "\u2191", "down": "\u2193", "flat": "\u2013", "new": "\u2013"}[sport["trend_color"]]
-        pill_text = f"{arrow} {sport['trend_label']}"
-        pill_w = draw.textlength(pill_text, font=f_trend) + 48
-        pill_h = 60
-        pill_x1 = W - margin
-        pill_x0 = pill_x1 - pill_w
-        pill_y0 = content_top + (icon_size - pill_h) / 2 + 4
-        pill_y1 = pill_y0 + pill_h
-        draw.rounded_rectangle(
-            [pill_x0, pill_y0, pill_x1, pill_y1], radius=pill_h / 2,
-            fill=(24, 24, 24), outline=(55, 55, 55), width=1,
-        )
-        draw.text(
-            (pill_x0 + 24, pill_y0 + (pill_h - 30) / 2 - 2), pill_text,
-            font=f_trend, fill=trend_color,
-        )
-
-        row_bottom = row_start + row_height
-        if sport is not data["sports"][-1]:
-            draw.line([(margin, row_bottom), (W - margin, row_bottom)], fill=_DIM_GRAY, width=1)
-        y = row_bottom
-
-    # --- Highlights ------------------------------------------------------------
     if data["highlights"]:
-        draw.line([(margin, y), (W - margin, y)], fill=_DIM_GRAY, width=1)
-        y += row_top_pad
-        for line in data["highlights"]:
-            draw.rounded_rectangle([margin, y + 6, margin + 8, y + 34], radius=4, fill=_GOLD)
-            draw.text((margin + 26, y), line, font=f_highlight, fill=_GOLD)
-            y += 48
-        y += 6
+        lines.append("")
+        lines.append("✨ *Highlights*")
+        for h in data["highlights"]:
+            lines.append(f"`• {h}`")
+
+    return "\n".join(lines)
+
+
+def build_recap_message(data: dict, first_name: str, upcoming_period_label: str) -> str:
+    """Build the full Telegram message: the monospace stats block, a fun
+    facts section (or a "quiet period" note if nothing was logged), and the
+    goal-setting prompt for the upcoming month/year."""
+    is_yearly = "month_label" not in data
+    period_word = "year" if is_yearly else "month"
+
+    sections = [render_recap_text(data)]
+
+    if data["total_activities"] == 0:
+        period_name = str(data["year"]) if is_yearly else data["month_label"].split()[0]
+        sections.append(f"👀 {period_name} was a quiet one, {first_name} — fresh start, let's get moving.")
     else:
-        y += 20
+        fun_lines = build_fun_facts_lines(data, period_word, is_yearly)
+        if fun_lines:
+            sections.append("\n".join(fun_lines))
 
-    # --- BMCC crest + tagline ------------------------------------------------
-    y += 20
-    try:
-        crest_size = 132
-        crest = _load_art_rgba(_CREST_PATH, crest_size, midpoint=100, ramp=40)
-        img.paste(crest, (int(W / 2 - crest.width / 2), int(y)), crest)
-        y += crest_size + 20
-    except (OSError, FileNotFoundError):
-        pass
+    sections.append(f"Want to set a goal for {upcoming_period_label}?")
 
-    _draw_centered_text(draw, (W / 2, y), "Beyond Miles - Beyond Limits", f_tagline, _GOLD)
-    y += 60
-
-    img = img.crop((0, 0, W, min(y, MAX_H)))
-
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
+    return "\n\n".join(sections)

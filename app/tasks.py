@@ -1127,16 +1127,14 @@ async def maybe_send_monthly_recaps() -> dict:
         for user in users:
             try:
                 async with AsyncSessionLocal() as db:
-                    image_bytes, caption = await get_or_build_recap(
-                        db, user, now_ist.year, now_ist.month
-                    )
+                    text = await get_or_build_recap(db, user, now_ist.year, now_ist.month)
 
                 from app.telegram.keyboards import recap_goal_prompt_keyboard
 
-                await bot.send_photo(chat_id=user.telegram_user_id, photo=image_bytes)
                 await bot.send_message(
                     chat_id=user.telegram_user_id,
-                    text=caption,
+                    text=text,
+                    parse_mode="Markdown",
                     reply_markup=recap_goal_prompt_keyboard(),
                 )
                 sent += 1
@@ -1189,14 +1187,14 @@ async def maybe_send_yearly_recap() -> dict:
         for user in users:
             try:
                 async with AsyncSessionLocal() as db:
-                    image_bytes, caption = await get_or_build_yearly_recap(db, user, now_ist.year)
+                    text = await get_or_build_yearly_recap(db, user, now_ist.year)
 
                 from app.telegram.keyboards import recap_goal_prompt_keyboard
 
-                await bot.send_photo(chat_id=user.telegram_user_id, photo=image_bytes)
                 await bot.send_message(
                     chat_id=user.telegram_user_id,
-                    text=caption,
+                    text=text,
+                    parse_mode="Markdown",
                     reply_markup=recap_goal_prompt_keyboard(),
                 )
                 sent += 1

@@ -236,7 +236,7 @@ _HELP_TEXT = (
     "📊 *Stats \\& Goals*\n"
     "/stats — View activity stats by sport and time period\n"
     "/goals — Set, delete or check your fitness goals\n"
-    "/recap — Your most recently completed month, recapped\n"
+    "/recap — This month's stats so far, recapped\n"
     "/yearrecap — Preview your year in review so far\n\n"
     "🏆 *Group*\n"
     "/leaderboard — Monthly points leaderboard \\(multi\\-sport bonus included\\)\n\n"
@@ -621,10 +621,12 @@ async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def cmd_recap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Manually trigger the monthly recap card for the most recently
-    completed calendar month (the scheduled version fires automatically
-    at 20:00 IST on the last day of each month for every connected user)."""
-    from app.stats.recap import get_or_build_recap, most_recently_completed_month
+    """Manually preview the monthly recap for the current (in-progress)
+    month, point-in-time — same model as /yearrecap. The scheduled version
+    fires automatically at 20:00 IST on the last day of each month for
+    every connected user, by which point "current month" and "completed
+    month" are the same thing."""
+    from app.stats.recap import get_or_build_recap
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(
@@ -641,9 +643,9 @@ async def cmd_recap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         await update.message.reply_text("⏳ Building your recap...")
 
-        year, month = most_recently_completed_month()
+        now = datetime.now(timezone.utc)
         try:
-            image_bytes, caption = await get_or_build_recap(db, user, year, month)
+            text = await get_or_build_recap(db, user, now.year, now.month)
         except Exception:
             logger.exception("cmd_recap failed for telegram_id=%s", update.effective_user.id)
             await update.message.reply_text(
@@ -651,13 +653,14 @@ async def cmd_recap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
-    await update.message.reply_photo(photo=image_bytes)
-    await update.message.reply_text(caption, reply_markup=recap_goal_prompt_keyboard())
+    await update.message.reply_text(
+        text, parse_mode="Markdown", reply_markup=recap_goal_prompt_keyboard(),
+    )
 
 
 async def cmd_yearrecap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Manually preview the yearly recap card for the current (in-progress)
-    year — useful to check the design before the scheduled version fires
+    """Manually preview the yearly recap for the current (in-progress) year
+    — useful to check the numbers before the scheduled version fires
     automatically at 20:00 IST on 31 December with the full year's data."""
     from app.stats.recap import get_or_build_yearly_recap
 
@@ -678,7 +681,7 @@ async def cmd_yearrecap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         year = datetime.now(timezone.utc).year
         try:
-            image_bytes, caption = await get_or_build_yearly_recap(db, user, year)
+            text = await get_or_build_yearly_recap(db, user, year)
         except Exception:
             logger.exception("cmd_yearrecap failed for telegram_id=%s", update.effective_user.id)
             await update.message.reply_text(
@@ -686,8 +689,9 @@ async def cmd_yearrecap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             return
 
-    await update.message.reply_photo(photo=image_bytes)
-    await update.message.reply_text(caption, reply_markup=recap_goal_prompt_keyboard())
+    await update.message.reply_text(
+        text, parse_mode="Markdown", reply_markup=recap_goal_prompt_keyboard(),
+    )
 
 
 async def cmd_notifications(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

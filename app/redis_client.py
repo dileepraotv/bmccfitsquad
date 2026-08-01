@@ -97,27 +97,20 @@ def key_monthly_reconcile(user_id, period: str) -> str:
     return f"reconcile:monthly:{user_id}:{period}"
 
 
-# Bump this whenever render_recap_card()'s visual output changes so stale
+# Bump this whenever render_recap_text()'s output format changes so stale
 # cached renders from before the change are transparently bypassed instead
 # of being served for up to the full cache TTL (see _RECAP_CACHE_TTL_SECONDS).
-_RECAP_CACHE_VERSION = 10
+# v11: recap switched from a rendered PNG card (image + separate caption) to
+# a single monospace text message — old image/caption key pairs are simply
+# abandoned rather than migrated.
+_RECAP_CACHE_VERSION = 11
 
 
-def key_recap_image(user_id, year: int, month: int) -> str:
-    """Cached recap card PNG (base64-encoded) for one user + calendar month."""
-    return f"recap:v{_RECAP_CACHE_VERSION}:image:{user_id}:{year}-{month:02d}"
+def key_recap_text(user_id, year: int, month: int) -> str:
+    """Cached recap message text for one user + calendar month."""
+    return f"recap:v{_RECAP_CACHE_VERSION}:text:{user_id}:{year}-{month:02d}"
 
 
-def key_recap_caption(user_id, year: int, month: int) -> str:
-    """Cached recap caption text for one user + calendar month."""
-    return f"recap:v{_RECAP_CACHE_VERSION}:caption:{user_id}:{year}-{month:02d}"
-
-
-def key_yearly_recap_image(user_id, year: int) -> str:
-    """Cached yearly recap card PNG (base64-encoded) for one user + year."""
-    return f"yearrecap:v{_RECAP_CACHE_VERSION}:image:{user_id}:{year}"
-
-
-def key_yearly_recap_caption(user_id, year: int) -> str:
-    """Cached yearly recap caption text for one user + year."""
-    return f"yearrecap:v{_RECAP_CACHE_VERSION}:caption:{user_id}:{year}"
+def key_yearly_recap_text(user_id, year: int) -> str:
+    """Cached yearly recap message text for one user + year."""
+    return f"yearrecap:v{_RECAP_CACHE_VERSION}:text:{user_id}:{year}"
