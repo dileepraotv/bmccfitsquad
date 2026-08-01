@@ -60,6 +60,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _DATA_DIR = pathlib.Path("data")
 _CLUB_MESSAGE_PATH = _DATA_DIR / "club_message.txt"
+_BMCC_CREST_PATH = _DATA_DIR / "bmcc_crest.png"
 _QUOTES_PATH = _DATA_DIR / "quotes.txt"
 
 # ---------------------------------------------------------------------------
@@ -534,6 +535,33 @@ async def send_goal_progress_notification(
             user.telegram_user_id,
             exc,
         )
+
+
+# ---------------------------------------------------------------------------
+# Monthly/yearly recap delivery
+# ---------------------------------------------------------------------------
+
+async def send_recap_message(bot: Bot, chat_id: int, text: str, reply_markup=None) -> None:
+    """Send a monthly/yearly recap: the monospace text block, followed by the
+    BMCC crest as its own photo message so it renders as a natural, centred
+    image in the chat (Telegram bubbles centre single photos automatically —
+    there's no way to centre an image inline within a text message). Any
+    reply keyboard (e.g. the "set a goal?" prompt) is attached to the crest
+    photo since it's the last thing the athlete sees.
+
+    Used by /recap, /yearrecap, the scheduled cron senders, and the
+    /ops/send-recap testing endpoint, so the logo placement stays
+    consistent across every recap delivery path.
+    """
+    await bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+    try:
+        with _BMCC_CREST_PATH.open("rb") as crest:
+            await bot.send_photo(chat_id=chat_id, photo=crest, reply_markup=reply_markup)
+    except FileNotFoundError:
+        logger.warning("recap: bmcc_crest.png not found at %s — skipping logo", _BMCC_CREST_PATH)
+        if reply_markup is not None:
+            # Keyboard still needs to reach the user even if the logo is missing.
+            await bot.send_message(chat_id=chat_id, text="\u200b", reply_markup=reply_markup)
 
 
 # ---------------------------------------------------------------------------

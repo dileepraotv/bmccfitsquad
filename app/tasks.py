@@ -1083,12 +1083,12 @@ async def catchup_sync_all_users() -> dict:
 # ---------------------------------------------------------------------------
 # Piggybacks on the same /cron/sync-all ping that already runs every few
 # minutes — no separate scheduler/cron registration needed. Fires once,
-# guarded by a Redis key, the first time this is called at/after 20:00 IST
+# guarded by a Redis key, the first time this is called at/after 21:00 IST
 # on the last calendar day of the month (28/29/30/31 handled via
 # calendar.monthrange, so no month-length special-casing is needed).
 
 _IST = timezone(timedelta(hours=5, minutes=30))
-_RECAP_HOUR_IST = 20
+_RECAP_HOUR_IST = 21
 
 
 async def maybe_send_monthly_recaps() -> dict:
@@ -1130,11 +1130,12 @@ async def maybe_send_monthly_recaps() -> dict:
                     text = await get_or_build_recap(db, user, now_ist.year, now_ist.month)
 
                 from app.telegram.keyboards import recap_goal_prompt_keyboard
+                from app.telegram.notifications import send_recap_message
 
-                await bot.send_message(
-                    chat_id=user.telegram_user_id,
-                    text=text,
-                    parse_mode="Markdown",
+                await send_recap_message(
+                    bot,
+                    user.telegram_user_id,
+                    text,
                     reply_markup=recap_goal_prompt_keyboard(),
                 )
                 sent += 1
@@ -1149,13 +1150,13 @@ async def maybe_send_monthly_recaps() -> dict:
 # ---------------------------------------------------------------------------
 # Task 5: maybe_send_yearly_recap  (scheduled yearly recap, per user)
 # ---------------------------------------------------------------------------
-# Fires on the same 20:00 IST / last-day trigger as the monthly recap, but
+# Fires on the same 21:00 IST / last-day trigger as the monthly recap, but
 # only actually does anything on 31 December — and is always run *after*
 # maybe_send_monthly_recaps() so December's monthly card lands first,
 # immediately followed by the full-year one.
 
 async def maybe_send_yearly_recap() -> dict:
-    """Check whether it's time for the yearly recap (20:00 IST on 31 Dec)
+    """Check whether it's time for the yearly recap (21:00 IST on 31 Dec)
     and send it to every connected user if so. Safe to call on every cron
     tick — a Redis flag ensures it only actually sends once per year."""
     from app.redis_client import get_redis
@@ -1190,11 +1191,12 @@ async def maybe_send_yearly_recap() -> dict:
                     text = await get_or_build_yearly_recap(db, user, now_ist.year)
 
                 from app.telegram.keyboards import recap_goal_prompt_keyboard
+                from app.telegram.notifications import send_recap_message
 
-                await bot.send_message(
-                    chat_id=user.telegram_user_id,
-                    text=text,
-                    parse_mode="Markdown",
+                await send_recap_message(
+                    bot,
+                    user.telegram_user_id,
+                    text,
                     reply_markup=recap_goal_prompt_keyboard(),
                 )
                 sent += 1

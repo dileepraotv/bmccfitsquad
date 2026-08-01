@@ -225,7 +225,7 @@ async def cron_sync_all(secret: str = ""):
 
     fire_and_forget(_run_and_record())
     # Piggybacks on this same ping — no-ops on every tick except once, at
-    # 20:00 IST on the last day of the month (see maybe_send_monthly_recaps
+    # 21:00 IST on the last day of the month (see maybe_send_monthly_recaps
     # and maybe_send_yearly_recap).
     fire_and_forget(_run_recaps())
     return {"status": "scheduled", "run_count": _cron_status["run_count"]}
@@ -357,12 +357,14 @@ async def ops_send_recap(
         else:
             text = await get_or_build_recap(db, user, year, month)
 
+    from app.telegram.notifications import send_recap_message
+
     bot = TelegramBot(token=settings.telegram_bot_token)
     async with bot:
-        await bot.send_message(
-            chat_id=user.telegram_user_id,
-            text=text,
-            parse_mode="Markdown",
+        await send_recap_message(
+            bot,
+            user.telegram_user_id,
+            text,
             reply_markup=recap_goal_prompt_keyboard(),
         )
 

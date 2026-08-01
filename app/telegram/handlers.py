@@ -623,10 +623,11 @@ async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def cmd_recap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Manually preview the monthly recap for the current (in-progress)
     month, point-in-time — same model as /yearrecap. The scheduled version
-    fires automatically at 20:00 IST on the last day of each month for
+    fires automatically at 21:00 IST on the last day of each month for
     every connected user, by which point "current month" and "completed
     month" are the same thing."""
     from app.stats.recap import get_or_build_recap
+    from app.telegram.notifications import send_recap_message
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(
@@ -653,16 +654,17 @@ async def cmd_recap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
-    await update.message.reply_text(
-        text, parse_mode="Markdown", reply_markup=recap_goal_prompt_keyboard(),
+    await send_recap_message(
+        context.bot, update.effective_chat.id, text, reply_markup=recap_goal_prompt_keyboard(),
     )
 
 
 async def cmd_yearrecap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Manually preview the yearly recap for the current (in-progress) year
     — useful to check the numbers before the scheduled version fires
-    automatically at 20:00 IST on 31 December with the full year's data."""
+    automatically at 21:00 IST on 31 December with the full year's data."""
     from app.stats.recap import get_or_build_yearly_recap
+    from app.telegram.notifications import send_recap_message
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(
@@ -689,8 +691,8 @@ async def cmd_yearrecap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             return
 
-    await update.message.reply_text(
-        text, parse_mode="Markdown", reply_markup=recap_goal_prompt_keyboard(),
+    await send_recap_message(
+        context.bot, update.effective_chat.id, text, reply_markup=recap_goal_prompt_keyboard(),
     )
 
 
