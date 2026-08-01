@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import Activity, User
 from app.utils import DURATION_BASED_SPORTS as _DURATION_BASED_SPORTS
 from app.utils import SPORT_ACTIVITY_TYPES as _SPORT_ACTIVITY_TYPES
+from app.utils import format_kv_lines
 
 logger = logging.getLogger(__name__)
 
@@ -668,60 +669,74 @@ def build_fun_facts_lines(data: dict, period_word: str, is_yearly: bool) -> list
 # Message rendering
 # ---------------------------------------------------------------------------
 
+_SPORT_DISPLAY_NAME: dict[str, str] = {
+    "Ride": "Ride", "Run": "Run", "Walk": "Walk", "Swim": "Swim",
+    "Hiking": "Hike", "Yoga": "Yoga", "RacketSports": "Racket Sports",
+    "StrengthTraining": "Strength Training",
+}
+
+
 def _trend_arrow(color_key: str) -> str:
     return {"up": "↑", "down": "↓", "flat": "–", "new": "–"}.get(color_key, "–")
 
 
-def _sport_header_line(row: dict, label_w: int, value_w: int) -> str:
-    emoji = _RECAP_EMOJI.get(row["key"], "")
-    label = row["label"].ljust(label_w)
-    value = f"{row['value_text']} {row['unit']}".ljust(value_w)
-    arrow = _trend_arrow(row["trend_color"])
-    return f"`{emoji} {label} {value} ({arrow} {row['trend_label']})`"
-
-
-def _sport_detail_line(row: dict) -> str:
+def _sport_lines(row: dict) -> list[str]:
+    """One bold "<emoji> <Sport Name>" title line, followed by an aligned
+    monospace key/value block (via format_kv_lines) with the headline
+    value+trend plus the per-sport-family detail metrics."""
     key = row["key"]
+    emoji = _RECAP_EMOJI.get(key, "")
+    name = _SPORT_DISPLAY_NAME.get(key, key)
+    header = f"*{emoji} {name}*"
+
+    trend_suffix = f" ({_trend_arrow(row['trend_color'])} {row['trend_label']})"
+    headline_value = f"{row['value_text']} {row['unit']}{trend_suffix}"
+
     if key in _KM_SPORTS:
-        noun = "activity" if row["count"] == 1 else "activities"
-        elevation = f"{int(round(row['elevation_m'])):,}"
-        moving = _format_hm(row["moving_time_s"])
-        calories = f"{int(round(row['calories'])):,}"
-        return f"`   {row['count']} {noun} · {elevation} m elev · {moving} moving · {calories} kcal`"
-    if key == "Swim":
-        noun = "activity" if row["count"] == 1 else "activities"
-        active_min = round(row["moving_time_s"] / 60)
-        return f"`   {row['count']} {noun} · {active_min} active min`"
-    noun = "session" if row["count"] == 1 else "sessions"
-    minutes = round(row["moving_time_s"] / 60)
-    return f"`   {row['count']} {noun} · {minutes} min`"
+        pairs = [
+            ("Distance", headline_value),
+            ("Activities", str(row["count"])),
+            ("Elevation", f"{int(round(row['elevation_m'])):,} m"),
+            ("Moving Time", _format_hm(row["moving_time_s"])),
+            ("Calories", f"{int(round(row['calories'])):,} kcal"),
+        ]
+    elif key == "Swim":
+        pairs = [
+            ("Distance", headline_value),
+            ("Activities", str(row["count"])),
+            ("Active Time", _format_hm(row["moving_time_s"])),
+        ]
+    else:
+        pairs = [
+            ("Duration", headline_value),
+            ("Sessions", str(row["count"])),
+            ("Minutes", str(round(row["moving_time_s"] / 60))),
+        ]
+
+    return [header, format_kv_lines(pairs)]
 
 
 def render_recap_text(data: dict) -> str:
-    """Render the recap dict into the monospace stats block — title,
-    athlete name, active/rest days, and one header+detail line pair per
-    sport. Every stat-bearing line is wrapped in its own inline `code` span
-    (not a fenced ``` block) so it stays monospace-aligned without
-    triggering Telegram's narrower boxed rendering + "Copy" button — the
-    same convention already used for activity notifications and /stats."""
+    """Render the recap dict into the stats block — title, bold athlete
+    name, active/rest days, and one bold title + aligned monospace detail
+    block per sport. Detail lines are wrapped via format_kv_lines, which
+    uses inline `code` spans (not a fenced ``` block) so they stay
+    monospace-aligned without triggering Telegram's narrower boxed
+    rendering + "Copy" button — the same convention already used for
+    activity notifications and /stats."""
     is_yearly = "month_label" not in data
     header_title = f"{data['year']} Year in Review" if is_yearly else f"{data['month_label']} Recap"
 
-    sports = data["sports"]
-    label_w = max((len(s["label"]) for s in sports), default=4)
-    value_w = max((len(f"{s['value_text']} {s['unit']}") for s in sports), default=4)
-
     lines: list[str] = [
         f"🏆 *{header_title}*",
-        f"_{data['athlete_name']}_",
+        f"*{data['athlete_name']}*",
         "",
         f"`Active Days : {data['active_days']}   Rest Days : {data['rest_days']}`",
     ]
 
-    for sport in sports:
+    for sport in data["sports"]:
         lines.append("")
-        lines.append(_sport_header_line(sport, label_w, value_w))
-        lines.append(_sport_detail_line(sport))
+        lines.extend(_sport_lines(sport))
 
     if data["highlights"]:
         lines.append("")
@@ -747,6 +762,8 @@ def build_recap_message(data: dict, first_name: str, upcoming_period_label: str)
     else:
         fun_lines = build_fun_facts_lines(data, period_word, is_yearly)
         if fun_lines:
+            adjective = "yearly" if is_yearly else "monthly"
+            sections.append(f"Your {adjective} metrics till now compare to:")
             sections.append("\n".join(fun_lines))
 
     sections.append(f"Want to set a goal for {upcoming_period_label}?")

@@ -292,6 +292,88 @@ async def ops_scan_duplicates(secret: str = "", dry_run: bool = True):
     return await scan_and_alert_duplicates(dry_run=dry_run)
 
 
+@app.get(
+    "/ops/send-recap",
+    tags=["ops"],
+    summary="Manually (re)send a monthly or yearly recap DM to one user, for any period",
+)
+async def ops_send_recap(
+    secret: str = "",
+    name: str = "",
+    year: int | None = None,
+    month: int | None = None,
+    yearly: bool = False,
+):
+    """Ad-hoc trigger for testing/comparing recap output — bypasses the
+    "current period only" restriction that /recap and /yearrecap have, so
+    you can push e.g. July's recap to a specific person on demand.
+
+    ?name= matches (case-insensitively) against either Telegram first name
+    or Strava athlete name; the first match is used. ?year=/&month= select
+    the period (defaults to the current UTC year/month); pass &yearly=true
+    for a yearly recap (month is then ignored).
+
+    Protected by: ?secret={CRON_SECRET} query parameter
+    """
+    if not settings.cron_secret or secret != settings.cron_secret:
+        raise HTTPException(status_code=401, detail="invalid or missing secret")
+    if not name:
+        raise HTTPException(status_code=400, detail="?name= is required")
+
+    from datetime import datetime, timezone
+
+    from sqlalchemy import select
+    from telegram import Bot as TelegramBot
+
+    from app.database import AsyncSessionLocal
+    from app.models import User
+    from app.stats.recap import get_or_build_recap, get_or_build_yearly_recap
+    from app.telegram.keyboards import recap_goal_prompt_keyboard
+
+    now = datetime.now(timezone.utc)
+    year = year or now.year
+    month = month or now.month
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(User).where(User.strava_athlete_id.isnot(None)))
+        users = result.scalars().all()
+
+    needle = name.lower()
+    match = next(
+        (
+            u for u in users
+            if needle in (u.telegram_first_name or "").lower()
+            or needle in (u.strava_athlete_name or "").lower()
+        ),
+        None,
+    )
+    if match is None:
+        raise HTTPException(status_code=404, detail=f"no connected user matching name={name!r}")
+
+    async with AsyncSessionLocal() as db:
+        user = await db.get(User, match.id)
+        if yearly:
+            text = await get_or_build_yearly_recap(db, user, year)
+        else:
+            text = await get_or_build_recap(db, user, year, month)
+
+    bot = TelegramBot(token=settings.telegram_bot_token)
+    async with bot:
+        await bot.send_message(
+            chat_id=user.telegram_user_id,
+            text=text,
+            parse_mode="Markdown",
+            reply_markup=recap_goal_prompt_keyboard(),
+        )
+
+    return {
+        "sent": True,
+        "matched_user": user.telegram_first_name,
+        "telegram_user_id": user.telegram_user_id,
+        "period": {"year": year} if yearly else {"year": year, "month": month},
+    }
+
+
 @app.get("/telegram/status", tags=["ops"], summary="Telegram's own view of webhook delivery health")
 async def telegram_status():
     """Surfaces Telegram's getWebhookInfo so we can tell an app outage
