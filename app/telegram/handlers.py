@@ -1493,6 +1493,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
+        await query.message.reply_text(
+            "👍 No worries — here's your menu whenever you need it.",
+            reply_markup=nav_keyboard(),
+        )
         return
 
     # Goals

@@ -677,7 +677,10 @@ _SPORT_DISPLAY_NAME: dict[str, str] = {
 
 
 def _trend_arrow(color_key: str) -> str:
-    return {"up": "↑", "down": "↓", "flat": "–", "new": "–"}.get(color_key, "–")
+    # Telegram's Bot API has no way to color plain text/arrow characters, so
+    # a colored circle stands in for the requested "up in blue / down in
+    # red" treatment — closest achievable equivalent without custom emoji.
+    return {"up": "🔵↑", "down": "🔴↓", "flat": "🔵–", "new": "🔵–"}.get(color_key, "🔵–")
 
 
 def _sport_lines(row: dict) -> list[str]:
@@ -719,19 +722,18 @@ def _sport_lines(row: dict) -> list[str]:
 
 
 def render_recap_text(data: dict) -> str:
-    """Render the recap dict into the stats block — title, bold athlete
-    name, active/rest days, and one bold title + aligned monospace detail
-    block per sport. Detail lines are wrapped via format_kv_lines, which
-    uses inline `code` spans (not a fenced ``` block) so they stay
-    monospace-aligned without triggering Telegram's narrower boxed
-    rendering + "Copy" button — the same convention already used for
+    """Render the recap dict into the stats block — title+athlete name (one
+    combined bold line), active/rest days, and one bold title + aligned
+    monospace detail block per sport. Detail lines are wrapped via
+    format_kv_lines, which uses inline `code` spans (not a fenced ``` block)
+    so they stay monospace-aligned without triggering Telegram's narrower
+    boxed rendering + "Copy" button — the same convention already used for
     activity notifications and /stats."""
     is_yearly = "month_label" not in data
     header_title = f"{data['year']} Year in Review" if is_yearly else f"{data['month_label']} Recap"
 
     lines: list[str] = [
-        f"🏆 *{header_title}*",
-        f"*{data['athlete_name']}*",
+        f"🏆 *{header_title} — {data['athlete_name']}*",
         "",
         f"`Active Days : {data['active_days']}   Rest Days : {data['rest_days']}`",
     ]
