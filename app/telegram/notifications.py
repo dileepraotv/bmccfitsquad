@@ -43,6 +43,7 @@ from telegram import Bot
 from app.models import Activity, User
 from app.utils import (
     DURATION_BASED_SPORTS,
+    OTHER_ACTIVITY_SPORTS,
     SPORT_ACTIVITY_TYPES,
     format_friendly_date,
     format_kv_lines,
@@ -177,13 +178,48 @@ _KUDOS_SPORT: dict[str, list[str]] = {
     "Walk": ["Not every step needs to be a sprint — that was a solid, honest effort."],
 }
 
+# Suspiciously flat route roast — overrides the distance-earned kudos when a
+# ride/run/walk clears its distance bar but barely climbed anything. Matches
+# e.g. a 100 km ride with < 500 m elevation gain (5 m of gain per km).
+_ELEVATION_ROAST_SPORTS: set[str] = {"Ride", "Run", "Walk"}
+_ELEVATION_ROAST_M_PER_KM = 5.0
 
-def _roast_or_kudos_line(activity_type: str, distance_m: float | int | None) -> str | None:
-    """Pick a contextual roast/kudos line for this activity, or None if this
-    sport has no defined distance threshold (caller falls back to the plain
-    rotating greeting in that case)."""
+_ELEVATION_ROAST: list[str] = [
+    "{km} km and barely a bump in sight — that's a runway, not a route.",
+    "Flat as a pancake out there. Where were the actual hills?",
+    "Zero hills were harmed in the making of this activity.",
+    "That elevation graph is basically a flat line with main character energy.",
+]
+
+# "Other Activities" (Yoga, Racket Sports, Strength Training, Hiking) have no
+# distance/pace threshold defined, so Roast Mode never roasts them — but a
+# solid time-on-feet effort still earns a kudos line instead of the plain
+# rotating greeting.
+_OTHER_SPORT_KUDOS_MIN_SECONDS = 30 * 60
+_OTHER_SPORT_RAW_TYPES: set[str] = {
+    t for sport in OTHER_ACTIVITY_SPORTS for t in SPORT_ACTIVITY_TYPES.get(sport, [])
+}
+
+
+def _roast_or_kudos_line(
+    activity_type: str,
+    distance_m: float | int | None,
+    elevation_gain_m: float | int | None = None,
+    moving_time_s: float | int | None = None,
+) -> str | None:
+    """Pick a contextual roast/kudos line for this activity, or None if the
+    caller should fall back to the plain rotating greeting.
+
+    Ride/Run/Swim/Walk are judged on distance vs. a per-sport threshold.
+    Ride/Run/Walk additionally get roasted for a suspiciously flat route even
+    if the distance itself clears the bar. Everything else ("Other
+    Activities") only ever gets a kudos line, and only past 30 minutes.
+    """
     bucket = _ROAST_BUCKET_BY_TYPE.get(activity_type)
+
     if bucket is None:
+        if activity_type in _OTHER_SPORT_RAW_TYPES and (moving_time_s or 0) >= _OTHER_SPORT_KUDOS_MIN_SECONDS:
+            return random.choice(_KUDOS_GENERAL)
         return None
 
     threshold_m = _ROAST_THRESHOLDS_M[bucket]
@@ -197,6 +233,12 @@ def _roast_or_kudos_line(activity_type: str, distance_m: float | int | None) -> 
         else:
             value, unit = round(distance_m / 1_000), "km"
         return line.format(value=value, unit=unit)
+
+    if bucket in _ELEVATION_ROAST_SPORTS and distance_m > 0:
+        elevation_gain_m = elevation_gain_m or 0
+        distance_km = distance_m / 1_000
+        if (elevation_gain_m / distance_km) < _ELEVATION_ROAST_M_PER_KM:
+            return random.choice(_ELEVATION_ROAST).format(km=round(distance_km))
 
     pool = _KUDOS_GENERAL + _KUDOS_SPORT.get(bucket, [])
     return random.choice(pool)
@@ -290,7 +332,12 @@ async def format_activity_notification(
     # ------------------------------------------------------------------
     sport_word = _friendly_sport_word(activity_type)
     roast_line = (
-        _roast_or_kudos_line(activity_type, activity.get("distance"))
+        _roast_or_kudos_line(
+            activity_type,
+            activity.get("distance"),
+            elevation_gain_m=activity.get("total_elevation_gain"),
+            moving_time_s=activity.get("moving_time"),
+        )
         if roast_mode_enabled
         else None
     )
