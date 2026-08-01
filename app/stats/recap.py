@@ -681,16 +681,18 @@ def _trend_arrow(color_key: str) -> str:
 
 
 def _sport_lines(row: dict) -> list[str]:
-    """One bold "<emoji> <Sport Name>" title line, followed by an aligned
-    monospace key/value block (via format_kv_lines) with the headline
-    value+trend plus the per-sport-family detail metrics."""
+    """One bold "<emoji> <Sport Name> (<trend>)" title line, followed by an
+    aligned monospace key/value block (via format_kv_lines) with the
+    per-sport-family detail metrics. The trend badge sits on the bold title
+    line rather than the Distance/Duration value line — keeping that line
+    short enough to not wrap on narrow (mobile) screens."""
     key = row["key"]
     emoji = _RECAP_EMOJI.get(key, "")
     name = _SPORT_DISPLAY_NAME.get(key, key)
-    header = f"*{emoji} {name}*"
+    trend = f"{_trend_arrow(row['trend_color'])} {row['trend_label']}"
+    header = f"*{emoji} {name} ({trend})*"
 
-    trend_suffix = f" ({_trend_arrow(row['trend_color'])} {row['trend_label']})"
-    headline_value = f"{row['value_text']} {row['unit']}{trend_suffix}"
+    headline_value = f"{row['value_text']} {row['unit']}"
 
     if key in _KM_SPORTS:
         pairs = [
@@ -764,7 +766,7 @@ def build_recap_message(data: dict, first_name: str, upcoming_period_label: str)
         if fun_lines:
             adjective = "yearly" if is_yearly else "monthly"
             sections.append(f"Your {adjective} metrics till now compare to:")
-            sections.append("\n".join(fun_lines))
+            sections.extend(fun_lines)
 
     sections.append(f"Want to set a goal for {upcoming_period_label}?")
 
