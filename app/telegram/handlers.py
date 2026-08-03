@@ -952,22 +952,31 @@ def _goal_metric_keyboard(sport: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([row, [InlineKeyboardButton(_pad("Cancel", 42), callback_data="goal:exit")]])
 
 
+_GOAL_MODE_PROMPT = (
+    "How should this goal be tracked?\n"
+    "• *Cumulative Total* — add up every activity toward one big number "
+    "(e.g. 1,000 km total)\n"
+    "• *Session Count* — hit a per-activity target a set number of times "
+    "(e.g. a 10 km run, 4 times)"
+)
+
+
 def _goal_mode_keyboard() -> InlineKeyboardMarkup:
     """Aggregation-mode selector: sum-over-period vs. per-session count."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(_pad("Total Target", 21), callback_data="goal:mode:cumulative"),
-         InlineKeyboardButton(_pad("Per-Session Count", 21), callback_data="goal:mode:frequency")],
+        [InlineKeyboardButton(_pad("Cumulative Total", 21), callback_data="goal:mode:cumulative"),
+         InlineKeyboardButton(_pad("Session Count", 21), callback_data="goal:mode:frequency")],
         [InlineKeyboardButton(_pad("Cancel", 42), callback_data="goal:exit")],
     ])
 
 
 def _goal_daily_keyboard() -> InlineKeyboardMarkup:
-    """Daily multi-instance question — Yes (count every activity, the
-    product default) pre-highlighted with a checkmark vs. No (collapse
-    same-day activities to the day's best one)."""
+    """Daily multi-instance question — "Count All Activities" (the product
+    default) vs. "Only Best Each Day" (collapse same-day activities to the
+    day's best one)."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(_pad("Every Activity", 21), callback_data="goal:multiday:yes"),
-         InlineKeyboardButton(_pad("Best Per Day", 21), callback_data="goal:multiday:no")],
+        [InlineKeyboardButton(_pad("Count All Activities", 21), callback_data="goal:multiday:yes"),
+         InlineKeyboardButton(_pad("Only Best Each Day", 21), callback_data="goal:multiday:no")],
         [InlineKeyboardButton(_pad("Cancel", 42), callback_data="goal:exit")],
     ])
 
@@ -1279,7 +1288,7 @@ async def _handle_goal_callbacks(query, data: str) -> None:
         if len(metrics) == 1:
             await _save_draft(tg_id, {"sport": sport, "metric": metrics[0], "step": "mode"})
             await query.edit_message_text(
-                f"Sport: *{sport}*",
+                f"Sport: *{sport}*\n\n{_GOAL_MODE_PROMPT}",
                 parse_mode="Markdown",
                 reply_markup=_goal_mode_keyboard(),
             )
@@ -1303,7 +1312,7 @@ async def _handle_goal_callbacks(query, data: str) -> None:
         draft["step"] = "mode"
         await _save_draft(tg_id, draft)
         await query.edit_message_text(
-            f"Sport: *{draft['sport']}*\nMetric: *{metric.capitalize()}*",
+            f"Sport: *{draft['sport']}*\nMetric: *{metric.capitalize()}*\n\n{_GOAL_MODE_PROMPT}",
             parse_mode="Markdown",
             reply_markup=_goal_mode_keyboard(),
         )
@@ -1503,9 +1512,10 @@ async def _handle_goal_text_input(update: Update) -> bool:
             await _save_draft(tg_id, draft)
             await update.message.reply_text(
                 f"Target: *Total {val_str} {unit}*\n\n"
-                f"Count every activity separately, or only your best per day?\n"
-                f"_(e.g. if you log two rides in one day, \"Best Per Day\" only "
-                f"counts the one with the higher {metric}.)_",
+                f"If you log more than one activity on the same day, should "
+                f"they all count, or just the best one?\n"
+                f"_(e.g. two rides in one day — \"Only Best Each Day\" counts "
+                f"just the one with the higher {metric}.)_",
                 parse_mode="Markdown",
                 reply_markup=_goal_daily_keyboard(),
             )
@@ -1535,9 +1545,10 @@ async def _handle_goal_text_input(update: Update) -> bool:
 
         await update.message.reply_text(
             _draft_summary_text(draft) + "\n\n"
-            "Count every activity separately, or only your best per day?\n"
-            f"_(e.g. if you log two activities in one day, \"Best Per Day\" only "
-            f"counts the one with the higher {draft.get('metric', 'distance')}.)_",
+            "If you log more than one activity on the same day, should they "
+            "all count, or just the best one?\n"
+            f"_(e.g. two activities in one day — \"Only Best Each Day\" counts "
+            f"just the one with the higher {draft.get('metric', 'distance')}.)_",
             parse_mode="Markdown",
             reply_markup=_goal_daily_keyboard(),
         )
