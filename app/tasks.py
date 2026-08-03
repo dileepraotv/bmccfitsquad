@@ -23,7 +23,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import and_, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -701,8 +701,19 @@ _METRIC_COLUMN = {
 }
 
 
-async def get_goal_progress(db, user: User, goal: Goal) -> GoalProgress:
-    """Compute *goal*'s progress so far this period.
+async def get_goal_progress(
+    db, user: User, goal: Goal,
+    start_date: date | None = None, end_date: date | None = None,
+) -> GoalProgress:
+    """Compute *goal*'s progress over a date range.
+
+    Defaults to the goal's own `[start_date, end_date]` — i.e. today's
+    whole-goal behavior for a `recurrence="none"` goal. Passing explicit
+    *start_date*/*end_date* (both inclusive, matching `goal.start_date`/
+    `goal.end_date`'s own convention) instead evaluates just that window —
+    used by get_recurring_goal_progress to score one calendar month/quarter
+    of a Phase 2 recurring goal without duplicating any of the metric/
+    aggregation/daily-collapse/Ride-Endurance-floor logic below.
 
     Metric-aware (distance / elevation / duration) and aggregation-mode
     aware (cumulative sum vs. frequency count against target_value as a
@@ -725,8 +736,15 @@ async def get_goal_progress(db, user: User, goal: Goal) -> GoalProgress:
     from app.redis_client import get_redis, key_goal_count
     from app.redis_client import _GOAL_COUNT_CACHE_TTL_SECONDS as _TTL
 
+    range_start = start_date or goal.start_date
+    range_end = end_date or goal.end_date
+    # Sub-period cache entries (start_date/end_date passed explicitly) key
+    # off range_start so each month/quarter gets its own slot; the
+    # whole-goal case (no override) keeps the plain per-goal key.
+    cache_period_start = range_start if start_date is not None else None
+
     redis = await get_redis()
-    cache_key = key_goal_count(goal.id)
+    cache_key = key_goal_count(goal.id, cache_period_start)
     try:
         cached = await redis.get(cache_key)
         if cached is not None:
@@ -738,10 +756,10 @@ async def get_goal_progress(db, user: User, goal: Goal) -> GoalProgress:
         pass
 
     start_dt = datetime(
-        goal.start_date.year, goal.start_date.month, goal.start_date.day, tzinfo=timezone.utc
+        range_start.year, range_start.month, range_start.day, tzinfo=timezone.utc
     )
     end_dt = datetime(
-        goal.end_date.year, goal.end_date.month, goal.end_date.day, tzinfo=timezone.utc
+        range_end.year, range_end.month, range_end.day, tzinfo=timezone.utc
     ) + timedelta(days=1)
     act_types = _SPORT_ACTIVITY_TYPES.get(goal.activity_type, [goal.activity_type])
     metric_col = _METRIC_COLUMN.get(goal.metric, Activity.distance_meters)
@@ -820,6 +838,131 @@ def format_goal_progress_value(goal: Goal, canonical_value: float) -> str:
     return _format_goal_number(_goal_canonical_to_display(canonical_value, unit))
 
 
+# ---------------------------------------------------------------------------
+# Flexible Goal Engine Phase 2 — recurrence (monthly/quarterly sub-periods)
+# ---------------------------------------------------------------------------
+# A recurring goal's target_value/target_count is interpreted PER
+# sub-period (e.g. "1,000 km" means 1,000 km each month, not 12,000 km for
+# the year) — no schema change needed for this, it's purely how these
+# fields get read here. Sub-periods themselves are never persisted: they're
+# recomputed on every read from goal.recurrence + the goal's own year-long
+# [start_date, end_date], the same computed-on-read philosophy as the rest
+# of the goal engine.
+
+_MONTH_ABBR = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+]
+
+
+@dataclass
+class SubPeriod:
+    label: str  # "Aug 2026" | "Q3 2026"
+    start: date
+    end: date   # inclusive, matching Goal.start_date/end_date's own convention
+
+
+def goal_sub_periods(goal: Goal) -> list[SubPeriod]:
+    """Split a recurring goal's year window into its 12 calendar months or
+    4 calendar quarters. Returns [] for recurrence="none" (a Phase 1 goal)
+    — callers branch on goal.recurrence before calling this, but an empty
+    list here fails safe rather than raising if one doesn't.
+    """
+    import calendar as _calendar
+
+    year = goal.start_date.year
+    periods: list[SubPeriod] = []
+
+    if goal.recurrence == "monthly":
+        for month in range(1, 13):
+            last_day = _calendar.monthrange(year, month)[1]
+            periods.append(SubPeriod(
+                f"{_MONTH_ABBR[month - 1]} {year}", date(year, month, 1), date(year, month, last_day),
+            ))
+    elif goal.recurrence == "quarterly":
+        for q, (m_start, m_end) in enumerate([(1, 3), (4, 6), (7, 9), (10, 12)], start=1):
+            last_day = _calendar.monthrange(year, m_end)[1]
+            periods.append(SubPeriod(
+                f"Q{q} {year}", date(year, m_start, 1), date(year, m_end, last_day),
+            ))
+
+    return periods
+
+
+@dataclass
+class SubPeriodProgress:
+    label: str
+    start: date
+    end: date
+    status: str  # "met" | "missed" | "in_progress" | "pending"
+    progress: GoalProgress
+
+
+@dataclass
+class RecurringGoalProgress:
+    sub_periods: list[SubPeriodProgress]
+    met_count: int
+    elapsed_count: int  # sub-periods that have started (in_progress + already closed)
+    total_count: int
+    overall_status: str  # "in_progress" | "achieved" | "failed"
+
+
+async def get_recurring_goal_progress(db, user: User, goal: Goal) -> RecurringGoalProgress:
+    """Evaluate a recurrence="monthly"|"quarterly" goal across every
+    calendar sub-period of its year, each scored independently via
+    get_goal_progress scoped to that sub-period's own dates.
+
+    Per the confirmed strict all-sub-periods-must-hit-target semantics,
+    overall_status flips to "failed" the moment any *closed* sub-period
+    misses its target — but later sub-periods still get evaluated (and
+    still get their own checkpoint DM from maybe_send_goal_checkpoints)
+    rather than the goal going silent once it can no longer be "achieved".
+    """
+    today = datetime.now(timezone.utc).date()
+    sub_periods = goal_sub_periods(goal)
+    placeholder_target = goal.target_value if goal.aggregation == "cumulative" else float(goal.target_count)
+
+    results: list[SubPeriodProgress] = []
+    met_count = 0
+    elapsed_count = 0
+    any_missed = False
+
+    for sp in sub_periods:
+        if today < sp.start:
+            results.append(SubPeriodProgress(
+                sp.label, sp.start, sp.end, "pending",
+                GoalProgress(mode=goal.aggregation, current=0.0, target=placeholder_target, pct=0.0),
+            ))
+            continue
+
+        elapsed_count += 1
+        progress = await get_goal_progress(db, user, goal, start_date=sp.start, end_date=sp.end)
+
+        if today <= sp.end:
+            status = "in_progress"
+        else:
+            status = "met" if progress.current >= progress.target else "missed"
+            if status == "met":
+                met_count += 1
+            else:
+                any_missed = True
+
+        results.append(SubPeriodProgress(sp.label, sp.start, sp.end, status, progress))
+
+    total_count = len(sub_periods)
+    if any_missed:
+        overall_status = "failed"
+    elif met_count == total_count and total_count > 0:
+        overall_status = "achieved"
+    else:
+        overall_status = "in_progress"
+
+    return RecurringGoalProgress(
+        sub_periods=results, met_count=met_count, elapsed_count=elapsed_count,
+        total_count=total_count, overall_status=overall_status,
+    )
+
+
 async def _build_goal_lines(db, user: User) -> list[tuple[str, str]]:
     """Return (label, value) pairs for the notification's goal-progress
     footer — e.g. ("🧘 Yoga 30 min", "3/8") for frequency goals, or
@@ -835,8 +978,6 @@ async def _build_goal_lines(db, user: User) -> list[tuple[str, str]]:
 
     lines: list[tuple[str, str]] = []
     for g in goals:
-        progress = await get_goal_progress(db, user, g)
-
         sport_label = _sport_display_label(g.activity_type)
         sport_emoji = {
             "Ride": "🚴", "RideEndurance": "🚴",
@@ -844,12 +985,28 @@ async def _build_goal_lines(db, user: User) -> list[tuple[str, str]]:
             "Hiking": "🥾", "Yoga": "🧘",
             "RacketSports": "🏸", "StrengthTraining": "🏋️",
         }.get(g.activity_type, "🏅")
-
         label = f"{sport_emoji} {sport_label} {g.category}"
-        if progress.mode == "cumulative":
-            value = f"{format_goal_progress_value(g, progress.current)}/{format_goal_progress_value(g, progress.target)}"
+
+        if g.recurrence in ("monthly", "quarterly"):
+            recurring = await get_recurring_goal_progress(db, user, g)
+            current_sp = next(
+                (sp for sp in recurring.sub_periods if sp.status == "in_progress"), None,
+            ) or (recurring.sub_periods[-1] if recurring.sub_periods else None)
+            if current_sp is None:
+                continue
+            sp_progress = current_sp.progress
+            if sp_progress.mode == "cumulative":
+                sp_value = f"{format_goal_progress_value(g, sp_progress.current)}/{format_goal_progress_value(g, sp_progress.target)}"
+            else:
+                sp_value = f"{int(sp_progress.current)}/{g.target_count}"
+            value = f"{sp_value} ({current_sp.label.split()[0]}) · {recurring.met_count}/{recurring.elapsed_count} met"
         else:
-            value = f"{int(progress.current)}/{g.target_count}"
+            progress = await get_goal_progress(db, user, g)
+            if progress.mode == "cumulative":
+                value = f"{format_goal_progress_value(g, progress.current)}/{format_goal_progress_value(g, progress.target)}"
+            else:
+                value = f"{int(progress.current)}/{g.target_count}"
+
         lines.append((label, value))
 
     return lines
@@ -1368,6 +1525,109 @@ async def maybe_send_yearly_recap() -> dict:
                 errors += 1
 
     logger.info("yearly_recap complete — sent=%s errors=%s", sent, errors)
+    return {"skipped": False, "sent": sent, "errors": errors}
+
+
+# ---------------------------------------------------------------------------
+# Task 6: maybe_send_goal_checkpoints  (Phase 2 recurring-goal checkpoints)
+# ---------------------------------------------------------------------------
+# Fires on the same 21:00 IST / last-day-of-month trigger as the recaps
+# above, but per-goal rather than per-user: every active recurrence="monthly"
+# goal gets a checkpoint for the month that just ended (every month), and
+# every active recurrence="quarterly" goal gets one on Mar/Jun/Sep/Dec (the
+# last month of each calendar quarter). Keeps firing every remaining
+# sub-period even after a goal's overall_status has flipped to "failed" —
+# per the confirmed scope, the user should keep seeing individual
+# performance for the rest of the year rather than the goal going silent.
+
+async def maybe_send_goal_checkpoints() -> dict:
+    """Check whether it's the last day of a month (and, for quarterly goals,
+    also the last month of a quarter) at/after 21:00 IST, and if so send a
+    DM checkpoint for the sub-period that just closed to every user with a
+    matching active recurring goal. Safe to call on every cron tick — a
+    Redis flag per (goal, sub-period) ensures each checkpoint sends once."""
+    import calendar as _calendar
+
+    from app.redis_client import get_redis
+
+    now_ist = datetime.now(_IST)
+    last_day = _calendar.monthrange(now_ist.year, now_ist.month)[1]
+    if now_ist.day != last_day or now_ist.hour < _RECAP_HOUR_IST:
+        return {"skipped": True, "reason": "not yet"}
+
+    recurrences = ["monthly"] + (["quarterly"] if now_ist.month in (3, 6, 9, 12) else [])
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(Goal, User).join(User, Goal.user_id == User.id).where(
+                Goal.is_active == True,  # noqa: E712
+                Goal.recurrence.in_(recurrences),
+                User.is_active.is_(True),
+            )
+        )
+        rows = result.all()
+
+    if not rows:
+        return {"skipped": False, "sent": 0, "errors": 0}
+
+    logger.info("goal_checkpoints: evaluating %s recurring goal(s)", len(rows))
+
+    redis = await get_redis()
+    sent, errors = 0, 0
+    bot = TelegramBot(token=settings.telegram_bot_token)
+    async with bot:
+        for goal, user in rows:
+            try:
+                async with AsyncSessionLocal() as db:
+                    recurring = await get_recurring_goal_progress(db, user, goal)
+
+                # The sub-period that just closed is the one ending today —
+                # for a quarterly goal this only ever matches on a
+                # quarter-end month since its sub-periods only end then.
+                closed_sp = next(
+                    (sp for sp in recurring.sub_periods if sp.end == now_ist.date()), None
+                )
+                if closed_sp is None or closed_sp.status not in ("met", "missed"):
+                    continue
+
+                dedup_key = f"goalcheckpoint:sent:{goal.id}:{closed_sp.label}"
+                if not await redis.set(dedup_key, "1", ex=100 * 86_400, nx=True):
+                    continue
+
+                sport_label = _sport_display_label(goal.activity_type)
+                verdict = "✅ Hit it!" if closed_sp.status == "met" else "❌ Missed it"
+                progress = closed_sp.progress
+                if progress.mode == "cumulative":
+                    numbers = (
+                        f"{format_goal_progress_value(goal, progress.current)}"
+                        f"/{format_goal_progress_value(goal, progress.target)} "
+                        f"{_goal_metric_unit(sport_label, goal.metric, goal.aggregation)}"
+                    )
+                else:
+                    numbers = f"{int(progress.current)}/{goal.target_count} times"
+
+                overall_note = {
+                    "achieved": "🏆 All periods met so far — goal achieved!",
+                    "failed": f"💔 {recurring.met_count}/{recurring.elapsed_count} periods met so far",
+                    "in_progress": f"▶️ {recurring.met_count}/{recurring.elapsed_count} periods met so far",
+                }[recurring.overall_status]
+
+                text = (
+                    f"📅 *{closed_sp.label} checkpoint — {sport_label}*\n\n"
+                    f"{goal.category}\n"
+                    f"{verdict}: {numbers}\n\n"
+                    f"{overall_note}"
+                )
+                await bot.send_message(chat_id=user.telegram_user_id, text=text, parse_mode="Markdown")
+                sent += 1
+            except Exception:
+                logger.exception(
+                    "goal_checkpoint: failed for telegram_id=%s goal_id=%s",
+                    user.telegram_user_id, goal.id,
+                )
+                errors += 1
+
+    logger.info("goal_checkpoints complete — sent=%s errors=%s", sent, errors)
     return {"skipped": False, "sent": sent, "errors": errors}
 
 

@@ -120,10 +120,20 @@ def key_leaderboard(month_key: str) -> str:
 _GOAL_COUNT_CACHE_TTL_SECONDS = 60
 
 
-def key_goal_count(goal_id) -> str:
+def key_goal_count(goal_id, period_start=None) -> str:
     """Cached progress ("mode|current|target|pct") for one goal's current
     period. v2 — bumped from v1 when get_goal_achieved_count (bare int) was
     replaced by get_goal_progress (structured, metric/aggregation-aware)
     as part of the Flexible Goal Engine, since the cached value's shape
-    changed and old v1 entries would otherwise fail to parse."""
+    changed and old v1 entries would otherwise fail to parse.
+
+    *period_start* (a date, optional) distinguishes a Phase 2 recurring
+    goal's per-sub-period evaluations (one cache entry per month/quarter)
+    from the whole-goal cache entry used when recurrence="none" — without
+    it, a monthly sub-period's cached progress could collide with (and be
+    overwritten by) another sub-period's, or with the goal's own overall
+    entry, since they'd otherwise all share one goal_id-keyed slot.
+    """
+    if period_start is not None:
+        return f"goal:count:v2:{goal_id}:{period_start.isoformat()}"
     return f"goal:count:v2:{goal_id}"

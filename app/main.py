@@ -184,6 +184,7 @@ _cron_status: dict = {
     "run_count": 0,
     "last_recap_result": None,
     "last_yearly_recap_result": None,
+    "last_goal_checkpoint_result": None,
 }
 
 
@@ -203,6 +204,7 @@ async def cron_sync_all(secret: str = ""):
     from app.tasks import (
         catchup_sync_all_users,
         fire_and_forget,
+        maybe_send_goal_checkpoints,
         maybe_send_monthly_recaps,
         maybe_send_yearly_recap,
     )
@@ -222,6 +224,9 @@ async def cron_sync_all(secret: str = ""):
         # right after that same day's monthly card, not race it.
         _cron_status["last_recap_result"] = await maybe_send_monthly_recaps()
         _cron_status["last_yearly_recap_result"] = await maybe_send_yearly_recap()
+        # Same 21:00 IST / last-day-of-month trigger, but per recurring goal
+        # rather than per user (Flexible Goal Engine Phase 2).
+        _cron_status["last_goal_checkpoint_result"] = await maybe_send_goal_checkpoints()
 
     fire_and_forget(_run_and_record())
     # Piggybacks on this same ping — no-ops on every tick except once, at
@@ -251,6 +256,7 @@ async def cron_status():
         "last_result": _cron_status["last_result"],
         "last_recap_result": _cron_status["last_recap_result"],
         "last_yearly_recap_result": _cron_status["last_yearly_recap_result"],
+        "last_goal_checkpoint_result": _cron_status["last_goal_checkpoint_result"],
         "strava_rate_limit": await get_rate_limit_status(),
     }
 

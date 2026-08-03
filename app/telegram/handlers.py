@@ -989,6 +989,18 @@ def _goal_period_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def _goal_recurrence_keyboard() -> InlineKeyboardMarkup:
+    """Shown only when the chosen period is "This Year" — offers repeating
+    the target independently every calendar month or quarter (Phase 2)
+    instead of tracking one single year-long total (today's behavior)."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(_pad("📅 Whole Year", 42), callback_data="goal:recurrence:none")],
+        [InlineKeyboardButton(_pad("🔁 Every Month", 21), callback_data="goal:recurrence:monthly"),
+         InlineKeyboardButton(_pad("🔁 Every Quarter", 21), callback_data="goal:recurrence:quarterly")],
+        [InlineKeyboardButton(_pad("Cancel", 42), callback_data="goal:exit")],
+    ])
+
+
 def _goal_period_dates(period: str):
     """Return (start_date, end_date_inclusive) for display and DB queries.
 
@@ -1035,7 +1047,8 @@ def _goal_period_dates(period: str):
 
 
 def _format_goal_summary(sport_display: str, category: str, aggregation: str,
-                          count: int, period: str, start, end) -> str:
+                          count: int, period: str, start, end,
+                          recurrence: str = "none") -> str:
     lines = [
         "✅ *Goal saved!*\n",
         f"Sport:    *{sport_display}*",
@@ -1043,22 +1056,34 @@ def _format_goal_summary(sport_display: str, category: str, aggregation: str,
     ]
     if aggregation == "frequency":
         lines.append(f"Target:   *{count} time{'s' if count != 1 else ''}*")
+    period_label = {
+        "monthly": f"{period} (repeats every month)",
+        "quarterly": f"{period} (repeats every quarter)",
+    }.get(recurrence, period)
     lines += [
-        f"Period:   *{period}*",
+        f"Period:   *{period_label}*",
         f"Window:   {start}  →  {end}",
     ]
     return "\n".join(lines)
 
 
 def _format_goal_category(sport: str, metric: str, aggregation: str,
-                           value: float, unit: str) -> str:
+                           value: float, unit: str, recurrence: str = "none") -> str:
     """Build the display-cache "category" string from structured goal
     fields — e.g. "100 km" / "30 min" (frequency, unchanged from the
     pre-Phase-1 format) or "Total 5,000 km" / "Total 100,000 m elevation"
-    (new cumulative goals)."""
+    (non-recurring cumulative) or "1,000 km/mo" (Phase 2 recurring
+    cumulative — target_value is interpreted per sub-period, so "Total"
+    would be misleading here). Recurring frequency goals keep the plain
+    threshold string ("21.1 km") since the recurrence itself is already
+    conveyed by the Period line in _format_goal_summary and the /goals
+    status screen's per-sub-period breakdown."""
     display_val = _format_goal_number(value)
     suffix = " elevation" if metric == "elevation" else ""
     if aggregation == "cumulative":
+        rec_suffix = {"monthly": "/mo", "quarterly": "/qtr"}.get(recurrence)
+        if rec_suffix:
+            return f"{display_val} {unit}{suffix}{rec_suffix}"
         return f"Total {display_val} {unit}{suffix}"
     return f"{display_val} {unit}{suffix}"
 
@@ -1143,6 +1168,59 @@ async def _send_goals_menu(target, user_id: int) -> None:
         await target.edit_message_text(text, parse_mode="Markdown", reply_markup=_goals_main_keyboard())
     else:
         await target.reply_text(text, parse_mode="Markdown", reply_markup=_goals_main_keyboard())
+
+
+async def _save_goal_and_confirm(query, tg_id: int, draft: dict, period: str, recurrence: str) -> None:
+    """Shared save-to-DB + confirmation-message logic for both goal-creation
+    paths that actually reach a save: the direct path (any period other
+    than "This Year", recurrence="none") and the Phase 2 recurrence-picker
+    path (This Year, recurrence in {"none", "monthly", "quarterly"})."""
+    sport_display = draft["sport"]
+    metric        = draft["metric"]
+    aggregation   = draft["aggregation"]
+    value         = draft["value"]
+    count         = draft.get("count", 1)
+    allow_multi   = draft.get("allow_multiple_daily", True)
+    sport_db      = _SPORT_TYPE_MAP.get(sport_display, sport_display)
+    start, end    = _goal_period_dates(period)
+
+    unit = _goal_metric_unit(sport_display, metric, aggregation)
+    target_value = _goal_value_to_canonical(value, unit)
+    category = _format_goal_category(sport_display, metric, aggregation, value, unit, recurrence)
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(User).where(User.telegram_user_id == tg_id)
+        )
+        user = result.scalar_one_or_none()
+        if not user:
+            await query.edit_message_text("User not found. Try /start first.")
+            return
+
+        goal = Goal(
+            user_id=user.id,
+            activity_type=sport_db,
+            category=category,
+            metric=metric,
+            aggregation=aggregation,
+            target_value=target_value,
+            target_count=count,
+            allow_multiple_daily=allow_multi,
+            recurrence=recurrence,
+            start_date=start,
+            end_date=end,
+        )
+        db.add(goal)
+        await db.commit()
+
+    await _clear_draft(tg_id)
+    await query.edit_message_text(
+        _format_goal_summary(sport_display, category, aggregation, count, period, start, end, recurrence),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton(_pad("My Goals", 42), callback_data="goal:menu"),
+        ]]),
+    )
 
 
 async def _handle_goal_callbacks(query, data: str) -> None:
@@ -1279,7 +1357,7 @@ async def _handle_goal_callbacks(query, data: str) -> None:
         )
         return
 
-    # ── Period chosen → save goal ──────────────────────────────────────────
+    # ── Period chosen → recurrence picker (This Year only) or straight save ─
     if data.startswith("goal:period:"):
         period = data[len("goal:period:"):]
         draft = await _load_draft(tg_id)
@@ -1287,51 +1365,32 @@ async def _handle_goal_callbacks(query, data: str) -> None:
             await query.edit_message_text("Session expired. Please try /goals again.")
             return
 
-        sport_display = draft["sport"]
-        metric        = draft["metric"]
-        aggregation   = draft["aggregation"]
-        value         = draft["value"]
-        count         = draft.get("count", 1)
-        allow_multi   = draft.get("allow_multiple_daily", True)
-        sport_db      = _SPORT_TYPE_MAP.get(sport_display, sport_display)
-        start, end    = _goal_period_dates(period)
-
-        unit = _goal_metric_unit(sport_display, metric, aggregation)
-        target_value = _goal_value_to_canonical(value, unit)
-        category = _format_goal_category(sport_display, metric, aggregation, value, unit)
-
-        async with AsyncSessionLocal() as db:
-            result = await db.execute(
-                select(User).where(User.telegram_user_id == tg_id)
+        # Recurrence (Phase 2) only makes sense against a full year window —
+        # every other period skips straight to save, exactly as before.
+        if period == "This Year":
+            draft["period"] = period
+            draft["step"] = "recurrence"
+            await _save_draft(tg_id, draft)
+            await query.edit_message_text(
+                _draft_summary_text(draft) + "\n\n"
+                "Repeat this target every month or quarter, or just track "
+                "one total for the whole year?",
+                parse_mode="Markdown",
+                reply_markup=_goal_recurrence_keyboard(),
             )
-            user = result.scalar_one_or_none()
-            if not user:
-                await query.edit_message_text("User not found. Try /start first.")
-                return
+            return
 
-            goal = Goal(
-                user_id=user.id,
-                activity_type=sport_db,
-                category=category,
-                metric=metric,
-                aggregation=aggregation,
-                target_value=target_value,
-                target_count=count,
-                allow_multiple_daily=allow_multi,
-                start_date=start,
-                end_date=end,
-            )
-            db.add(goal)
-            await db.commit()
+        await _save_goal_and_confirm(query, tg_id, draft, period, recurrence="none")
+        return
 
-        await _clear_draft(tg_id)
-        await query.edit_message_text(
-            _format_goal_summary(sport_display, category, aggregation, count, period, start, end),
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton(_pad("My Goals", 42), callback_data="goal:menu"),
-            ]]),
-        )
+    # ── Recurrence chosen (This Year only) → save goal ──────────────────────
+    if data.startswith("goal:recurrence:"):
+        recurrence = data[len("goal:recurrence:"):]
+        draft = await _load_draft(tg_id)
+        if not draft or "period" not in draft:
+            await query.edit_message_text("Session expired. Please try /goals again.")
+            return
+        await _save_goal_and_confirm(query, tg_id, draft, draft["period"], recurrence)
         return
 
     # ── User tapped a goal in the delete list → show a confirmation screen
@@ -1561,9 +1620,47 @@ async def _show_goal_status(query) -> None:
             "",
         ]
 
-        from app.tasks import format_goal_progress_value, get_goal_progress
+        from app.tasks import format_goal_progress_value, get_goal_progress, get_recurring_goal_progress
 
         for g in goals:
+            sport_label = _sport_display_label(g.activity_type)
+
+            if g.recurrence in ("monthly", "quarterly"):
+                recurring = await get_recurring_goal_progress(db, user, g)
+                period_word = "month" if g.recurrence == "monthly" else "quarter"
+
+                sp_lines = []
+                pending_count = 0
+                for sp in recurring.sub_periods:
+                    if sp.status == "pending":
+                        pending_count += 1
+                        continue
+                    icon = {"met": "✅", "missed": "❌", "in_progress": "🔵"}[sp.status]
+                    sp_lines.append(f"{icon} {sp.label.split()[0]}")
+                if pending_count:
+                    sp_lines.append(
+                        f"⏳ {pending_count} {period_word}{'s' if pending_count != 1 else ''} remaining"
+                    )
+
+                if recurring.overall_status == "achieved":
+                    banner = "🏆 Achieved!"
+                elif recurring.overall_status == "failed":
+                    first_missed = next(
+                        (sp for sp in recurring.sub_periods if sp.status == "missed"), None
+                    )
+                    banner = f"💔 Failed — missed {first_missed.label.split()[0] if first_missed else '?'}"
+                else:
+                    banner = f"▶️ In progress — {recurring.met_count}/{recurring.elapsed_count} met"
+
+                lines.append(
+                    f"*{sport_label}* — {g.category}\n"
+                    + "\n".join(sp_lines) + "\n"
+                    f"{banner}\n"
+                    f"_{g.start_date} → {g.end_date}_"
+                )
+                lines.append(divider)
+                continue
+
             progress = await get_goal_progress(db, user, g)
             pct = round(progress.pct)
 
@@ -1571,7 +1668,6 @@ async def _show_goal_status(query) -> None:
             filled_segs = round(min(100, pct) / 10)
             bar = "█" * filled_segs + "░" * (10 - filled_segs)
 
-            sport_label = _sport_display_label(g.activity_type)
             if progress.mode == "cumulative":
                 progress_line = (
                     f"🎯 {format_goal_progress_value(g, progress.current)}"
