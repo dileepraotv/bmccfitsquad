@@ -207,7 +207,7 @@ _GOAL_QUOTES: list[tuple[str, str]] = [
 
 def _random_goal_quote() -> str:
     quote, author = random.choice(_GOAL_QUOTES)
-    return f'*"{quote}"*\n*— {author}*'
+    return f'*"{quote}" — {author}*'
 
 
 def _inline_code_or_plain(text: str) -> str:
@@ -1074,8 +1074,8 @@ _GOAL_MODE_PROMPT = (
     "How should this goal be tracked?\n"
     "• *Cumulative Total* — add up every activity toward one big number "
     "(e.g. 1,000 km total)\n"
-    "• *Session Count* — hit a per-activity target a set number of times "
-    "(e.g. a 10 km run, 4 times)"
+    "• *Session Count* — hit a per-activity target a set number of "
+    "sessions (e.g. a 10 km run, 4 sessions)"
 )
 
 
@@ -1195,6 +1195,20 @@ def _goal_period_dates(period: str):
     return start.date(), end.date()
 
 
+def _format_goal_date_range(start, end) -> str:
+    """Compact human-readable window — "Aug 1 – Aug 31" (year appended only
+    once, and only if either end falls outside the current year) instead
+    of the verbose ISO "2026-08-01 → 2026-08-31"."""
+    cur_year = datetime.now(timezone.utc).year
+    start_str = start.strftime("%b %-d")
+    end_str = end.strftime("%b %-d")
+    if start.year != cur_year or end.year != cur_year:
+        if start.year == end.year:
+            return f"{start_str} – {end_str}, {end.year}"
+        return f"{start_str}, {start.year} – {end_str}, {end.year}"
+    return f"{start_str} – {end_str}"
+
+
 def _format_goal_summary(sport_display: str, category: str, aggregation: str,
                           count: int, period: str, start, end,
                           recurrence: str = "none") -> str:
@@ -1204,14 +1218,14 @@ def _format_goal_summary(sport_display: str, category: str, aggregation: str,
         f"Goal:     *{category}*",
     ]
     if aggregation == "frequency":
-        lines.append(f"Target:   *{count} time{'s' if count != 1 else ''}*")
+        lines.append(f"Target:   *{count} session{'s' if count != 1 else ''}*")
     period_label = {
         "monthly": f"{period} (repeats every month)",
         "quarterly": f"{period} (repeats every quarter)",
     }.get(recurrence, period)
     lines += [
         f"Period:   *{period_label}*",
-        f"Window:   {start}  →  {end}",
+        f"Window:   {_format_goal_date_range(start, end)}",
     ]
     return "\n".join(lines)
 
@@ -1266,7 +1280,7 @@ def _draft_summary_text(draft: dict) -> str:
     else:
         count = draft.get("count", 1)
         lines.append(f"Per-session: *{val_str} {unit}*")
-        lines.append(f"Target: *{count} time{'s' if count != 1 else ''}*")
+        lines.append(f"Target: *{count} session{'s' if count != 1 else ''}*")
     return "\n".join(lines)
 
 
@@ -1324,7 +1338,7 @@ def _count_prompt_text(draft: dict) -> str:
     return (
         f"*{_goal_step_progress(draft, 'count')}*\n\n"
         f"Per-session goal: *{val_str} {unit}*\n\n"
-        f"How many times do you want to achieve this?\n"
+        f"How many sessions do you want to achieve this in?\n"
         f"Enter a whole number — e.g. *4*\n\n"
         f"Type /back to go to the previous step, or /cancel to exit."
     )
@@ -1724,14 +1738,14 @@ async def _handle_goal_callbacks(query, data: str) -> None:
 
         sport_label = _sport_display_label(goal.activity_type)
         target_line = "" if goal.aggregation == "cumulative" else (
-            f"Target: *{goal.target_count} {'time' if goal.target_count == 1 else 'times'}*\n"
+            f"Target: *{goal.target_count} session{'s' if goal.target_count != 1 else ''}*\n"
         )
         await query.edit_message_text(
             f"Delete this goal?\n\n"
             f"Sport: *{sport_label}*\n"
             f"Goal: *{goal.category}*\n"
             f"{target_line}"
-            f"Window: {goal.start_date} → {goal.end_date}\n\n"
+            f"Window: {_format_goal_date_range(goal.start_date, goal.end_date)}\n\n"
             f"This can't be undone.",
             parse_mode="Markdown",
             reply_markup=confirm_keyboard(
@@ -1752,7 +1766,7 @@ async def _handle_goal_callbacks(query, data: str) -> None:
             if goal:
                 sport_label = _sport_display_label(goal.activity_type)
                 target_line = "" if goal.aggregation == "cumulative" else (
-                    f"Target: *{goal.target_count} times*\n"
+                    f"Target: *{goal.target_count} session{'s' if goal.target_count != 1 else ''}*\n"
                 )
                 goal.is_active = False
                 await db.commit()
@@ -1961,7 +1975,7 @@ async def _show_goal_status(query) -> None:
                 lines.append(
                     f"{emoji} *{sport_label} : {g.category}*\n\n"
                     f"{banner}\n"
-                    f"_{g.start_date} → {g.end_date}_"
+                    f"_{_format_goal_date_range(g.start_date, g.end_date)}_"
                 )
                 lines.append(divider)
                 detail_rows.append([InlineKeyboardButton(
@@ -1973,24 +1987,26 @@ async def _show_goal_status(query) -> None:
             progress = await get_goal_progress(db, user, g)
             pct = round(progress.pct)
 
-            # Compact progress bar — 10 segments
+            # Unicode progress bar — 10 segments. Plain characters (no code
+            # span) so it renders as a bar, not a black/redacted-looking
+            # monospace box.
             filled_segs = round(min(100, pct) / 10)
-            bar = "█" * filled_segs + "░" * (10 - filled_segs)
+            bar = "▰" * filled_segs + "▱" * (10 - filled_segs)
 
             if progress.mode == "cumulative":
                 progress_line = (
                     f"🎯 {format_goal_progress_value(g, progress.current)}"
                     f"/{format_goal_progress_value(g, progress.target)} "
-                    f"{_goal_metric_unit(sport_label, g.metric, g.aggregation)}"
+                    f"{_goal_metric_unit(sport_label, g.metric, g.aggregation)} ({pct}%)"
                 )
             else:
-                target_word = "time" if g.target_count == 1 else "times"
-                progress_line = f"🎯 {int(progress.current)}/{g.target_count} {target_word}"
+                session_word = "session" if g.target_count == 1 else "sessions"
+                progress_line = f"🎯 {int(progress.current)}/{g.target_count} {session_word} ({pct}%)"
             lines.append(
                 f"{emoji} *{sport_label} : {g.category}*\n\n"
                 f"{progress_line}\n"
-                f"`{bar}` {pct}%\n"
-                f"_{g.start_date} → {g.end_date}_"
+                f"{bar}\n"
+                f"_{_format_goal_date_range(g.start_date, g.end_date)}_"
             )
             lines.append(divider)
 
@@ -2051,7 +2067,7 @@ async def _show_goal_detail(query, goal_id: str) -> None:
         f"{emoji} *{sport_label} : {goal.category}*\n\n"
         + "\n".join(sp_lines) + "\n\n"
         f"{banner}\n"
-        f"_{goal.start_date} → {goal.end_date}_"
+        f"_{_format_goal_date_range(goal.start_date, goal.end_date)}_"
     )
     await query.edit_message_text(
         text,
