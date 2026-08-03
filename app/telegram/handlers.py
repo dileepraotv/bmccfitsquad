@@ -1070,21 +1070,47 @@ def _goal_metric_keyboard(sport: str) -> InlineKeyboardMarkup:
     ])
 
 
-_GOAL_MODE_PROMPT = (
-    "How should this goal be tracked?\n"
-    "• *Cumulative Total* — add up every activity toward one big number "
-    "(e.g. 1,000 km total)\n"
-    "• *Session Count* — hit a per-activity target a set number of "
-    "sessions (e.g. a 10 km run, 4 sessions)"
-)
+# Sport-specific noun for mode-picker examples — "a 10 km run" reads wrong
+# for Ride ("a 10 km ride") and makes no sense at all for Strength Training
+# ("a 10 km strength training"), so the prompt below is built per (sport,
+# metric) rather than sharing one hardcoded example across every sport.
+_GOAL_ACTIVITY_NOUN: dict[str, str] = {
+    "Ride": "ride", "Ride Endurance": "ride",
+    "Run": "run", "Walk": "walk", "Swim": "swim", "Hiking": "hike",
+    "Yoga": "session", "Racket Sports": "session", "Strength Training": "session",
+}
+
+
+def _goal_mode_prompt_text(sport: str, metric: str) -> str:
+    noun = _GOAL_ACTIVITY_NOUN.get(sport, "session")
+    cum_unit = _goal_metric_unit(sport, metric, "cumulative")
+    ses_unit = _goal_metric_unit(sport, metric, "frequency")
+
+    if metric == "elevation":
+        cum_example = f"e.g. 50,000 {cum_unit} of climbing total"
+        ses_example = f"e.g. 500 {ses_unit} of climbing in a {noun}, 4 sessions"
+    elif metric == "duration":
+        cum_example = f"e.g. 20 {cum_unit} total"
+        ses_example = f"e.g. a 30 {ses_unit} {noun}, 4 sessions"
+    else:  # distance
+        cum_example = f"e.g. 1,000 {cum_unit} total"
+        ses_example = f"e.g. a 10 {ses_unit} {noun}, 4 sessions"
+
+    return (
+        "How should this goal be tracked?\n"
+        f"• *Session Count* — hit a per-{noun} target a set number of "
+        f"sessions ({ses_example})\n"
+        f"• *Cumulative Total* — add up every {noun} toward one big number "
+        f"({cum_example})"
+    )
 
 
 def _goal_mode_keyboard(draft: dict) -> InlineKeyboardMarkup:
     """Aggregation-mode selector: sum-over-period vs. per-session count."""
     back_target = _goal_prev_step(draft, "mode") or "sport"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(_pad("Cumulative Total", _PAD_2COL), callback_data="goal:mode:cumulative"),
-         InlineKeyboardButton(_pad("Session Count", _PAD_2COL), callback_data="goal:mode:frequency")],
+        [InlineKeyboardButton(_pad("Session Count", _PAD_2COL), callback_data="goal:mode:frequency"),
+         InlineKeyboardButton(_pad("Cumulative Total", _PAD_2COL), callback_data="goal:mode:cumulative")],
         [InlineKeyboardButton(_pad("Back", _PAD_2COL), callback_data=f"goal:prev:{back_target}"),
          InlineKeyboardButton(_pad("Exit", _PAD_2COL), callback_data="goal:exit")],
     ])
@@ -1305,12 +1331,13 @@ def _metric_prompt_text(draft: dict) -> str:
 
 
 def _mode_prompt_text(draft: dict) -> str:
+    metric = draft.get("metric", "distance")
     lines = [f"*{_goal_step_progress(draft, 'mode')}*", ""]
     lines.append(f"Sport: *{draft['sport']}*")
     if draft.get("metric"):
-        lines.append(f"Metric: *{draft['metric'].capitalize()}*")
+        lines.append(f"Metric: *{metric.capitalize()}*")
     lines.append("")
-    lines.append(_GOAL_MODE_PROMPT)
+    lines.append(_goal_mode_prompt_text(draft["sport"], metric))
     return "\n".join(lines)
 
 
