@@ -207,7 +207,7 @@ _GOAL_QUOTES: list[tuple[str, str]] = [
 
 def _random_goal_quote() -> str:
     quote, author = random.choice(_GOAL_QUOTES)
-    return f'_"{quote}"_\n_— {author}_'
+    return f'*"{quote}"*\n*— {author}*'
 
 
 def _inline_code_or_plain(text: str) -> str:
@@ -1959,8 +1959,7 @@ async def _show_goal_status(query) -> None:
                     banner = f"▶️ In progress — {recurring.met_count}/{recurring.elapsed_count} met"
 
                 lines.append(
-                    f"{emoji} *{sport_label}*\n"
-                    f"{g.category}\n"
+                    f"{emoji} *{sport_label} : {g.category}*\n\n"
                     f"{banner}\n"
                     f"_{g.start_date} → {g.end_date}_"
                 )
@@ -1988,8 +1987,7 @@ async def _show_goal_status(query) -> None:
                 target_word = "time" if g.target_count == 1 else "times"
                 progress_line = f"🎯 {int(progress.current)}/{g.target_count} {target_word}"
             lines.append(
-                f"{emoji} *{sport_label}*\n"
-                f"{g.category}\n"
+                f"{emoji} *{sport_label} : {g.category}*\n\n"
                 f"{progress_line}\n"
                 f"`{bar}` {pct}%\n"
                 f"_{g.start_date} → {g.end_date}_"
@@ -2050,8 +2048,7 @@ async def _show_goal_detail(query, goal_id: str) -> None:
         banner = f"▶️ In progress — {recurring.met_count}/{recurring.elapsed_count} met"
 
     text = (
-        f"{emoji} *{sport_label}*\n"
-        f"{goal.category}\n\n"
+        f"{emoji} *{sport_label} : {goal.category}*\n\n"
         + "\n".join(sp_lines) + "\n\n"
         f"{banner}\n"
         f"_{goal.start_date} → {goal.end_date}_"
