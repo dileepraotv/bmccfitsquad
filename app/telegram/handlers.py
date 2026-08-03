@@ -914,14 +914,14 @@ _PAD_3COL  = 20  # 3 buttons sharing a row
 
 
 def _goals_main_keyboard() -> InlineKeyboardMarkup:
-    """Full-width, one button per row — the main /goals menu is the first
-    thing every user sees, so it gets the most generous real estate rather
-    than a cramped 2x2 grid."""
+    """2x2 grid — kept to two rows, but padded to _PAD_2COL so each button
+    fills its half of the row instead of leaving dead space around short
+    labels like "Exit"."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(_pad("Add Goal", _PAD_FULL),    callback_data="goal:add")],
-        [InlineKeyboardButton(_pad("Delete Goal", _PAD_FULL), callback_data="goal:delete_menu")],
-        [InlineKeyboardButton(_pad("Goal Status", _PAD_FULL), callback_data="goal:status")],
-        [InlineKeyboardButton(_pad("Exit", _PAD_FULL),        callback_data="goal:exit")],
+        [InlineKeyboardButton(_pad("Add Goal", _PAD_2COL),    callback_data="goal:add"),
+         InlineKeyboardButton(_pad("Delete Goal", _PAD_2COL), callback_data="goal:delete_menu")],
+        [InlineKeyboardButton(_pad("Goal Status", _PAD_2COL), callback_data="goal:status"),
+         InlineKeyboardButton(_pad("Exit", _PAD_2COL),        callback_data="goal:exit")],
     ])
 
 
