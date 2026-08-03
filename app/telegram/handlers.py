@@ -2184,7 +2184,10 @@ async def _show_goal_status(query) -> None:
                     if current_sp:
                         pace = _goal_pace_label(current_sp.progress.pct, current_sp.start, current_sp.end)
                         if pace:
-                            banner += f"\n{current_sp.label}: {pace} ({round(current_sp.progress.pct)}%)"
+                            # Tacked onto the same line (pushed right with
+                            # padding) rather than its own line — keeps the
+                            # compact recurring summary compact.
+                            banner += f"   {pace}"
 
                 lines.append(
                     f"{emoji} *{sport_label} : {g.category}*\n\n"
@@ -2218,12 +2221,15 @@ async def _show_goal_status(query) -> None:
                 progress_line = f"🎯 {int(progress.current)}/{g.target_count} {session_word} ({pct}%)"
 
             pace = _goal_pace_label(progress.pct, g.start_date, g.end_date)
-            pace_line = f"{pace}\n" if pace else ""
+            if pace:
+                # Tacked onto the progress line itself (pushed right with
+                # padding) rather than a line of its own — saves vertical
+                # space, especially with several goals on one screen.
+                progress_line += f"   {pace}"
             lines.append(
                 f"{emoji} *{sport_label} : {g.category}*\n\n"
                 f"{progress_line}\n"
                 f"{bar}\n"
-                f"{pace_line}"
                 f"_{_format_goal_date_range(g.start_date, g.end_date)}_"
             )
             lines.append(divider)
