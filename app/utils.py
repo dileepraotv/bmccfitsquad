@@ -60,6 +60,82 @@ OTHER_ACTIVITY_SPORTS: list[str] = ["Yoga", "RacketSports", "Hiking", "StrengthT
 
 
 # ---------------------------------------------------------------------------
+# Goal engine — Sport x Metric compatibility + unit conversion
+# ---------------------------------------------------------------------------
+# Not every metric makes sense for every sport (e.g. Yoga has no meaningful
+# elevation). Keyed by the goal flow's space-cased display label (e.g.
+# "Ride Endurance"), matching handlers._SPORT_UNITS / _SPORT_TYPE_MAP.
+GOAL_SPORT_METRICS: dict[str, list[str]] = {
+    "Ride":              ["distance", "elevation", "duration"],
+    "Ride Endurance":    ["distance", "elevation", "duration"],
+    "Run":               ["distance", "elevation", "duration"],
+    "Walk":              ["distance", "elevation", "duration"],
+    "Hiking":            ["distance", "elevation", "duration"],
+    "Swim":              ["distance", "duration"],
+    "Yoga":              ["duration"],
+    "Racket Sports":     ["duration"],
+    "Strength Training": ["duration"],
+}
+
+
+def goal_metric_unit(sport: str, metric: str, aggregation: str) -> str:
+    """Display unit for a goal's (sport, metric, aggregation) combination.
+
+    Duration uses different units depending on aggregation: a per-session
+    threshold reads naturally in minutes ("30 min"), but a cumulative total
+    reads better in hours ("20 hrs" rather than "1200 min"). Distance stays
+    in km except for Swim, which (like the rest of the product) is always
+    tracked in metres.
+    """
+    if metric == "elevation":
+        return "m"
+    if metric == "duration":
+        return "hrs" if aggregation == "cumulative" else "min"
+    return "m" if sport == "Swim" else "km"
+
+
+def goal_value_to_canonical(value: float, unit: str) -> float:
+    """Convert a user-entered display value to the canonical base unit
+    goals are stored/queried in: metres for distance/elevation, seconds
+    for duration."""
+    if unit == "km":
+        return value * 1_000
+    if unit == "hrs":
+        return value * 3_600
+    if unit == "min":
+        return value * 60
+    return value
+
+
+def goal_canonical_to_display(value: float, unit: str) -> float:
+    """Inverse of goal_value_to_canonical — canonical stored value back to
+    the unit a user should see it in."""
+    if unit == "km":
+        return value / 1_000
+    if unit == "hrs":
+        return value / 3_600
+    if unit == "min":
+        return value / 60
+    return value
+
+
+def format_goal_number(value: float) -> str:
+    """Render a goal value for display: whole numbers get thousands
+    separators and no decimal point, fractional values get one decimal.
+
+    Examples::
+
+        >>> format_goal_number(5000)
+        '5,000'
+        >>> format_goal_number(21.1)
+        '21.1'
+    """
+    if value == int(value):
+        return f"{int(value):,}"
+    return f"{value:,.1f}"
+
+
+# ---------------------------------------------------------------------------
 # Time
 # ---------------------------------------------------------------------------
 

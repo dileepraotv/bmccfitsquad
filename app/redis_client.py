@@ -112,14 +112,18 @@ def key_leaderboard(month_key: str) -> str:
     return f"leaderboard:v1:{month_key}"
 
 
-# Short TTL: the same per-goal achieved-count query is run independently by
-# both the activity-notification goal footer and the /goals status screen,
-# often within seconds of each other. A new activity for that user always
-# recomputes (and re-caches) a fresh count immediately, so this rarely
+# Short TTL: the same per-goal progress query is run independently by both
+# the activity-notification goal footer and the /goals status screen, often
+# within seconds of each other. A new activity for that user always
+# recomputes (and re-caches) fresh progress immediately, so this rarely
 # serves anything more than a few seconds stale.
 _GOAL_COUNT_CACHE_TTL_SECONDS = 60
 
 
 def key_goal_count(goal_id) -> str:
-    """Cached achieved-activity-count for one goal's current period."""
-    return f"goal:count:v1:{goal_id}"
+    """Cached progress ("mode|current|target|pct") for one goal's current
+    period. v2 — bumped from v1 when get_goal_achieved_count (bare int) was
+    replaced by get_goal_progress (structured, metric/aggregation-aware)
+    as part of the Flexible Goal Engine, since the cached value's shape
+    changed and old v1 entries would otherwise fail to parse."""
+    return f"goal:count:v2:{goal_id}"

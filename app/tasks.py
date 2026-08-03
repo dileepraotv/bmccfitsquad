@@ -22,6 +22,7 @@ import asyncio
 import logging
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import and_, func, select
@@ -34,8 +35,10 @@ from app.models import Activity, Goal, GroupChat, User
 from app.strava.auth import get_valid_access_token
 from app.strava.client import fetch_activities
 from app.telegram.notifications import format_activity_notification
-from app.utils import DURATION_BASED_SPORTS as _DURATION_BASED_SPORTS
 from app.utils import SPORT_ACTIVITY_TYPES as _SPORT_ACTIVITY_TYPES
+from app.utils import goal_canonical_to_display as _goal_canonical_to_display
+from app.utils import goal_metric_unit as _goal_metric_unit
+from app.utils import format_goal_number as _format_goal_number
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -658,24 +661,14 @@ async def _sync_user_activities_async(user_id: str, full: bool = False) -> None:
 # ---------------------------------------------------------------------------
 # Shared utilities
 # ---------------------------------------------------------------------------
-
-def _parse_category_threshold(category: str) -> float:
-    try:
-        parts = category.strip().split()
-        val  = float(parts[0].replace(",", "."))
-        unit = parts[1].lower() if len(parts) > 1 else "km"
-        return val * 1_000 if unit == "km" else val
-    except (IndexError, ValueError):
-        return 0.0
-
-
-def _parse_duration_threshold_s(category: str) -> float:
-    """Convert a "30 min" style duration category to seconds."""
-    try:
-        return float(category.strip().split()[0].replace(",", ".")) * 60
-    except (IndexError, ValueError):
-        return 0.0
-
+#
+# Note: the old free-text "category" threshold parsers (_parse_category_
+# threshold / _parse_duration_threshold_s) were removed here — goals now
+# store a canonical-unit target_value directly (see app.utils.
+# goal_value_to_canonical), computed once at goal-creation time in
+# handlers.py rather than re-parsed from a display string on every progress
+# check. A copy of the old parsers is kept, deliberately duplicated, inside
+# alembic/versions/0005_flexible_goal_engine.py to backfill existing rows.
 
 _SPORT_TYPE_MAP_REVERSE = {
     "RideEndurance":     "Ride Endurance",
@@ -688,8 +681,38 @@ def _sport_display_label(activity_type: str) -> str:
     return _SPORT_TYPE_MAP_REVERSE.get(activity_type, activity_type)
 
 
-async def get_goal_achieved_count(db, user: User, goal: Goal) -> int:
-    """Count of activities satisfying *goal* so far this period.
+@dataclass
+class GoalProgress:
+    """Structured progress result — replaces the old bare achieved-count
+    return so callers can render cumulative totals ("142 / 150 km") and
+    frequency counts ("3 / 10 rides") distinctly instead of assuming every
+    goal is a simple qualifying-activity tally."""
+
+    mode: str      # "cumulative" | "frequency"
+    current: float  # cumulative: summed canonical metric value; frequency: qualifying count
+    target: float   # cumulative: goal.target_value (canonical); frequency: goal.target_count
+    pct: float      # 0-100, capped for display bars
+
+
+_METRIC_COLUMN = {
+    "distance": Activity.distance_meters,
+    "elevation": Activity.elevation_gain,
+    "duration": Activity.moving_time_seconds,
+}
+
+
+async def get_goal_progress(db, user: User, goal: Goal) -> GoalProgress:
+    """Compute *goal*'s progress so far this period.
+
+    Metric-aware (distance / elevation / duration) and aggregation-mode
+    aware (cumulative sum vs. frequency count against target_value as a
+    per-activity threshold). When goal.allow_multiple_daily is False,
+    activities are first collapsed to one row per calendar day — keeping
+    only that day's MAX value of the goal's *own* metric — before being
+    summed/counted, so a second activity on the same day never inflates a
+    cumulative total, and (for an elevation goal) the day's flattest ride
+    doesn't wrongly win out over a hillier-but-shorter one just because it
+    was longer in distance.
 
     Cached briefly per-goal (see key_goal_count) since this exact query is
     run independently by both the activity-notification goal footer
@@ -707,7 +730,10 @@ async def get_goal_achieved_count(db, user: User, goal: Goal) -> int:
     try:
         cached = await redis.get(cache_key)
         if cached is not None:
-            return int(cached)
+            mode, current_s, target_s, pct_s = cached.split("|")
+            return GoalProgress(
+                mode=mode, current=float(current_s), target=float(target_s), pct=float(pct_s)
+            )
     except Exception:
         pass
 
@@ -718,39 +744,88 @@ async def get_goal_achieved_count(db, user: User, goal: Goal) -> int:
         goal.end_date.year, goal.end_date.month, goal.end_date.day, tzinfo=timezone.utc
     ) + timedelta(days=1)
     act_types = _SPORT_ACTIVITY_TYPES.get(goal.activity_type, [goal.activity_type])
+    metric_col = _METRIC_COLUMN.get(goal.metric, Activity.distance_meters)
 
-    if goal.activity_type in _DURATION_BASED_SPORTS:
-        threshold_s = _parse_duration_threshold_s(goal.category)
-        metric_filter = Activity.moving_time_seconds >= threshold_s
-    else:
-        threshold_m = _parse_category_threshold(goal.category)
-        metric_filter = Activity.distance_meters >= threshold_m
+    base_filters = [
+        Activity.user_id == user.id,
+        Activity.activity_type.in_(act_types),
+        Activity.activity_date >= start_dt,
+        Activity.activity_date < end_dt,
+    ]
+    # Ride Endurance is only "endurance" above 200 km in /stats
+    # (stats/calculator.py) — apply the same floor here regardless of the
+    # goal's own metric/threshold, so a goal can never count a ride that
+    # Ride Endurance stats itself would never recognise.
+    if goal.activity_type == "RideEndurance":
+        base_filters.append(Activity.distance_meters >= 200_000)
 
-    count_result = await db.execute(
-        select(func.count(Activity.id)).where(
-            and_(
-                Activity.user_id == user.id,
-                Activity.activity_type.in_(act_types),
-                Activity.activity_date >= start_dt,
-                Activity.activity_date < end_dt,
-                metric_filter,
+    if goal.allow_multiple_daily:
+        if goal.aggregation == "cumulative":
+            result = await db.execute(
+                select(func.coalesce(func.sum(metric_col), 0.0)).where(and_(*base_filters))
             )
+            current = float(result.scalar_one() or 0.0)
+        else:
+            result = await db.execute(
+                select(func.count(Activity.id)).where(
+                    and_(*base_filters, metric_col >= goal.target_value)
+                )
+            )
+            current = float(result.scalar_one() or 0)
+    else:
+        daily_max_subq = (
+            select(func.max(metric_col).label("daily_max"))
+            .where(and_(*base_filters))
+            .group_by(func.date(Activity.activity_date))
+            .subquery()
         )
-    )
-    achieved = count_result.scalar_one() or 0
+        if goal.aggregation == "cumulative":
+            result = await db.execute(
+                select(func.coalesce(func.sum(daily_max_subq.c.daily_max), 0.0))
+            )
+            current = float(result.scalar_one() or 0.0)
+        else:
+            result = await db.execute(
+                select(func.count()).select_from(daily_max_subq).where(
+                    daily_max_subq.c.daily_max >= goal.target_value
+                )
+            )
+            current = float(result.scalar_one() or 0)
+
+    target = goal.target_value if goal.aggregation == "cumulative" else float(goal.target_count)
+    pct = min(100.0, round(current / target * 100, 1)) if target > 0 else 0.0
+    progress = GoalProgress(mode=goal.aggregation, current=current, target=target, pct=pct)
 
     try:
-        await redis.set(cache_key, str(achieved), ex=_TTL)
+        await redis.set(
+            cache_key,
+            f"{progress.mode}|{progress.current}|{progress.target}|{progress.pct}",
+            ex=_TTL,
+        )
     except Exception:
         logger.warning("goal count cache: failed to write cache for goal_id=%s", goal.id)
 
-    return achieved
+    return progress
+
+
+def format_goal_progress_value(goal: Goal, canonical_value: float) -> str:
+    """Render a canonical-unit progress value (metres/seconds) back in the
+    goal's own display unit, e.g. 142_000.0 (metres) -> "142" for a km goal.
+
+    Public (no leading underscore) since handlers._show_goal_status also
+    uses this to render the /goals status screen consistently with the
+    activity-notification goal footer below.
+    """
+    unit = _goal_metric_unit(_sport_display_label(goal.activity_type), goal.metric, goal.aggregation)
+    return _format_goal_number(_goal_canonical_to_display(canonical_value, unit))
 
 
 async def _build_goal_lines(db, user: User) -> list[tuple[str, str]]:
     """Return (label, value) pairs for the notification's goal-progress
-    footer — e.g. ("🧘 Yoga 30 min", "3/8") — so they render as an aligned
-    monospace column via format_kv_lines, same as the metrics block."""
+    footer — e.g. ("🧘 Yoga 30 min", "3/8") for frequency goals, or
+    ("🚴 Ride Total 5,000 km", "1,240/5,000") for cumulative ones — so they
+    render as an aligned monospace column via format_kv_lines, same as the
+    metrics block."""
     goals_res = await db.execute(
         select(Goal).where(Goal.user_id == user.id, Goal.is_active == True)  # noqa: E712
     )
@@ -759,8 +834,8 @@ async def _build_goal_lines(db, user: User) -> list[tuple[str, str]]:
         return []
 
     lines: list[tuple[str, str]] = []
-    for i, g in enumerate(goals, start=1):
-        achieved = await get_goal_achieved_count(db, user, g)
+    for g in goals:
+        progress = await get_goal_progress(db, user, g)
 
         sport_label = _sport_display_label(g.activity_type)
         sport_emoji = {
@@ -769,9 +844,13 @@ async def _build_goal_lines(db, user: User) -> list[tuple[str, str]]:
             "Hiking": "🥾", "Yoga": "🧘",
             "RacketSports": "🏸", "StrengthTraining": "🏋️",
         }.get(g.activity_type, "🏅")
-        lines.append(
-            (f"{sport_emoji} {sport_label} {g.category}", f"{achieved}/{g.target_count}")
-        )
+
+        label = f"{sport_emoji} {sport_label} {g.category}"
+        if progress.mode == "cumulative":
+            value = f"{format_goal_progress_value(g, progress.current)}/{format_goal_progress_value(g, progress.target)}"
+        else:
+            value = f"{int(progress.current)}/{g.target_count}"
+        lines.append((label, value))
 
     return lines
 

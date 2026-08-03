@@ -195,12 +195,35 @@ class Goal(Base):
     # e.g. "Ride", "RideEndurance", "Run", "Swim", "Walk"
     activity_type: Mapped[str] = mapped_column(Text, nullable=False)
 
-    # Human-readable category that defines a single achievement unit.
-    # Examples: "100 Km", "10 Km", "1000 m" (elevation)
+    # Display-cache string, derived from the structured columns below at
+    # write time (e.g. "100 km", "Total 150 km"). No longer the source of
+    # truth for progress calculation — kept so any legacy display code
+    # reading it during the Phase 1 transition keeps working.
     category: Mapped[str] = mapped_column(Text, nullable=False)
 
-    # How many times the user wants to hit the category within the date range
+    # What's being measured per activity: "distance" | "elevation" | "duration"
+    metric: Mapped[str] = mapped_column(Text, nullable=False, default="distance")
+
+    # "cumulative" — sum metric across all qualifying activities vs target_value
+    # "frequency"  — count activities where metric >= target_value, vs target_count
+    aggregation: Mapped[str] = mapped_column(Text, nullable=False, default="frequency")
+
+    # Canonical-unit target: meters for distance/elevation, seconds for
+    # duration. In "frequency" mode this is the per-activity threshold; in
+    # "cumulative" mode this is the total target for the whole period.
+    target_value: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+
+    # How many times the user wants to hit the threshold within the date
+    # range. Only meaningful in "frequency" mode; ignored in "cumulative".
     target_count: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    # If False, only the day's single best activity (by this goal's own
+    # metric) counts toward progress — see get_goal_achieved_count().
+    allow_multiple_daily: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    # "none" | "monthly" | "quarterly" — reserved for the Phase 2 recurrence
+    # engine; Phase 1 only ever writes "none".
+    recurrence: Mapped[str] = mapped_column(Text, nullable=False, default="none")
 
     # Goal window
     start_date: Mapped[date] = mapped_column(Date, nullable=False)

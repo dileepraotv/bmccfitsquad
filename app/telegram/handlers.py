@@ -1,18 +1,31 @@
 """All Telegram command and callback handlers.
 
-Goals flow design
------------------
+Goals flow design (Flexible Goal Engine — Phase 1)
+---------------------------------------------------
 Goals use a purely callback-driven flow (no ConversationHandler) so state is
-never lost when the Railway web dyno restarts.  State is passed forward in
-callback_data using a compact encoding:
+never lost when the web dyno restarts. Unlike the old single-string
+callback_data encoding, every answer collected along the way is written to
+the Redis goal draft (goal_draft:{tg_id}, see _save_draft/_load_draft) —
+callback_data itself only ever carries the *current* step's choice, kept
+short and well under Telegram's 64-byte callback_data limit even as the
+flow grew from 3 steps to 6:
 
-  goal:sport:<sport>                  → sport chosen
-  goal:cat:<sport>|<category>         → category chosen
-  goal:count:<sport>|<category>|<n>   → count confirmed (inline keyboard buttons 1-12)
-  goal:period:<sport>|<cat>|<n>|<per> → period chosen → save to DB
+  goal:sport:<sport>        → sport chosen. Sports with only one valid
+                               metric (Yoga/Racket Sports/Strength Training
+                               are duration-only) auto-skip step 2.
+  goal:metric:<metric>      → distance | elevation | duration
+  goal:mode:<mode>          → cumulative (total target) | frequency (per-
+                               session threshold x count)
+  (free text)               → target value, then — frequency mode only —
+                               how many times
+  goal:multiday:<yes|no>    → count every activity separately, or collapse
+                               same-day activities to the day's best one
+  goal:period:<period>      → period chosen → reads the full draft → saves
+                               to DB
 
-The only text-input step (entering a count) was replaced with a count picker
-keyboard (1-12 buttons) to avoid needing a ConversationHandler for text input.
+See app.utils.GOAL_SPORT_METRICS for the sport/metric compatibility matrix
+and app.tasks.get_goal_progress for how (metric, aggregation,
+allow_multiple_daily) combine at progress-calculation time.
 """
 from __future__ import annotations
 
@@ -55,9 +68,13 @@ from app.telegram.keyboards import (
     stats_sport_keyboard,
 )
 from app.utils import DURATION_BASED_SPORTS as _DURATION_BASED_SPORTS
+from app.utils import GOAL_SPORT_METRICS as _GOAL_SPORT_METRICS
 from app.utils import OTHER_ACTIVITY_SPORTS as _OTHER_ACTIVITY_SPORTS
 from app.utils import SPORT_ACTIVITY_TYPES as _SPORT_ACTIVITY_TYPES
+from app.utils import format_goal_number as _format_goal_number
 from app.utils import format_kv_lines as _format_kv_lines
+from app.utils import goal_metric_unit as _goal_metric_unit
+from app.utils import goal_value_to_canonical as _goal_value_to_canonical
 from app.utils import SEPARATOR as _SEPARATOR
 from app.utils import escape_markdown_v2 as _escape_md
 
@@ -866,9 +883,8 @@ def _sport_display_label(activity_type: str) -> str:
 # (imported above as _SPORT_ACTIVITY_TYPES) so goal progress always counts the
 # same activities as /stats and the notification goal-progress footer.
 #
-# Threshold parsing + achieved-count querying (_parse_category_threshold,
-# _parse_duration_threshold_s) now live once in app.tasks, shared via
-# get_goal_achieved_count() — see its use in _show_goal_status below.
+# Progress querying lives once in app.tasks.get_goal_progress, metric- and
+# aggregation-mode-aware — see its use in _show_goal_status below.
 
 _GOAL_PERIODS = [
     "This Month",
@@ -881,21 +897,11 @@ _GOAL_PERIODS = [
 
 _GOAL_DRAFT_TTL = 600  # seconds — draft expires after 10 min of inactivity
 
-_SPORT_UNITS: dict[str, str] = {
-    "Ride":              "km",
-    "Ride Endurance":    "km",
-    "Run":               "km",
-    "Walk":              "km",
-    "Swim":              "m",
-    "Hiking":            "km",
-    "Yoga":              "min",
-    "Racket Sports":     "min",
-    "Strength Training": "min",
+_METRIC_LABELS: dict[str, str] = {
+    "distance": "📏 Distance",
+    "elevation": "⛰ Elevation",
+    "duration": "⏱ Duration",
 }
-
-
-def _sport_unit(sport: str) -> str:
-    return _SPORT_UNITS.get(sport, "km")
 
 
 def _goals_main_keyboard() -> InlineKeyboardMarkup:
@@ -933,9 +939,45 @@ def _goal_other_sport_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-def _goal_period_keyboard(sport: str, category: str, count: str) -> InlineKeyboardMarkup:
+def _goal_metric_keyboard(sport: str) -> InlineKeyboardMarkup:
+    """Metric selector, filtered to the sport's valid metrics (see
+    GOAL_SPORT_METRICS). Only shown for sports with 2+ valid metrics —
+    duration-only sports (Yoga/Racket Sports/Strength Training) never see
+    this step at all (auto-skipped in the goal:sport: handler)."""
+    metrics = _GOAL_SPORT_METRICS.get(sport, ["distance"])
+    row = [
+        InlineKeyboardButton(_pad(_METRIC_LABELS[m], 21), callback_data=f"goal:metric:{m}")
+        for m in metrics
+    ]
+    return InlineKeyboardMarkup([row, [InlineKeyboardButton(_pad("Cancel", 42), callback_data="goal:exit")]])
+
+
+def _goal_mode_keyboard() -> InlineKeyboardMarkup:
+    """Aggregation-mode selector: sum-over-period vs. per-session count."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(_pad("🎯 Total Target", 21), callback_data="goal:mode:cumulative"),
+         InlineKeyboardButton(_pad("🔁 Per-Session Count", 21), callback_data="goal:mode:frequency")],
+        [InlineKeyboardButton(_pad("Cancel", 42), callback_data="goal:exit")],
+    ])
+
+
+def _goal_daily_keyboard() -> InlineKeyboardMarkup:
+    """Daily multi-instance question — Yes (count every activity, the
+    product default) pre-highlighted with a checkmark vs. No (collapse
+    same-day activities to the day's best one)."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(_pad("✅ Every Activity", 21), callback_data="goal:multiday:yes"),
+         InlineKeyboardButton(_pad("🌟 Best Per Day", 21), callback_data="goal:multiday:no")],
+        [InlineKeyboardButton(_pad("Cancel", 42), callback_data="goal:exit")],
+    ])
+
+
+def _goal_period_keyboard() -> InlineKeyboardMarkup:
+    """Period selector — the final step. All prior answers (sport, metric,
+    aggregation, value(s), allow_multiple_daily) already live in the Redis
+    draft, so callback_data only needs to carry the period name itself."""
     p = _GOAL_PERIODS
-    enc = lambda period: f"goal:period:{sport}|{category}|{count}|{period}"  # noqa: E731
+    enc = lambda period: f"goal:period:{period}"  # noqa: E731
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(_pad(p[0], 21), callback_data=enc(p[0])),
          InlineKeyboardButton(_pad(p[1], 21), callback_data=enc(p[1]))],
@@ -992,16 +1034,65 @@ def _goal_period_dates(period: str):
     return start.date(), end.date()
 
 
-def _format_goal_summary(sport_display: str, category: str, count: int,
-                          period: str, start, end) -> str:
+def _format_goal_summary(sport_display: str, category: str, aggregation: str,
+                          count: int, period: str, start, end) -> str:
     lines = [
         "✅ *Goal saved!*\n",
         f"Sport:    *{sport_display}*",
         f"Goal:     *{category}*",
-        f"Target:   *{count} time{'s' if count != 1 else ''}*",
+    ]
+    if aggregation == "frequency":
+        lines.append(f"Target:   *{count} time{'s' if count != 1 else ''}*")
+    lines += [
         f"Period:   *{period}*",
         f"Window:   {start}  →  {end}",
     ]
+    return "\n".join(lines)
+
+
+def _format_goal_category(sport: str, metric: str, aggregation: str,
+                           value: float, unit: str) -> str:
+    """Build the display-cache "category" string from structured goal
+    fields — e.g. "100 km" / "30 min" (frequency, unchanged from the
+    pre-Phase-1 format) or "Total 5,000 km" / "Total 100,000 m elevation"
+    (new cumulative goals)."""
+    display_val = _format_goal_number(value)
+    suffix = " elevation" if metric == "elevation" else ""
+    if aggregation == "cumulative":
+        return f"Total {display_val} {unit}{suffix}"
+    return f"{display_val} {unit}{suffix}"
+
+
+def _goal_value_examples(metric: str, aggregation: str, unit: str) -> str:
+    """Example numbers shown alongside the free-text value prompt, tuned to
+    the metric/aggregation combination so a cumulative yearly elevation
+    target (tens of thousands of metres) doesn't show the same examples as
+    a per-ride elevation threshold (hundreds of metres)."""
+    if metric == "duration":
+        return "`5`, `10`, `20`" if aggregation == "cumulative" else "`30`, `45`, `60`"
+    if metric == "elevation":
+        return "`10,000`, `50,000`, `100,000`" if aggregation == "cumulative" else "`500`, `1,000`"
+    if unit == "m":  # Swim distance
+        return "`10,000`, `50,000`" if aggregation == "cumulative" else "`500`, `1,000`, `1,500`, `3,800`"
+    return "`150`, `1,000`, `5,000`" if aggregation == "cumulative" else "`50`, `100`, `200`"
+
+
+def _draft_summary_text(draft: dict) -> str:
+    """Short recap of the answers collected so far, shown above the final
+    two steps (daily-instance question, period picker) so the user can
+    double check what they're about to save."""
+    sport = draft["sport"]
+    metric = draft.get("metric", "distance")
+    aggregation = draft.get("aggregation", "frequency")
+    unit = _goal_metric_unit(sport, metric, aggregation)
+    val_str = _format_goal_number(draft.get("value", 0))
+    lines = [f"Sport: *{sport}*", f"Metric: *{metric.capitalize()}*"]
+    if aggregation == "cumulative":
+        lines.append(f"Target: *Total {val_str} {unit}*")
+    else:
+        count = draft.get("count", 1)
+        lines.append(f"Per-session: *{val_str} {unit}*")
+        lines.append(f"Target: *{count} time{'s' if count != 1 else ''}*")
     return "\n".join(lines)
 
 
@@ -1102,50 +1193,112 @@ async def _handle_goal_callbacks(query, data: str) -> None:
         await query.edit_message_text("Goals closed. Tap /goals anytime to return.")
         return
 
-    # ── Sport chosen → ask for goal target as a number ─────────────────────
+    # ── Sport chosen → metric picker (or auto-skip straight to mode picker
+    #    for duration-only sports, which only have one valid metric) ───────
     if data.startswith("goal:sport:"):
         sport = data[len("goal:sport:"):]
-        await _save_draft(tg_id, {"sport": sport, "step": "category"})
+        metrics = _GOAL_SPORT_METRICS.get(sport, ["distance"])
+        if len(metrics) == 1:
+            await _save_draft(tg_id, {"sport": sport, "metric": metrics[0], "step": "mode"})
+            await query.edit_message_text(
+                f"Sport: *{sport}*",
+                parse_mode="Markdown",
+                reply_markup=_goal_mode_keyboard(),
+            )
+        else:
+            await _save_draft(tg_id, {"sport": sport, "step": "metric"})
+            await query.edit_message_text(
+                f"Sport: *{sport}*\n\nWhat do you want to measure?",
+                parse_mode="Markdown",
+                reply_markup=_goal_metric_keyboard(sport),
+            )
+        return
+
+    # ── Metric chosen → aggregation-mode picker ─────────────────────────────
+    if data.startswith("goal:metric:"):
+        metric = data[len("goal:metric:"):]
+        draft = await _load_draft(tg_id)
+        if not draft:
+            await query.edit_message_text("Session expired. Please try /goals again.")
+            return
+        draft["metric"] = metric
+        draft["step"] = "mode"
+        await _save_draft(tg_id, draft)
         await query.edit_message_text(
-            f"Sport: *{sport}*",
+            f"Sport: *{draft['sport']}*\nMetric: *{metric.capitalize()}*",
+            parse_mode="Markdown",
+            reply_markup=_goal_mode_keyboard(),
+        )
+        return
+
+    # ── Mode chosen → prompt for the target value as free text ─────────────
+    if data.startswith("goal:mode:"):
+        mode = data[len("goal:mode:"):]
+        draft = await _load_draft(tg_id)
+        if not draft:
+            await query.edit_message_text("Session expired. Please try /goals again.")
+            return
+        draft["aggregation"] = mode
+        draft["step"] = "value"
+        await _save_draft(tg_id, draft)
+
+        sport, metric = draft["sport"], draft["metric"]
+        unit = _goal_metric_unit(sport, metric, mode)
+        await query.edit_message_text(
+            f"Sport: *{sport}*\nMetric: *{metric.capitalize()}*",
             parse_mode="Markdown",
         )
-        unit = _sport_unit(sport)
-        examples = {
-            "Run":               "`5`, `10`, `21.1`, `42.2`",
-            "Walk":              "`2`, `5`, `10`, `21.1`",
-            "Ride":              "`50`, `100`, `200`",
-            "Ride Endurance":    "`200`, `300`, `600`",
-            "Swim":              "`500`, `1000`, `1500`, `3800`",
-            "Hiking":            "`2`, `5`, `10`, `21.1`",
-            "Yoga":              "`30`, `45`, `60`",
-            "Racket Sports":     "`30`, `45`, `60`",
-            "Strength Training": "`30`, `45`, `60`",
-        }
-        eg = examples.get(sport, "`100`")
-        goal_noun = "session length" if unit == "min" else "distance"
+        if mode == "cumulative":
+            prompt = f"✏️ *What's your total {metric} target for {sport} this period?*"
+        else:
+            noun = "session length" if metric == "duration" else metric
+            prompt = f"✏️ *What is your per-session {noun} goal for {sport}?*"
+        eg = _goal_value_examples(metric, mode, unit)
         await query.message.reply_text(
-            f"✏️ *What is your goal {goal_noun} for {sport}?*\n\n"
+            f"{prompt}\n\n"
             f"Enter a number in {unit} — e.g. {eg}\n\n"
             f"Type /cancel to abort.",
             parse_mode="Markdown",
         )
         return
 
+    # ── Daily multi-instance answer → period picker ─────────────────────────
+    if data.startswith("goal:multiday:"):
+        answer = data[len("goal:multiday:"):]
+        draft = await _load_draft(tg_id)
+        if not draft:
+            await query.edit_message_text("Session expired. Please try /goals again.")
+            return
+        draft["allow_multiple_daily"] = (answer == "yes")
+        draft["step"] = "period"
+        await _save_draft(tg_id, draft)
+        await query.edit_message_text(
+            _draft_summary_text(draft) + "\n\nChoose the time period:",
+            parse_mode="Markdown",
+            reply_markup=_goal_period_keyboard(),
+        )
+        return
+
     # ── Period chosen → save goal ──────────────────────────────────────────
     if data.startswith("goal:period:"):
-        payload = data[len("goal:period:"):]
-        parts = payload.split("|")
-        if len(parts) < 4:
-            await query.edit_message_text("Invalid goal data. Please try /goals again.")
+        period = data[len("goal:period:"):]
+        draft = await _load_draft(tg_id)
+        if not draft or "sport" not in draft or "value" not in draft:
+            await query.edit_message_text("Session expired. Please try /goals again.")
             return
 
-        sport_display = parts[0]
-        category      = parts[1]
-        count         = int(parts[2])
-        period        = parts[3]
+        sport_display = draft["sport"]
+        metric        = draft["metric"]
+        aggregation   = draft["aggregation"]
+        value         = draft["value"]
+        count         = draft.get("count", 1)
+        allow_multi   = draft.get("allow_multiple_daily", True)
         sport_db      = _SPORT_TYPE_MAP.get(sport_display, sport_display)
         start, end    = _goal_period_dates(period)
+
+        unit = _goal_metric_unit(sport_display, metric, aggregation)
+        target_value = _goal_value_to_canonical(value, unit)
+        category = _format_goal_category(sport_display, metric, aggregation, value, unit)
 
         async with AsyncSessionLocal() as db:
             result = await db.execute(
@@ -1160,7 +1313,11 @@ async def _handle_goal_callbacks(query, data: str) -> None:
                 user_id=user.id,
                 activity_type=sport_db,
                 category=category,
+                metric=metric,
+                aggregation=aggregation,
+                target_value=target_value,
                 target_count=count,
+                allow_multiple_daily=allow_multi,
                 start_date=start,
                 end_date=end,
             )
@@ -1169,7 +1326,7 @@ async def _handle_goal_callbacks(query, data: str) -> None:
 
         await _clear_draft(tg_id)
         await query.edit_message_text(
-            _format_goal_summary(sport_display, category, count, period, start, end),
+            _format_goal_summary(sport_display, category, aggregation, count, period, start, end),
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton(_pad("My Goals", 42), callback_data="goal:menu"),
@@ -1193,12 +1350,14 @@ async def _handle_goal_callbacks(query, data: str) -> None:
             return
 
         sport_label = _sport_display_label(goal.activity_type)
-        target_word = "time" if goal.target_count == 1 else "times"
+        target_line = "" if goal.aggregation == "cumulative" else (
+            f"Target: *{goal.target_count} {'time' if goal.target_count == 1 else 'times'}*\n"
+        )
         await query.edit_message_text(
             f"Delete this goal?\n\n"
             f"Sport: *{sport_label}*\n"
             f"Goal: *{goal.category}*\n"
-            f"Target: *{goal.target_count} {target_word}*\n"
+            f"{target_line}"
             f"Window: {goal.start_date} → {goal.end_date}\n\n"
             f"This can't be undone.",
             parse_mode="Markdown",
@@ -1219,13 +1378,16 @@ async def _handle_goal_callbacks(query, data: str) -> None:
             goal = result.scalar_one_or_none()
             if goal:
                 sport_label = _sport_display_label(goal.activity_type)
+                target_line = "" if goal.aggregation == "cumulative" else (
+                    f"Target: *{goal.target_count} times*\n"
+                )
                 goal.is_active = False
                 await db.commit()
                 await query.edit_message_text(
                     f"✅ *Goal deleted*\n\n"
                     f"Sport: *{sport_label}*\n"
                     f"Goal: *{goal.category}*\n"
-                    f"Target: *{goal.target_count} times*\n\n"
+                    f"{target_line}\n"
                     f"Use /goals to manage your goals.",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup([[
@@ -1258,9 +1420,11 @@ async def _handle_goal_text_input(update: Update) -> bool:
 
     step = draft.get("step")
 
-    if step == "category":
+    if step == "value":
         sport = draft.get("sport", "")
-        unit  = _sport_unit(sport)
+        metric = draft.get("metric", "distance")
+        aggregation = draft.get("aggregation", "frequency")
+        unit = _goal_metric_unit(sport, metric, aggregation)
         try:
             val = float(text.replace(",", "."))
             if val <= 0:
@@ -1271,19 +1435,31 @@ async def _handle_goal_text_input(update: Update) -> bool:
                 parse_mode="Markdown",
             )
             return True
-        # Normalise: drop trailing .0 for whole numbers so "100.0 km" → "100 km"
-        display_val = int(val) if val == int(val) else val
-        category = f"{display_val} {unit}"
-        draft["category"] = category
-        draft["step"]     = "count"
-        await _save_draft(tg_id, draft)
-        await update.message.reply_text(
-            f"Goal: *{category}*\n\n"
-            f"How many times do you want to achieve this?\n"
-            f"Enter a number — e.g. *4*\n\n"
-            f"Type /cancel to abort.",
-            parse_mode="Markdown",
-        )
+
+        draft["value"] = val
+        val_str = _format_goal_number(val)
+
+        if aggregation == "cumulative":
+            draft["step"] = "daily"
+            await _save_draft(tg_id, draft)
+            await update.message.reply_text(
+                f"Target: *Total {val_str} {unit}*\n\n"
+                f"Count every activity separately, or only your best per day?\n"
+                f"_(e.g. if you log two rides in one day, \"Best Per Day\" only "
+                f"counts the one with the higher {metric}.)_",
+                parse_mode="Markdown",
+                reply_markup=_goal_daily_keyboard(),
+            )
+        else:
+            draft["step"] = "count"
+            await _save_draft(tg_id, draft)
+            await update.message.reply_text(
+                f"Per-session goal: *{val_str} {unit}*\n\n"
+                f"How many times do you want to achieve this?\n"
+                f"Enter a number — e.g. *4*\n\n"
+                f"Type /cancel to abort.",
+                parse_mode="Markdown",
+            )
         return True
 
     if step == "count":
@@ -1295,20 +1471,16 @@ async def _handle_goal_text_input(update: Update) -> bool:
             return True
 
         draft["count"] = int(text)
-        draft["step"]  = "period"
+        draft["step"]  = "daily"
         await _save_draft(tg_id, draft)
 
-        sport    = draft["sport"]
-        category = draft["category"]
-        count    = draft["count"]
-
         await update.message.reply_text(
-            f"Sport: *{sport}*\n"
-            f"Goal: *{category}*\n"
-            f"Target: *{count} time{'s' if count != 1 else ''}*\n\n"
-            f"Choose the time period:",
+            _draft_summary_text(draft) + "\n\n"
+            "Count every activity separately, or only your best per day?\n"
+            f"_(e.g. if you log two activities in one day, \"Best Per Day\" only "
+            f"counts the one with the higher {draft.get('metric', 'distance')}.)_",
             parse_mode="Markdown",
-            reply_markup=_goal_period_keyboard(sport, category, str(count)),
+            reply_markup=_goal_daily_keyboard(),
         )
         return True
 
@@ -1337,13 +1509,16 @@ async def _show_delete_menu(query) -> None:
         )
         return
 
+    def _delete_row_label(g: Goal) -> str:
+        target = "" if g.aggregation == "cumulative" else f" x{g.target_count}"
+        return (
+            f"{_sport_display_label(g.activity_type)}"
+            f" — {g.category}{target} ({g.start_date} to {g.end_date})"
+        )
+
     rows = [
         [InlineKeyboardButton(
-            _pad(
-                f"{_sport_display_label(g.activity_type)}"
-                f" — {g.category} x{g.target_count} ({g.start_date} to {g.end_date})",
-                42,
-            ),
+            _pad(_delete_row_label(g), 42),
             callback_data=f"goal:delete_pick:{g.id}",
         )]
         for g in goals
@@ -1386,21 +1561,29 @@ async def _show_goal_status(query) -> None:
             "",
         ]
 
-        from app.tasks import get_goal_achieved_count
+        from app.tasks import format_goal_progress_value, get_goal_progress
 
         for g in goals:
-            achieved = await get_goal_achieved_count(db, user, g)
-            pct = min(100, round(achieved / g.target_count * 100))
+            progress = await get_goal_progress(db, user, g)
+            pct = round(progress.pct)
 
             # Compact progress bar — 10 segments
-            filled_segs = round(pct / 10)
+            filled_segs = round(min(100, pct) / 10)
             bar = "█" * filled_segs + "░" * (10 - filled_segs)
 
             sport_label = _sport_display_label(g.activity_type)
-            target_word = "time" if g.target_count == 1 else "times"
+            if progress.mode == "cumulative":
+                progress_line = (
+                    f"🎯 {format_goal_progress_value(g, progress.current)}"
+                    f"/{format_goal_progress_value(g, progress.target)} "
+                    f"{_goal_metric_unit(sport_label, g.metric, g.aggregation)}"
+                )
+            else:
+                target_word = "time" if g.target_count == 1 else "times"
+                progress_line = f"🎯 {int(progress.current)}/{g.target_count} {target_word}"
             lines.append(
                 f"*{sport_label}* — {g.category}\n"
-                f"🎯 {achieved}/{g.target_count} {target_word}\n"
+                f"{progress_line}\n"
                 f"`{bar}` {pct}%\n"
                 f"_{g.start_date} → {g.end_date}_"
             )
