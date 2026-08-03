@@ -180,6 +180,36 @@ def _random_quote() -> str:
         return "Every kilometre counts."
 
 
+# Goal-flow-specific quotes (curated, on-topic for setting/pursuing goals) —
+# shown on the goals menu, the Add Goal intro, and the Goal Status header,
+# instead of one hardcoded line repeated every time.
+_GOAL_QUOTES: list[tuple[str, str]] = [
+    ("Setting goals is the first step in turning the invisible into the visible.", "Tony Robbins"),
+    ("Our goals can only be reached through a vehicle of a plan, in which we must "
+     "fervently believe, and upon which we must vigorously act. There is no other "
+     "route to success.", "Pablo Picasso"),
+    ("The secret of getting ahead is getting started.", "Mark Twain"),
+    ("You are never too old to set another goal or to dream a new dream.", "C.S. Lewis"),
+    ("Shoot for the moon. Even if you miss, you'll land among the stars.", "Les Brown"),
+    ("If you set your goals ridiculously high and it's a failure, you will fail "
+     "above everyone else's success.", "James Cameron"),
+    ("A goal is a dream with a deadline.", "Napoleon Hill"),
+    ("If you want to live a happy life, tie it to a goal, not to people or things.", "Albert Einstein"),
+    ("Obstacles are those frightful things you see when you take your eyes off "
+     "your goal.", "Henry Ford"),
+    ("What you get by achieving your goals is not as important as what you "
+     "become by achieving your goals.", "Zig Ziglar"),
+    ("It always seems impossible until it's done.", "Nelson Mandela"),
+    ("Disciplined execution of a well-defined goal always trumps brilliant "
+     "intentions.", "Unknown"),
+]
+
+
+def _random_goal_quote() -> str:
+    quote, author = random.choice(_GOAL_QUOTES)
+    return f'_"{quote}"_\n_— {author}_'
+
+
 def _inline_code_or_plain(text: str) -> str:
     """Wrap free-text user content (activity name/description) in a
     single-line inline code span for monospace display. Telegram inline
@@ -897,10 +927,33 @@ _GOAL_PERIODS = [
 
 _GOAL_DRAFT_TTL = 600  # seconds — draft expires after 10 min of inactivity
 
+# Plain text — no emoji. This dict is looked up rather than typed as a
+# literal next to InlineKeyboardButton(...), so a naive "grep for emoji next
+# to InlineKeyboardButton" audit will miss it; keep it plain on purpose.
 _METRIC_LABELS: dict[str, str] = {
-    "distance": "📏 Distance",
-    "elevation": "⛰ Elevation",
-    "duration": "⏱ Duration",
+    "distance": "Distance",
+    "elevation": "Elevation",
+    "duration": "Duration",
+}
+
+# Spelled-out unit words for free-text prompts — "kilometers (km)" reads far
+# more clearly to a first-time user than a bare "(km)".
+_UNIT_WORDS: dict[str, str] = {
+    "km": "kilometers",
+    "m": "meters",
+    "hrs": "hours",
+    "min": "minutes",
+}
+
+# The four sports only reachable via "Other Activities" — used to route a
+# mid-flow Back tap to the right sport menu (core vs. other).
+_OTHER_MENU_SPORTS = {"Yoga", "Racket Sports", "Hiking", "Strength Training"}
+
+_SPORT_EMOJI: dict[str, str] = {
+    "Ride": "🚴", "RideEndurance": "🚴",
+    "Run": "🏃", "Walk": "🚶", "Swim": "🏊",
+    "Hiking": "🥾", "Yoga": "🧘",
+    "RacketSports": "🏸", "StrengthTraining": "🏋️",
 }
 
 
@@ -913,14 +966,60 @@ _PAD_2COL  = 32  # 2 buttons sharing a row
 _PAD_3COL  = 20  # 3 buttons sharing a row
 
 
+# ---------------------------------------------------------------------------
+# Step-progress ("Step X of Y") — computed per-draft, not hardcoded, since
+# the metric step is skipped for duration-only sports and the count step is
+# skipped in cumulative mode. "rectype" (One-time Period vs Repeating Goal)
+# and "final" (the period or recurrence picker, depending on that choice)
+# are always present, so the total never depends on which of those two is
+# picked — only on what's skippable earlier in the flow.
+# ---------------------------------------------------------------------------
+_GOAL_STEP_ORDER = ["sport", "metric", "mode", "value", "count", "daily", "rectype", "final"]
+
+
+def _goal_step_progress(draft: dict, step_key: str) -> str:
+    sport = draft.get("sport")
+    metrics = _GOAL_SPORT_METRICS.get(sport, ["distance", "elevation", "duration"]) if sport else ["distance", "elevation", "duration"]
+    skip_metric = len(metrics) <= 1
+    skip_count = draft.get("aggregation") == "cumulative"
+
+    applicable = [
+        s for s in _GOAL_STEP_ORDER
+        if not (s == "metric" and skip_metric) and not (s == "count" and skip_count)
+    ]
+    total = len(applicable)
+    current = applicable.index(step_key) + 1 if step_key in applicable else total
+    return f"Step {current} of {total}"
+
+
+def _goal_prev_step(draft: dict, current_step: str) -> str | None:
+    """The step immediately before *current_step* in this draft's actual
+    path through the flow (accounting for the same metric/count skips as
+    _goal_step_progress), or None if current_step is the first step."""
+    sport = draft.get("sport")
+    metrics = _GOAL_SPORT_METRICS.get(sport, ["distance", "elevation", "duration"]) if sport else ["distance", "elevation", "duration"]
+    skip_metric = len(metrics) <= 1
+    skip_count = draft.get("aggregation") == "cumulative"
+
+    applicable = [
+        s for s in _GOAL_STEP_ORDER
+        if not (s == "metric" and skip_metric) and not (s == "count" and skip_count)
+    ]
+    if current_step not in applicable:
+        return None
+    idx = applicable.index(current_step)
+    return applicable[idx - 1] if idx > 0 else None
+
+
 def _goals_main_keyboard() -> InlineKeyboardMarkup:
-    """2x2 grid — kept to two rows, but padded to _PAD_2COL so each button
-    fills its half of the row instead of leaving dead space around short
-    labels like "Exit"."""
+    """Grouped by how often each action is used, not a uniform grid: Add
+    Goal and Goal Status are the two things most people tap regularly, so
+    each gets its own full-width row; Delete Goal (rare) and Exit
+    (non-action) are secondary and share the bottom row."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(_pad("Add Goal", _PAD_2COL),    callback_data="goal:add"),
-         InlineKeyboardButton(_pad("Delete Goal", _PAD_2COL), callback_data="goal:delete_menu")],
-        [InlineKeyboardButton(_pad("Goal Status", _PAD_2COL), callback_data="goal:status"),
+        [InlineKeyboardButton(_pad("Add Goal", _PAD_FULL),    callback_data="goal:add")],
+        [InlineKeyboardButton(_pad("Goal Status", _PAD_FULL), callback_data="goal:status")],
+        [InlineKeyboardButton(_pad("Delete Goal", _PAD_2COL), callback_data="goal:delete_menu"),
          InlineKeyboardButton(_pad("Exit", _PAD_2COL),        callback_data="goal:exit")],
     ])
 
@@ -964,7 +1063,11 @@ def _goal_metric_keyboard(sport: str) -> InlineKeyboardMarkup:
         InlineKeyboardButton(_pad(_METRIC_LABELS[m], width), callback_data=f"goal:metric:{m}")
         for m in metrics
     ]
-    return InlineKeyboardMarkup([row, [InlineKeyboardButton(_pad("Cancel", _PAD_FULL), callback_data="goal:exit")]])
+    return InlineKeyboardMarkup([
+        row,
+        [InlineKeyboardButton(_pad("Back", _PAD_2COL), callback_data="goal:prev:sport"),
+         InlineKeyboardButton(_pad("Exit", _PAD_2COL), callback_data="goal:exit")],
+    ])
 
 
 _GOAL_MODE_PROMPT = (
@@ -976,30 +1079,50 @@ _GOAL_MODE_PROMPT = (
 )
 
 
-def _goal_mode_keyboard() -> InlineKeyboardMarkup:
+def _goal_mode_keyboard(draft: dict) -> InlineKeyboardMarkup:
     """Aggregation-mode selector: sum-over-period vs. per-session count."""
+    back_target = _goal_prev_step(draft, "mode") or "sport"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(_pad("Cumulative Total", _PAD_2COL), callback_data="goal:mode:cumulative"),
          InlineKeyboardButton(_pad("Session Count", _PAD_2COL), callback_data="goal:mode:frequency")],
-        [InlineKeyboardButton(_pad("Cancel", _PAD_FULL), callback_data="goal:exit")],
+        [InlineKeyboardButton(_pad("Back", _PAD_2COL), callback_data=f"goal:prev:{back_target}"),
+         InlineKeyboardButton(_pad("Exit", _PAD_2COL), callback_data="goal:exit")],
     ])
 
 
-def _goal_daily_keyboard() -> InlineKeyboardMarkup:
+def _goal_daily_keyboard(draft: dict) -> InlineKeyboardMarkup:
     """Daily multi-instance question — "Count All Activities" (the product
     default) vs. "Only Best Each Day" (collapse same-day activities to the
     day's best one)."""
+    back_target = _goal_prev_step(draft, "daily") or "mode"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(_pad("Count All Activities", _PAD_2COL), callback_data="goal:multiday:yes"),
          InlineKeyboardButton(_pad("Only Best Each Day", _PAD_2COL), callback_data="goal:multiday:no")],
-        [InlineKeyboardButton(_pad("Cancel", _PAD_FULL), callback_data="goal:exit")],
+        [InlineKeyboardButton(_pad("Back", _PAD_2COL), callback_data=f"goal:prev:{back_target}"),
+         InlineKeyboardButton(_pad("Exit", _PAD_2COL), callback_data="goal:exit")],
+    ])
+
+
+def _goal_rectype_keyboard() -> InlineKeyboardMarkup:
+    """Top-level choice between a one-off goal for a specific period and a
+    goal that repeats independently every month/quarter across the year —
+    asked before the period picker so recurrence reads as its own concept
+    rather than a hidden sub-branch that only appears after picking "This
+    Year" specifically."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(_pad("One-time Period", _PAD_2COL), callback_data="goal:rectype:onetime"),
+         InlineKeyboardButton(_pad("Repeating Goal", _PAD_2COL), callback_data="goal:rectype:repeating")],
+        [InlineKeyboardButton(_pad("Back", _PAD_2COL), callback_data="goal:prev:daily"),
+         InlineKeyboardButton(_pad("Exit", _PAD_2COL), callback_data="goal:exit")],
     ])
 
 
 def _goal_period_keyboard() -> InlineKeyboardMarkup:
-    """Period selector — the final step. All prior answers (sport, metric,
-    aggregation, value(s), allow_multiple_daily) already live in the Redis
-    draft, so callback_data only needs to carry the period name itself."""
+    """Period selector for a one-time goal. All prior answers (sport,
+    metric, aggregation, value(s), allow_multiple_daily) already live in
+    the Redis draft, so callback_data only needs to carry the period name
+    itself. First/Second Half of Year share one row with shortened labels
+    so neither wraps or overflows its half of the row."""
     p = _GOAL_PERIODS
     enc = lambda period: f"goal:period:{period}"  # noqa: E731
     return InlineKeyboardMarkup([
@@ -1007,21 +1130,23 @@ def _goal_period_keyboard() -> InlineKeyboardMarkup:
          InlineKeyboardButton(_pad(p[1], _PAD_2COL), callback_data=enc(p[1]))],
         [InlineKeyboardButton(_pad(p[2], _PAD_2COL), callback_data=enc(p[2])),
          InlineKeyboardButton(_pad(p[5], _PAD_2COL), callback_data=enc(p[5]))],
-        [InlineKeyboardButton(_pad(p[3], _PAD_FULL), callback_data=enc(p[3]))],
-        [InlineKeyboardButton(_pad(p[4], _PAD_FULL), callback_data=enc(p[4]))],
-        [InlineKeyboardButton(_pad("Cancel", _PAD_FULL),   callback_data="goal:exit")],
+        [InlineKeyboardButton(_pad("First Half", _PAD_2COL), callback_data=enc(p[3])),
+         InlineKeyboardButton(_pad("Second Half", _PAD_2COL), callback_data=enc(p[4]))],
+        [InlineKeyboardButton(_pad("Back", _PAD_2COL), callback_data="goal:prev:rectype"),
+         InlineKeyboardButton(_pad("Exit", _PAD_2COL), callback_data="goal:exit")],
     ])
 
 
 def _goal_recurrence_keyboard() -> InlineKeyboardMarkup:
-    """Shown only when the chosen period is "This Year" — offers repeating
-    the target independently every calendar month or quarter (Phase 2)
-    instead of tracking one single year-long total (today's behavior)."""
+    """Shown for a "Repeating Goal" — the target always spans the full
+    year (period is implicitly "This Year"), so this only asks how often
+    it repeats within it. A one-off yearly total instead is reached via
+    "One-time Period" → "This Year" in _goal_period_keyboard, not here."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(_pad("Whole Year", _PAD_FULL), callback_data="goal:recurrence:none")],
         [InlineKeyboardButton(_pad("Every Month", _PAD_2COL), callback_data="goal:recurrence:monthly"),
          InlineKeyboardButton(_pad("Every Quarter", _PAD_2COL), callback_data="goal:recurrence:quarterly")],
-        [InlineKeyboardButton(_pad("Cancel", _PAD_FULL), callback_data="goal:exit")],
+        [InlineKeyboardButton(_pad("Back", _PAD_2COL), callback_data="goal:prev:rectype"),
+         InlineKeyboardButton(_pad("Exit", _PAD_2COL), callback_data="goal:exit")],
     ])
 
 
@@ -1145,6 +1270,104 @@ def _draft_summary_text(draft: dict) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Prompt builders — one function per step, each a pure function of the
+# draft so far. Shared by the forward flow (_handle_goal_callbacks /
+# _handle_goal_text_input) and the Back handler (goal:prev:<step>), so
+# stepping back and re-answering a step always looks identical to reaching
+# it the first time.
+# ---------------------------------------------------------------------------
+
+def _sport_intro_text() -> str:
+    return f"{_random_goal_quote()}\n\nChoose a Sport:"
+
+
+def _metric_prompt_text(draft: dict) -> str:
+    return (
+        f"*{_goal_step_progress(draft, 'metric')}*\n\n"
+        f"Sport: *{draft['sport']}*\n\n"
+        f"What do you want to measure?"
+    )
+
+
+def _mode_prompt_text(draft: dict) -> str:
+    lines = [f"*{_goal_step_progress(draft, 'mode')}*", ""]
+    lines.append(f"Sport: *{draft['sport']}*")
+    if draft.get("metric"):
+        lines.append(f"Metric: *{draft['metric'].capitalize()}*")
+    lines.append("")
+    lines.append(_GOAL_MODE_PROMPT)
+    return "\n".join(lines)
+
+
+def _value_prompt_text(draft: dict) -> str:
+    sport, metric, mode = draft["sport"], draft["metric"], draft["aggregation"]
+    unit = _goal_metric_unit(sport, metric, mode)
+    unit_word = _UNIT_WORDS.get(unit, unit)
+    if mode == "cumulative":
+        prompt = f"✏️ *What's your total {metric} target for {sport} this period?*"
+    else:
+        noun = "session length" if metric == "duration" else metric
+        prompt = f"✏️ *What is your per-session {noun} goal for {sport}?*"
+    eg = _goal_value_examples(metric, mode, unit)
+    return (
+        f"*{_goal_step_progress(draft, 'value')}*\n\n"
+        f"{prompt}\n\n"
+        f"Enter a number in {unit_word} ({unit}) — e.g. {eg}\n\n"
+        f"Type /back to go to the previous step, or /cancel to exit."
+    )
+
+
+def _count_prompt_text(draft: dict) -> str:
+    val_str = _format_goal_number(draft.get("value", 0))
+    unit = _goal_metric_unit(draft["sport"], draft["metric"], draft["aggregation"])
+    return (
+        f"*{_goal_step_progress(draft, 'count')}*\n\n"
+        f"Per-session goal: *{val_str} {unit}*\n\n"
+        f"How many times do you want to achieve this?\n"
+        f"Enter a whole number — e.g. *4*\n\n"
+        f"Type /back to go to the previous step, or /cancel to exit."
+    )
+
+
+def _daily_prompt_text(draft: dict) -> str:
+    sport = draft.get("sport", "this sport")
+    return (
+        f"{_draft_summary_text(draft)}\n\n"
+        f"*{_goal_step_progress(draft, 'daily')}*\n\n"
+        f"If you log more than one {sport} activity on the same day, should "
+        f"they all count, or just the best one?\n"
+        f"_(This only affects multiple {sport} activities on the same day — "
+        f"any Runs, Walks, Rides, or other sports you also log still count "
+        f"toward their own separate goals as usual.)_"
+    )
+
+
+def _rectype_prompt_text(draft: dict) -> str:
+    return (
+        f"{_draft_summary_text(draft)}\n\n"
+        f"*{_goal_step_progress(draft, 'rectype')}*\n\n"
+        "Is this a one-time goal for a specific period, or should it repeat "
+        "independently every month or quarter throughout the year?"
+    )
+
+
+def _period_prompt_text(draft: dict) -> str:
+    return (
+        f"{_draft_summary_text(draft)}\n\n"
+        f"*{_goal_step_progress(draft, 'final')}*\n\n"
+        "Choose the time period:"
+    )
+
+
+def _recurrence_prompt_text(draft: dict) -> str:
+    return (
+        f"{_draft_summary_text(draft)}\n\n"
+        f"*{_goal_step_progress(draft, 'final')}*\n\n"
+        "Repeat this target every month, or every quarter?"
+    )
+
+
 # Redis draft helpers
 
 def _draft_key(tg_id: int) -> str:
@@ -1174,6 +1397,38 @@ async def _clear_draft(tg_id: int) -> None:
     _users_with_draft.discard(tg_id)
 
 
+async def _nearest_deadline_line(db, user: "User", goals: list) -> str | None:
+    """One-line summary of whichever active goal's deadline is soonest —
+    for a recurring goal that means the sub-period currently in progress
+    (e.g. this month), not the year-long window as a whole, since that's
+    the deadline that's actually approaching."""
+    from app.tasks import get_recurring_goal_progress
+
+    today = datetime.now(timezone.utc).date()
+    best_deadline = None
+    best_goal = None
+    for g in goals:
+        if g.recurrence in ("monthly", "quarterly"):
+            recurring = await get_recurring_goal_progress(db, user, g)
+            current_sp = next((sp for sp in recurring.sub_periods if sp.status == "in_progress"), None)
+            deadline = current_sp.end if current_sp else g.end_date
+        else:
+            deadline = g.end_date
+        if deadline < today:
+            continue
+        if best_deadline is None or deadline < best_deadline:
+            best_deadline, best_goal = deadline, g
+
+    if best_goal is None:
+        return None
+
+    sport_label = _sport_display_label(best_goal.activity_type)
+    emoji = _SPORT_EMOJI.get(best_goal.activity_type, "🏅")
+    days_left = (best_deadline - today).days
+    when = "today" if days_left == 0 else ("tomorrow" if days_left == 1 else f"in {days_left} days")
+    return f"⏰ Closest deadline: {emoji} *{sport_label}* {best_goal.category} — ends {when} ({best_deadline})"
+
+
 async def _send_goals_menu(target, user_id: int) -> None:
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(User).where(User.telegram_user_id == user_id))
@@ -1183,10 +1438,18 @@ async def _send_goals_menu(target, user_id: int) -> None:
         goals_res = await db.execute(
             select(Goal).where(Goal.user_id == user.id, Goal.is_active == True)  # noqa: E712
         )
-        count = len(goals_res.scalars().all())
+        goals = goals_res.scalars().all()
+        deadline_line = await _nearest_deadline_line(db, user, goals) if goals else None
 
-    n = f"{count} Active Goal{'s' if count != 1 else ''}"
-    text = f'🎯 _"A goal is a dream with a deadline."_\n\nYou have *{n}*.'
+    count = len(goals)
+    quote = _random_goal_quote()
+    if count == 0:
+        text = f"🎯 {quote}\n\nYou have no active goals yet — tap *Add Goal* to set one."
+    else:
+        n = f"{count} active goal{'s' if count != 1 else ''}"
+        text = f"🎯 {quote}\n\nYou have *{n}*."
+        if deadline_line:
+            text += f"\n\n{deadline_line}"
 
     if hasattr(target, "edit_message_text"):
         await target.edit_message_text(text, parse_mode="Markdown", reply_markup=_goals_main_keyboard())
@@ -1254,8 +1517,7 @@ async def _handle_goal_callbacks(query, data: str) -> None:
     if data == "goal:add":
         await _clear_draft(tg_id)
         await query.edit_message_text(
-            '_"Setting goals is the first step in turning the invisible into the visible."_\n\n'
-            "Choose a Sport:",
+            _sport_intro_text(),
             parse_mode="Markdown",
             reply_markup=_goal_sport_keyboard(),
         )
@@ -1275,8 +1537,7 @@ async def _handle_goal_callbacks(query, data: str) -> None:
 
     if data == "goal:sport_menu":
         await query.edit_message_text(
-            '_"Setting goals is the first step in turning the invisible into the visible."_\n\n'
-            "Choose a Sport:",
+            _sport_intro_text(),
             parse_mode="Markdown",
             reply_markup=_goal_sport_keyboard(),
         )
@@ -1290,29 +1551,72 @@ async def _handle_goal_callbacks(query, data: str) -> None:
         await _show_goal_status(query)
         return
 
+    if data.startswith("goal:detail:"):
+        await _show_goal_detail(query, data[len("goal:detail:"):])
+        return
+
     if data == "goal:exit":
         await _clear_draft(tg_id)
         await query.edit_message_text("Goals closed. Tap /goals anytime to return.")
+        return
+
+    # ── True step-back: re-render the target step's own screen from the
+    #    draft as it stands, rather than wiping the whole flow like
+    #    goal:exit does. Picking sport again naturally resets anything
+    #    downstream (see goal:sport: below), so no manual field cleanup is
+    #    needed for the other targets — stale fields get overwritten as the
+    #    user retraces their steps forward again. ────────────────────────
+    if data.startswith("goal:prev:"):
+        target = data[len("goal:prev:"):]
+        draft = await _load_draft(tg_id) or {}
+        draft["step"] = target
+        await _save_draft(tg_id, draft)
+
+        if target == "sport":
+            if draft.get("sport_menu") == "other":
+                await query.edit_message_text("Choose an activity:", reply_markup=_goal_other_sport_keyboard())
+            else:
+                await query.edit_message_text(_sport_intro_text(), parse_mode="Markdown", reply_markup=_goal_sport_keyboard())
+        elif target == "metric":
+            await query.edit_message_text(
+                _metric_prompt_text(draft), parse_mode="Markdown",
+                reply_markup=_goal_metric_keyboard(draft["sport"]),
+            )
+        elif target == "mode":
+            await query.edit_message_text(
+                _mode_prompt_text(draft), parse_mode="Markdown", reply_markup=_goal_mode_keyboard(draft),
+            )
+        elif target == "value":
+            await query.edit_message_text(_value_prompt_text(draft), parse_mode="Markdown")
+        elif target == "count":
+            await query.edit_message_text(_count_prompt_text(draft), parse_mode="Markdown")
+        elif target == "daily":
+            await query.edit_message_text(
+                _daily_prompt_text(draft), parse_mode="Markdown", reply_markup=_goal_daily_keyboard(draft),
+            )
+        elif target == "rectype":
+            await query.edit_message_text(
+                _rectype_prompt_text(draft), parse_mode="Markdown", reply_markup=_goal_rectype_keyboard(),
+            )
         return
 
     # ── Sport chosen → metric picker (or auto-skip straight to mode picker
     #    for duration-only sports, which only have one valid metric) ───────
     if data.startswith("goal:sport:"):
         sport = data[len("goal:sport:"):]
+        sport_menu = "other" if sport in _OTHER_MENU_SPORTS else "core"
         metrics = _GOAL_SPORT_METRICS.get(sport, ["distance"])
         if len(metrics) == 1:
-            await _save_draft(tg_id, {"sport": sport, "metric": metrics[0], "step": "mode"})
+            draft = {"sport": sport, "sport_menu": sport_menu, "metric": metrics[0], "step": "mode"}
+            await _save_draft(tg_id, draft)
             await query.edit_message_text(
-                f"Sport: *{sport}*\n\n{_GOAL_MODE_PROMPT}",
-                parse_mode="Markdown",
-                reply_markup=_goal_mode_keyboard(),
+                _mode_prompt_text(draft), parse_mode="Markdown", reply_markup=_goal_mode_keyboard(draft),
             )
         else:
-            await _save_draft(tg_id, {"sport": sport, "step": "metric"})
+            draft = {"sport": sport, "sport_menu": sport_menu, "step": "metric"}
+            await _save_draft(tg_id, draft)
             await query.edit_message_text(
-                f"Sport: *{sport}*\n\nWhat do you want to measure?",
-                parse_mode="Markdown",
-                reply_markup=_goal_metric_keyboard(sport),
+                _metric_prompt_text(draft), parse_mode="Markdown", reply_markup=_goal_metric_keyboard(sport),
             )
         return
 
@@ -1327,9 +1631,7 @@ async def _handle_goal_callbacks(query, data: str) -> None:
         draft["step"] = "mode"
         await _save_draft(tg_id, draft)
         await query.edit_message_text(
-            f"Sport: *{draft['sport']}*\nMetric: *{metric.capitalize()}*\n\n{_GOAL_MODE_PROMPT}",
-            parse_mode="Markdown",
-            reply_markup=_goal_mode_keyboard(),
+            _mode_prompt_text(draft), parse_mode="Markdown", reply_markup=_goal_mode_keyboard(draft),
         )
         return
 
@@ -1343,28 +1645,10 @@ async def _handle_goal_callbacks(query, data: str) -> None:
         draft["aggregation"] = mode
         draft["step"] = "value"
         await _save_draft(tg_id, draft)
-
-        sport, metric = draft["sport"], draft["metric"]
-        unit = _goal_metric_unit(sport, metric, mode)
-        await query.edit_message_text(
-            f"Sport: *{sport}*\nMetric: *{metric.capitalize()}*",
-            parse_mode="Markdown",
-        )
-        if mode == "cumulative":
-            prompt = f"✏️ *What's your total {metric} target for {sport} this period?*"
-        else:
-            noun = "session length" if metric == "duration" else metric
-            prompt = f"✏️ *What is your per-session {noun} goal for {sport}?*"
-        eg = _goal_value_examples(metric, mode, unit)
-        await query.message.reply_text(
-            f"{prompt}\n\n"
-            f"Enter a number in {unit} — e.g. {eg}\n\n"
-            f"Type /cancel to abort.",
-            parse_mode="Markdown",
-        )
+        await query.edit_message_text(_value_prompt_text(draft), parse_mode="Markdown")
         return
 
-    # ── Daily multi-instance answer → period picker ─────────────────────────
+    # ── Daily multi-instance answer → recurrence-type picker ────────────────
     if data.startswith("goal:multiday:"):
         answer = data[len("goal:multiday:"):]
         draft = await _load_draft(tg_id)
@@ -1372,49 +1656,55 @@ async def _handle_goal_callbacks(query, data: str) -> None:
             await query.edit_message_text("Session expired. Please try /goals again.")
             return
         draft["allow_multiple_daily"] = (answer == "yes")
-        draft["step"] = "period"
+        draft["step"] = "rectype"
         await _save_draft(tg_id, draft)
         await query.edit_message_text(
-            _draft_summary_text(draft) + "\n\nChoose the time period:",
-            parse_mode="Markdown",
-            reply_markup=_goal_period_keyboard(),
+            _rectype_prompt_text(draft), parse_mode="Markdown", reply_markup=_goal_rectype_keyboard(),
         )
         return
 
-    # ── Period chosen → recurrence picker (This Year only) or straight save ─
+    # ── One-time vs Repeating chosen — the top-level fork. One-time goes to
+    #    the period picker (any period, recurrence="none"); Repeating skips
+    #    the period picker entirely (always the full year) and goes straight
+    #    to "every month or every quarter?". ─────────────────────────────────
+    if data.startswith("goal:rectype:"):
+        rectype = data[len("goal:rectype:"):]
+        draft = await _load_draft(tg_id)
+        if not draft:
+            await query.edit_message_text("Session expired. Please try /goals again.")
+            return
+        draft["rectype"] = rectype
+        draft["step"] = "final"
+        await _save_draft(tg_id, draft)
+        if rectype == "repeating":
+            await query.edit_message_text(
+                _recurrence_prompt_text(draft), parse_mode="Markdown", reply_markup=_goal_recurrence_keyboard(),
+            )
+        else:
+            await query.edit_message_text(
+                _period_prompt_text(draft), parse_mode="Markdown", reply_markup=_goal_period_keyboard(),
+            )
+        return
+
+    # ── Period chosen (one-time path) → save goal ───────────────────────────
     if data.startswith("goal:period:"):
         period = data[len("goal:period:"):]
         draft = await _load_draft(tg_id)
         if not draft or "sport" not in draft or "value" not in draft:
             await query.edit_message_text("Session expired. Please try /goals again.")
             return
-
-        # Recurrence (Phase 2) only makes sense against a full year window —
-        # every other period skips straight to save, exactly as before.
-        if period == "This Year":
-            draft["period"] = period
-            draft["step"] = "recurrence"
-            await _save_draft(tg_id, draft)
-            await query.edit_message_text(
-                _draft_summary_text(draft) + "\n\n"
-                "Repeat this target every month or quarter, or just track "
-                "one total for the whole year?",
-                parse_mode="Markdown",
-                reply_markup=_goal_recurrence_keyboard(),
-            )
-            return
-
         await _save_goal_and_confirm(query, tg_id, draft, period, recurrence="none")
         return
 
-    # ── Recurrence chosen (This Year only) → save goal ──────────────────────
+    # ── Recurrence chosen (repeating path) → save goal, period is always
+    #    the full year ─────────────────────────────────────────────────────
     if data.startswith("goal:recurrence:"):
         recurrence = data[len("goal:recurrence:"):]
         draft = await _load_draft(tg_id)
-        if not draft or "period" not in draft:
+        if not draft or "sport" not in draft or "value" not in draft:
             await query.edit_message_text("Session expired. Please try /goals again.")
             return
-        await _save_goal_and_confirm(query, tg_id, draft, draft["period"], recurrence)
+        await _save_goal_and_confirm(query, tg_id, draft, "This Year", recurrence)
         return
 
     # ── User tapped a goal in the delete list → show a confirmation screen
@@ -1503,47 +1793,50 @@ async def _handle_goal_text_input(update: Update) -> bool:
 
     step = draft.get("step")
 
+    # ── True Back from a free-text step. Both text steps' predecessor is a
+    #    button step (mode, or value itself), so this always re-sends a
+    #    fresh message with the target step's own screen. ──────────────────
+    if text.lower() == "/back" and step in ("value", "count"):
+        prev = _goal_prev_step(draft, step) or "sport"
+        draft["step"] = prev
+        await _save_draft(tg_id, draft)
+        if prev == "mode":
+            await update.message.reply_text(
+                _mode_prompt_text(draft), parse_mode="Markdown", reply_markup=_goal_mode_keyboard(draft),
+            )
+        elif prev == "value":
+            await update.message.reply_text(_value_prompt_text(draft), parse_mode="Markdown")
+        return True
+
     if step == "value":
         sport = draft.get("sport", "")
         metric = draft.get("metric", "distance")
         aggregation = draft.get("aggregation", "frequency")
         unit = _goal_metric_unit(sport, metric, aggregation)
+        unit_word = _UNIT_WORDS.get(unit, unit)
         try:
             val = float(text.replace(",", "."))
             if val <= 0:
                 raise ValueError
         except ValueError:
             await update.message.reply_text(
-                f"Please enter a positive number ({unit}) — e.g. *100* or *21.1*:",
+                f"Please enter a positive number in {unit_word} ({unit}) — e.g. *100* or *21.1*:",
                 parse_mode="Markdown",
             )
             return True
 
         draft["value"] = val
-        val_str = _format_goal_number(val)
 
         if aggregation == "cumulative":
             draft["step"] = "daily"
             await _save_draft(tg_id, draft)
             await update.message.reply_text(
-                f"Target: *Total {val_str} {unit}*\n\n"
-                f"If you log more than one activity on the same day, should "
-                f"they all count, or just the best one?\n"
-                f"_(e.g. two rides in one day — \"Only Best Each Day\" counts "
-                f"just the one with the higher {metric}.)_",
-                parse_mode="Markdown",
-                reply_markup=_goal_daily_keyboard(),
+                _daily_prompt_text(draft), parse_mode="Markdown", reply_markup=_goal_daily_keyboard(draft),
             )
         else:
             draft["step"] = "count"
             await _save_draft(tg_id, draft)
-            await update.message.reply_text(
-                f"Per-session goal: *{val_str} {unit}*\n\n"
-                f"How many times do you want to achieve this?\n"
-                f"Enter a number — e.g. *4*\n\n"
-                f"Type /cancel to abort.",
-                parse_mode="Markdown",
-            )
+            await update.message.reply_text(_count_prompt_text(draft), parse_mode="Markdown")
         return True
 
     if step == "count":
@@ -1559,13 +1852,7 @@ async def _handle_goal_text_input(update: Update) -> bool:
         await _save_draft(tg_id, draft)
 
         await update.message.reply_text(
-            _draft_summary_text(draft) + "\n\n"
-            "If you log more than one activity on the same day, should they "
-            "all count, or just the best one?\n"
-            f"_(e.g. two activities in one day — \"Only Best Each Day\" counts "
-            f"just the one with the higher {draft.get('metric', 'distance')}.)_",
-            parse_mode="Markdown",
-            reply_markup=_goal_daily_keyboard(),
+            _daily_prompt_text(draft), parse_mode="Markdown", reply_markup=_goal_daily_keyboard(draft),
         )
         return True
 
@@ -1642,31 +1929,24 @@ async def _show_goal_status(query) -> None:
         lines = [
             f"*Goal Status for: {athlete_name}*",
             "",
-            f'*"{_random_quote()}"*',
+            _random_goal_quote(),
             "",
         ]
 
         from app.tasks import format_goal_progress_value, get_goal_progress, get_recurring_goal_progress
 
+        detail_rows = []
+
         for g in goals:
             sport_label = _sport_display_label(g.activity_type)
+            emoji = _SPORT_EMOJI.get(g.activity_type, "🏅")
 
             if g.recurrence in ("monthly", "quarterly"):
+                # Compact: one line for the tally, not a row per elapsed
+                # sub-period — a year-long monthly goal would otherwise
+                # print up to 12 rows here. Full month-by-month breakdown
+                # moves to a "Details" tap (goal:detail:<id>) below.
                 recurring = await get_recurring_goal_progress(db, user, g)
-                period_word = "month" if g.recurrence == "monthly" else "quarter"
-
-                sp_lines = []
-                pending_count = 0
-                for sp in recurring.sub_periods:
-                    if sp.status == "pending":
-                        pending_count += 1
-                        continue
-                    icon = {"met": "✅", "missed": "❌", "in_progress": "🔵"}[sp.status]
-                    sp_lines.append(f"{icon} {sp.label.split()[0]}")
-                if pending_count:
-                    sp_lines.append(
-                        f"⏳ {pending_count} {period_word}{'s' if pending_count != 1 else ''} remaining"
-                    )
 
                 if recurring.overall_status == "achieved":
                     banner = "🏆 Achieved!"
@@ -1679,12 +1959,16 @@ async def _show_goal_status(query) -> None:
                     banner = f"▶️ In progress — {recurring.met_count}/{recurring.elapsed_count} met"
 
                 lines.append(
-                    f"*{sport_label}* — {g.category}\n"
-                    + "\n".join(sp_lines) + "\n"
+                    f"{emoji} *{sport_label}*\n"
+                    f"{g.category}\n"
                     f"{banner}\n"
                     f"_{g.start_date} → {g.end_date}_"
                 )
                 lines.append(divider)
+                detail_rows.append([InlineKeyboardButton(
+                    _pad(f"Details: {sport_label} {g.category}", _PAD_FULL),
+                    callback_data=f"goal:detail:{g.id}",
+                )])
                 continue
 
             progress = await get_goal_progress(db, user, g)
@@ -1704,17 +1988,80 @@ async def _show_goal_status(query) -> None:
                 target_word = "time" if g.target_count == 1 else "times"
                 progress_line = f"🎯 {int(progress.current)}/{g.target_count} {target_word}"
             lines.append(
-                f"*{sport_label}* — {g.category}\n"
+                f"{emoji} *{sport_label}*\n"
+                f"{g.category}\n"
                 f"{progress_line}\n"
                 f"`{bar}` {pct}%\n"
                 f"_{g.start_date} → {g.end_date}_"
             )
             lines.append(divider)
 
+    keyboard = InlineKeyboardMarkup(detail_rows + _goals_main_keyboard().inline_keyboard)
     await query.edit_message_text(
         "\n".join(lines),
         parse_mode="Markdown",
-        reply_markup=_goals_main_keyboard(),
+        reply_markup=keyboard,
+    )
+
+
+async def _show_goal_detail(query, goal_id: str) -> None:
+    """Full month-by-month (or quarter-by-quarter) breakdown for a single
+    recurring goal — the detail the compact status list intentionally
+    leaves out to stay skimmable as the year progresses."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(User).where(User.telegram_user_id == query.from_user.id)
+        )
+        user = result.scalar_one_or_none()
+        if not user:
+            await query.edit_message_text("User not found.")
+            return
+
+        result = await db.execute(select(Goal).where(Goal.id == _uuid_mod.UUID(goal_id)))
+        goal = result.scalar_one_or_none()
+        if not goal or goal.user_id != user.id:
+            await query.edit_message_text("Goal not found.", reply_markup=_goals_main_keyboard())
+            return
+
+        from app.tasks import get_recurring_goal_progress
+        recurring = await get_recurring_goal_progress(db, user, goal)
+
+    sport_label = _sport_display_label(goal.activity_type)
+    emoji = _SPORT_EMOJI.get(goal.activity_type, "🏅")
+    period_word = "month" if goal.recurrence == "monthly" else "quarter"
+
+    sp_lines = []
+    pending_count = 0
+    for sp in recurring.sub_periods:
+        if sp.status == "pending":
+            pending_count += 1
+            continue
+        icon = {"met": "✅", "missed": "❌", "in_progress": "🔵"}[sp.status]
+        sp_lines.append(f"{icon} {sp.label}")
+    if pending_count:
+        sp_lines.append(f"⏳ {pending_count} {period_word}{'s' if pending_count != 1 else ''} remaining")
+
+    if recurring.overall_status == "achieved":
+        banner = "🏆 Achieved!"
+    elif recurring.overall_status == "failed":
+        first_missed = next((sp for sp in recurring.sub_periods if sp.status == "missed"), None)
+        banner = f"💔 Failed — missed {first_missed.label if first_missed else '?'}"
+    else:
+        banner = f"▶️ In progress — {recurring.met_count}/{recurring.elapsed_count} met"
+
+    text = (
+        f"{emoji} *{sport_label}*\n"
+        f"{goal.category}\n\n"
+        + "\n".join(sp_lines) + "\n\n"
+        f"{banner}\n"
+        f"_{goal.start_date} → {goal.end_date}_"
+    )
+    await query.edit_message_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(_pad("Back to Goal Status", _PAD_FULL), callback_data="goal:status")],
+        ]),
     )
 
 
