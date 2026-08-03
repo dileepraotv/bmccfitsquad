@@ -955,8 +955,8 @@ def _goal_metric_keyboard(sport: str) -> InlineKeyboardMarkup:
 def _goal_mode_keyboard() -> InlineKeyboardMarkup:
     """Aggregation-mode selector: sum-over-period vs. per-session count."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(_pad("🎯 Total Target", 21), callback_data="goal:mode:cumulative"),
-         InlineKeyboardButton(_pad("🔁 Per-Session Count", 21), callback_data="goal:mode:frequency")],
+        [InlineKeyboardButton(_pad("Total Target", 21), callback_data="goal:mode:cumulative"),
+         InlineKeyboardButton(_pad("Per-Session Count", 21), callback_data="goal:mode:frequency")],
         [InlineKeyboardButton(_pad("Cancel", 42), callback_data="goal:exit")],
     ])
 
@@ -966,8 +966,8 @@ def _goal_daily_keyboard() -> InlineKeyboardMarkup:
     product default) pre-highlighted with a checkmark vs. No (collapse
     same-day activities to the day's best one)."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(_pad("✅ Every Activity", 21), callback_data="goal:multiday:yes"),
-         InlineKeyboardButton(_pad("🌟 Best Per Day", 21), callback_data="goal:multiday:no")],
+        [InlineKeyboardButton(_pad("Every Activity", 21), callback_data="goal:multiday:yes"),
+         InlineKeyboardButton(_pad("Best Per Day", 21), callback_data="goal:multiday:no")],
         [InlineKeyboardButton(_pad("Cancel", 42), callback_data="goal:exit")],
     ])
 
@@ -994,9 +994,9 @@ def _goal_recurrence_keyboard() -> InlineKeyboardMarkup:
     the target independently every calendar month or quarter (Phase 2)
     instead of tracking one single year-long total (today's behavior)."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(_pad("📅 Whole Year", 42), callback_data="goal:recurrence:none")],
-        [InlineKeyboardButton(_pad("🔁 Every Month", 21), callback_data="goal:recurrence:monthly"),
-         InlineKeyboardButton(_pad("🔁 Every Quarter", 21), callback_data="goal:recurrence:quarterly")],
+        [InlineKeyboardButton(_pad("Whole Year", 42), callback_data="goal:recurrence:none")],
+        [InlineKeyboardButton(_pad("Every Month", 21), callback_data="goal:recurrence:monthly"),
+         InlineKeyboardButton(_pad("Every Quarter", 21), callback_data="goal:recurrence:quarterly")],
         [InlineKeyboardButton(_pad("Cancel", 42), callback_data="goal:exit")],
     ])
 
