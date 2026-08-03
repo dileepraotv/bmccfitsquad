@@ -904,38 +904,50 @@ _METRIC_LABELS: dict[str, str] = {
 }
 
 
+# Standard padding widths for the whole goals flow — sized so every button
+# fills its row instead of looking cramped around short labels. A 2-per-row
+# button gets roughly double a 3-per-row button's share of the row, and a
+# full-width (1-per-row) button gets the most breathing room of all.
+_PAD_FULL  = 42  # 1 button spanning the whole row
+_PAD_2COL  = 32  # 2 buttons sharing a row
+_PAD_3COL  = 20  # 3 buttons sharing a row
+
+
 def _goals_main_keyboard() -> InlineKeyboardMarkup:
+    """Full-width, one button per row — the main /goals menu is the first
+    thing every user sees, so it gets the most generous real estate rather
+    than a cramped 2x2 grid."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(_pad("Add Goal", 21),    callback_data="goal:add"),
-         InlineKeyboardButton(_pad("Delete Goal", 21), callback_data="goal:delete_menu")],
-        [InlineKeyboardButton(_pad("Goal Status", 21), callback_data="goal:status"),
-         InlineKeyboardButton(_pad("Exit", 21),        callback_data="goal:exit")],
+        [InlineKeyboardButton(_pad("Add Goal", _PAD_FULL),    callback_data="goal:add")],
+        [InlineKeyboardButton(_pad("Delete Goal", _PAD_FULL), callback_data="goal:delete_menu")],
+        [InlineKeyboardButton(_pad("Goal Status", _PAD_FULL), callback_data="goal:status")],
+        [InlineKeyboardButton(_pad("Exit", _PAD_FULL),        callback_data="goal:exit")],
     ])
 
 
 def _goal_sport_keyboard() -> InlineKeyboardMarkup:
     """Sport selector — mirrors the stats sport keyboard layout."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(_pad("Ride", 21),           callback_data="goal:sport:Ride"),
-         InlineKeyboardButton(_pad("Ride Endurance", 21), callback_data="goal:sport:Ride Endurance")],
-        [InlineKeyboardButton(_pad("Run"),                callback_data="goal:sport:Run"),
-         InlineKeyboardButton(_pad("Swim"),                callback_data="goal:sport:Swim"),
-         InlineKeyboardButton(_pad("Walk"),                callback_data="goal:sport:Walk")],
-        [InlineKeyboardButton(_pad("Other Activities", 42), callback_data="goal:other")],
-        [InlineKeyboardButton(_pad("Back", 21),           callback_data="goal:back"),
-         InlineKeyboardButton(_pad("Exit", 21),           callback_data="goal:exit")],
+        [InlineKeyboardButton(_pad("Ride", _PAD_2COL),           callback_data="goal:sport:Ride"),
+         InlineKeyboardButton(_pad("Ride Endurance", _PAD_2COL), callback_data="goal:sport:Ride Endurance")],
+        [InlineKeyboardButton(_pad("Run", _PAD_3COL),            callback_data="goal:sport:Run"),
+         InlineKeyboardButton(_pad("Swim", _PAD_3COL),           callback_data="goal:sport:Swim"),
+         InlineKeyboardButton(_pad("Walk", _PAD_3COL),           callback_data="goal:sport:Walk")],
+        [InlineKeyboardButton(_pad("Other Activities", _PAD_FULL), callback_data="goal:other")],
+        [InlineKeyboardButton(_pad("Back", _PAD_2COL),           callback_data="goal:back"),
+         InlineKeyboardButton(_pad("Exit", _PAD_2COL),           callback_data="goal:exit")],
     ])
 
 
 def _goal_other_sport_keyboard() -> InlineKeyboardMarkup:
     """Secondary sport menu for goal-setting on the non-core sports."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(_pad("Yoga", 21),          callback_data="goal:sport:Yoga"),
-         InlineKeyboardButton(_pad("Racket Sports", 21), callback_data="goal:sport:Racket Sports")],
-        [InlineKeyboardButton(_pad("Hiking", 21),        callback_data="goal:sport:Hiking"),
-         InlineKeyboardButton(_pad("Strength Training", 21), callback_data="goal:sport:Strength Training")],
-        [InlineKeyboardButton(_pad("Back", 21),          callback_data="goal:sport_menu"),
-         InlineKeyboardButton(_pad("Exit", 21),          callback_data="goal:exit")],
+        [InlineKeyboardButton(_pad("Yoga", _PAD_2COL),          callback_data="goal:sport:Yoga"),
+         InlineKeyboardButton(_pad("Racket Sports", _PAD_2COL), callback_data="goal:sport:Racket Sports")],
+        [InlineKeyboardButton(_pad("Hiking", _PAD_2COL),        callback_data="goal:sport:Hiking"),
+         InlineKeyboardButton(_pad("Strength Training", _PAD_2COL), callback_data="goal:sport:Strength Training")],
+        [InlineKeyboardButton(_pad("Back", _PAD_2COL),          callback_data="goal:sport_menu"),
+         InlineKeyboardButton(_pad("Exit", _PAD_2COL),          callback_data="goal:exit")],
     ])
 
 
@@ -945,11 +957,14 @@ def _goal_metric_keyboard(sport: str) -> InlineKeyboardMarkup:
     duration-only sports (Yoga/Racket Sports/Strength Training) never see
     this step at all (auto-skipped in the goal:sport: handler)."""
     metrics = _GOAL_SPORT_METRICS.get(sport, ["distance"])
+    # 2 metrics -> 2-column width, 3 metrics -> 3-column width, so the row
+    # is always filled regardless of how many valid metrics this sport has.
+    width = _PAD_2COL if len(metrics) <= 2 else _PAD_3COL
     row = [
-        InlineKeyboardButton(_pad(_METRIC_LABELS[m], 21), callback_data=f"goal:metric:{m}")
+        InlineKeyboardButton(_pad(_METRIC_LABELS[m], width), callback_data=f"goal:metric:{m}")
         for m in metrics
     ]
-    return InlineKeyboardMarkup([row, [InlineKeyboardButton(_pad("Cancel", 42), callback_data="goal:exit")]])
+    return InlineKeyboardMarkup([row, [InlineKeyboardButton(_pad("Cancel", _PAD_FULL), callback_data="goal:exit")]])
 
 
 _GOAL_MODE_PROMPT = (
@@ -964,9 +979,9 @@ _GOAL_MODE_PROMPT = (
 def _goal_mode_keyboard() -> InlineKeyboardMarkup:
     """Aggregation-mode selector: sum-over-period vs. per-session count."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(_pad("Cumulative Total", 21), callback_data="goal:mode:cumulative"),
-         InlineKeyboardButton(_pad("Session Count", 21), callback_data="goal:mode:frequency")],
-        [InlineKeyboardButton(_pad("Cancel", 42), callback_data="goal:exit")],
+        [InlineKeyboardButton(_pad("Cumulative Total", _PAD_2COL), callback_data="goal:mode:cumulative"),
+         InlineKeyboardButton(_pad("Session Count", _PAD_2COL), callback_data="goal:mode:frequency")],
+        [InlineKeyboardButton(_pad("Cancel", _PAD_FULL), callback_data="goal:exit")],
     ])
 
 
@@ -975,9 +990,9 @@ def _goal_daily_keyboard() -> InlineKeyboardMarkup:
     default) vs. "Only Best Each Day" (collapse same-day activities to the
     day's best one)."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(_pad("Count All Activities", 21), callback_data="goal:multiday:yes"),
-         InlineKeyboardButton(_pad("Only Best Each Day", 21), callback_data="goal:multiday:no")],
-        [InlineKeyboardButton(_pad("Cancel", 42), callback_data="goal:exit")],
+        [InlineKeyboardButton(_pad("Count All Activities", _PAD_2COL), callback_data="goal:multiday:yes"),
+         InlineKeyboardButton(_pad("Only Best Each Day", _PAD_2COL), callback_data="goal:multiday:no")],
+        [InlineKeyboardButton(_pad("Cancel", _PAD_FULL), callback_data="goal:exit")],
     ])
 
 
@@ -988,13 +1003,13 @@ def _goal_period_keyboard() -> InlineKeyboardMarkup:
     p = _GOAL_PERIODS
     enc = lambda period: f"goal:period:{period}"  # noqa: E731
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(_pad(p[0], 21), callback_data=enc(p[0])),
-         InlineKeyboardButton(_pad(p[1], 21), callback_data=enc(p[1]))],
-        [InlineKeyboardButton(_pad(p[2], 21), callback_data=enc(p[2])),
-         InlineKeyboardButton(_pad(p[5], 21), callback_data=enc(p[5]))],
-        [InlineKeyboardButton(_pad(p[3], 42), callback_data=enc(p[3]))],
-        [InlineKeyboardButton(_pad(p[4], 42), callback_data=enc(p[4]))],
-        [InlineKeyboardButton(_pad("Cancel", 42),   callback_data="goal:exit")],
+        [InlineKeyboardButton(_pad(p[0], _PAD_2COL), callback_data=enc(p[0])),
+         InlineKeyboardButton(_pad(p[1], _PAD_2COL), callback_data=enc(p[1]))],
+        [InlineKeyboardButton(_pad(p[2], _PAD_2COL), callback_data=enc(p[2])),
+         InlineKeyboardButton(_pad(p[5], _PAD_2COL), callback_data=enc(p[5]))],
+        [InlineKeyboardButton(_pad(p[3], _PAD_FULL), callback_data=enc(p[3]))],
+        [InlineKeyboardButton(_pad(p[4], _PAD_FULL), callback_data=enc(p[4]))],
+        [InlineKeyboardButton(_pad("Cancel", _PAD_FULL),   callback_data="goal:exit")],
     ])
 
 
@@ -1003,10 +1018,10 @@ def _goal_recurrence_keyboard() -> InlineKeyboardMarkup:
     the target independently every calendar month or quarter (Phase 2)
     instead of tracking one single year-long total (today's behavior)."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(_pad("Whole Year", 42), callback_data="goal:recurrence:none")],
-        [InlineKeyboardButton(_pad("Every Month", 21), callback_data="goal:recurrence:monthly"),
-         InlineKeyboardButton(_pad("Every Quarter", 21), callback_data="goal:recurrence:quarterly")],
-        [InlineKeyboardButton(_pad("Cancel", 42), callback_data="goal:exit")],
+        [InlineKeyboardButton(_pad("Whole Year", _PAD_FULL), callback_data="goal:recurrence:none")],
+        [InlineKeyboardButton(_pad("Every Month", _PAD_2COL), callback_data="goal:recurrence:monthly"),
+         InlineKeyboardButton(_pad("Every Quarter", _PAD_2COL), callback_data="goal:recurrence:quarterly")],
+        [InlineKeyboardButton(_pad("Cancel", _PAD_FULL), callback_data="goal:exit")],
     ])
 
 
