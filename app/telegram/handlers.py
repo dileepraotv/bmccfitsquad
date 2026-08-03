@@ -2178,19 +2178,21 @@ async def _show_goal_status(query) -> None:
                     banner = f"💔 Failed — missed {first_missed.label.split()[0] if first_missed else '?'}"
                 else:
                     banner = f"▶️ In progress — {recurring.met_count}/{recurring.elapsed_count} met"
+
+                header = f"{emoji} *{sport_label} : {g.category}*"
+                if recurring.overall_status == "in_progress":
                     current_sp = next(
                         (sp for sp in recurring.sub_periods if sp.status == "in_progress"), None
                     )
                     if current_sp:
                         pace = _goal_pace_label(current_sp.progress.pct, current_sp.start, current_sp.end)
                         if pace:
-                            # Tacked onto the same line (pushed right with
-                            # padding) rather than its own line — keeps the
-                            # compact recurring summary compact.
-                            banner += f"   {pace}"
+                            # Tacked onto the header line itself (pushed
+                            # right with padding) rather than its own line.
+                            header += f"   {pace}"
 
                 lines.append(
-                    f"{emoji} *{sport_label} : {g.category}*\n\n"
+                    f"{header}\n\n"
                     f"{banner}\n"
                     f"_{_format_goal_date_range(g.start_date, g.end_date)}_"
                 )
@@ -2220,14 +2222,15 @@ async def _show_goal_status(query) -> None:
                 session_word = "session" if g.target_count == 1 else "sessions"
                 progress_line = f"🎯 {int(progress.current)}/{g.target_count} {session_word} ({pct}%)"
 
+            header = f"{emoji} *{sport_label} : {g.category}*"
             pace = _goal_pace_label(progress.pct, g.start_date, g.end_date)
             if pace:
-                # Tacked onto the progress line itself (pushed right with
+                # Tacked onto the header line itself (pushed right with
                 # padding) rather than a line of its own — saves vertical
                 # space, especially with several goals on one screen.
-                progress_line += f"   {pace}"
+                header += f"   {pace}"
             lines.append(
-                f"{emoji} *{sport_label} : {g.category}*\n\n"
+                f"{header}\n\n"
                 f"{progress_line}\n"
                 f"{bar}\n"
                 f"_{_format_goal_date_range(g.start_date, g.end_date)}_"
