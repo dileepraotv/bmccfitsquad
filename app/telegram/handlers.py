@@ -1996,7 +1996,7 @@ async def _show_goal_status(query) -> None:
             )
             lines.append(divider)
 
-    keyboard = InlineKeyboardMarkup(detail_rows + _goals_main_keyboard().inline_keyboard)
+    keyboard = InlineKeyboardMarkup(detail_rows + list(_goals_main_keyboard().inline_keyboard))
     await query.edit_message_text(
         "\n".join(lines),
         parse_mode="Markdown",
