@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 import pathlib
 import random
+import re
 import uuid as _uuid_mod
 from datetime import datetime, timedelta, timezone
 
@@ -927,6 +928,13 @@ _GOAL_PERIODS = [
 
 _GOAL_DRAFT_TTL = 600  # seconds — draft expires after 10 min of inactivity
 
+# Guardrails on goal creation — without these a user can pile up unlimited
+# and/or exact-duplicate goals, which both clutters Goal Status/Delete (and
+# for a large enough count risks the status message exceeding Telegram's
+# 4096-char limit) without adding anything a single goal doesn't already
+# cover.
+_MAX_ACTIVE_GOALS = 15
+
 # Plain text — no emoji. This dict is looked up rather than typed as a
 # literal next to InlineKeyboardButton(...), so a naive "grep for emoji next
 # to InlineKeyboardButton" audit will miss it; keep it plain on purpose.
@@ -955,6 +963,13 @@ _SPORT_EMOJI: dict[str, str] = {
     "Hiking": "🥾", "Yoga": "🧘",
     "RacketSports": "🏸", "StrengthTraining": "🏋️",
 }
+
+
+def _goal_sport_emoji(sport: str) -> str:
+    """Look up the sport emoji regardless of whether *sport* is the DB
+    activity_type ("RideEndurance") or the space-cased display label used
+    in the goal flow ("Ride Endurance")."""
+    return _SPORT_EMOJI.get(sport) or _SPORT_EMOJI.get(_SPORT_TYPE_MAP.get(sport, sport), "🏅")
 
 
 # Standard padding widths for the whole goals flow — sized so every button
@@ -1009,6 +1024,16 @@ def _goal_prev_step(draft: dict, current_step: str) -> str | None:
         return None
     idx = applicable.index(current_step)
     return applicable[idx - 1] if idx > 0 else None
+
+
+def _session_expired_keyboard() -> InlineKeyboardMarkup:
+    """Shown whenever a mid-flow callback can't find its Redis draft (TTL
+    expired, or the flow was interrupted) — gives a one-tap way back into
+    Add Goal instead of leaving the user stuck with a dead-end message and
+    no button, forced to type /goals manually."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(_pad("Start Over", _PAD_FULL), callback_data="goal:add")],
+    ])
 
 
 def _goals_main_keyboard() -> InlineKeyboardMarkup:
@@ -1111,6 +1136,27 @@ def _goal_mode_keyboard(draft: dict) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(_pad("Session Count", _PAD_2COL), callback_data="goal:mode:frequency"),
          InlineKeyboardButton(_pad("Cumulative Total", _PAD_2COL), callback_data="goal:mode:cumulative")],
+        [InlineKeyboardButton(_pad("Back", _PAD_2COL), callback_data=f"goal:prev:{back_target}"),
+         InlineKeyboardButton(_pad("Exit", _PAD_2COL), callback_data="goal:exit")],
+    ])
+
+
+def _goal_value_keyboard(draft: dict) -> InlineKeyboardMarkup:
+    """Back/Exit for the free-text value step. The expected reply is still
+    typed text, but a tappable Back/Exit here matches every keyboard step
+    in the flow instead of forcing users to discover /back and /cancel
+    from a small text hint with no button at all."""
+    back_target = _goal_prev_step(draft, "value") or "mode"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(_pad("Back", _PAD_2COL), callback_data=f"goal:prev:{back_target}"),
+         InlineKeyboardButton(_pad("Exit", _PAD_2COL), callback_data="goal:exit")],
+    ])
+
+
+def _goal_count_keyboard(draft: dict) -> InlineKeyboardMarkup:
+    """Back/Exit for the free-text session-count step — see _goal_value_keyboard."""
+    back_target = _goal_prev_step(draft, "count") or "value"
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton(_pad("Back", _PAD_2COL), callback_data=f"goal:prev:{back_target}"),
          InlineKeyboardButton(_pad("Exit", _PAD_2COL), callback_data="goal:exit")],
     ])
@@ -1235,23 +1281,50 @@ def _format_goal_date_range(start, end) -> str:
     return f"{start_str} – {end_str}"
 
 
+def _goal_pace_label(pct: float, start_date, end_date) -> str:
+    """On-pace / behind-pace indicator — compares % of target reached to
+    % of the period elapsed, so 20% progress with 80% of the period gone
+    reads very differently from 20% progress with only 20% gone. Returns
+    "" when the period hasn't started yet or has already ended (pacing
+    only makes sense mid-period; a closed period's result speaks for
+    itself)."""
+    if pct >= 100:
+        return "🏆 Goal met"
+    today = datetime.now(timezone.utc).date()
+    if today < start_date or today > end_date:
+        return ""
+    total_days = (end_date - start_date).days + 1
+    if total_days <= 0:
+        return ""
+    elapsed_frac = max(0.0, min(1.0, ((today - start_date).days + 1) / total_days))
+    if elapsed_frac <= 0:
+        return ""
+    progress_frac = pct / 100.0
+    # Small grace margin so being a couple points behind on any given day
+    # doesn't flip-flop the label.
+    if progress_frac + 0.05 >= elapsed_frac:
+        return "🟢 On pace"
+    return "🔴 Behind pace"
+
+
 def _format_goal_summary(sport_display: str, category: str, aggregation: str,
                           count: int, period: str, start, end,
                           recurrence: str = "none") -> str:
+    emoji = _goal_sport_emoji(sport_display)
     lines = [
-        "✅ *Goal saved!*\n",
-        f"Sport:    *{sport_display}*",
-        f"Goal:     *{category}*",
+        "✅ *Goal saved!*",
+        f"{emoji} *{sport_display} : {category}*",
+        "",
     ]
     if aggregation == "frequency":
-        lines.append(f"Target:   *{count} session{'s' if count != 1 else ''}*")
+        lines.append(f"Target: *{count} session{'s' if count != 1 else ''}*")
     period_label = {
         "monthly": f"{period} (repeats every month)",
         "quarterly": f"{period} (repeats every quarter)",
     }.get(recurrence, period)
     lines += [
-        f"Period:   *{period_label}*",
-        f"Window:   {_format_goal_date_range(start, end)}",
+        f"Period: *{period_label}*",
+        f"_{_format_goal_date_range(start, end)}_",
     ]
     return "\n".join(lines)
 
@@ -1289,6 +1362,65 @@ def _goal_value_examples(metric: str, aggregation: str, unit: str) -> str:
     if unit == "m":  # Swim distance
         return "`10,000`, `50,000`" if aggregation == "cumulative" else "`500`, `1,000`, `1,500`, `3,800`"
     return "`150`, `1,000`, `5,000`" if aggregation == "cumulative" else "`50`, `100`, `200`"
+
+
+def _parse_goal_number(text: str) -> float | None:
+    """Forgiving float parse for the value step — accepts a bare number
+    ("100"), a number with the unit typed alongside it ("100km", "10 km"),
+    and thousands separators ("1,000"). A comma is only treated as a
+    thousands separator when followed by exactly one or more groups of 3
+    digits (e.g. "1,000" or "1,234,567"); otherwise (e.g. "21,1") it's
+    treated as a decimal point, matching how European users often type
+    fractional values.
+    """
+    cleaned = re.sub(r"[a-zA-Z]+\s*$", "", text.strip()).strip()
+    if re.fullmatch(r"-?\d{1,3}(,\d{3})+(\.\d+)?", cleaned):
+        cleaned = cleaned.replace(",", "")
+    else:
+        cleaned = cleaned.replace(",", ".")
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def _parse_goal_count(text: str) -> int | None:
+    """Forgiving whole-number parse for the session-count step — accepts
+    "4", "4x", or "4 sessions", not just a bare digit string."""
+    match = re.match(r"\s*(\d+)", text.strip())
+    return int(match.group(1)) if match else None
+
+
+def _record_prompt(draft: dict, msg) -> None:
+    """Remember which message asked the current free-text question, so a
+    later step (see _advance_via_message) can edit it in place instead of
+    sending a new bot message underneath it once the user replies."""
+    if msg is not None:
+        draft["prompt_chat_id"] = msg.chat_id
+        draft["prompt_message_id"] = msg.message_id
+
+
+async def _advance_via_message(update: Update, draft: dict, text: str, reply_markup=None) -> None:
+    """Move to the next step by editing the same message that asked the
+    just-answered free-text question (recorded via _record_prompt) rather
+    than leaving that prompt sitting there unresolved and stacking a new
+    bot message below it. Falls back to sending a new message if the
+    original can't be edited (e.g. too old, or already replaced)."""
+    bot = update.get_bot()
+    chat_id = draft.get("prompt_chat_id")
+    msg_id = draft.get("prompt_message_id")
+    msg = None
+    if chat_id and msg_id:
+        try:
+            msg = await bot.edit_message_text(
+                chat_id=chat_id, message_id=msg_id, text=text,
+                parse_mode="Markdown", reply_markup=reply_markup,
+            )
+        except Exception:
+            msg = None
+    if msg is None:
+        msg = await update.message.reply_text(text, parse_mode="Markdown", reply_markup=reply_markup)
+    _record_prompt(draft, msg)
 
 
 def _draft_summary_text(draft: dict) -> str:
@@ -1397,7 +1529,8 @@ def _period_prompt_text(draft: dict) -> str:
     return (
         f"{_draft_summary_text(draft)}\n\n"
         f"*{_goal_step_progress(draft, 'final')}*\n\n"
-        "Choose the time period:"
+        "Choose the time period:\n"
+        "_(\"This Week\" runs Monday to Sunday.)_"
     )
 
 
@@ -1525,6 +1658,40 @@ async def _save_goal_and_confirm(query, tg_id: int, draft: dict, period: str, re
             await query.edit_message_text("User not found. Try /start first.")
             return
 
+        existing_res = await db.execute(
+            select(Goal).where(Goal.user_id == user.id, Goal.is_active == True)  # noqa: E712
+        )
+        existing_goals = existing_res.scalars().all()
+
+        duplicate = next((
+            g for g in existing_goals
+            if g.activity_type == sport_db and g.metric == metric
+            and g.aggregation == aggregation and g.recurrence == recurrence
+            and g.start_date == start and g.end_date == end
+        ), None)
+        if duplicate:
+            emoji = _goal_sport_emoji(sport_db)
+            await _clear_draft(tg_id)
+            await query.edit_message_text(
+                f"You already have this exact goal active:\n\n"
+                f"{emoji} *{sport_display} : {duplicate.category}*\n"
+                f"_{_format_goal_date_range(duplicate.start_date, duplicate.end_date)}_\n\n"
+                f"Delete it first if you want to replace it with a different target.",
+                parse_mode="Markdown",
+                reply_markup=_goals_main_keyboard(),
+            )
+            return
+
+        if len(existing_goals) >= _MAX_ACTIVE_GOALS:
+            await _clear_draft(tg_id)
+            await query.edit_message_text(
+                f"You've reached the limit of *{_MAX_ACTIVE_GOALS} active goals*.\n\n"
+                f"Delete one from *Delete Goal* before adding another.",
+                parse_mode="Markdown",
+                reply_markup=_goals_main_keyboard(),
+            )
+            return
+
         goal = Goal(
             user_id=user.id,
             activity_type=sport_db,
@@ -1628,9 +1795,17 @@ async def _handle_goal_callbacks(query, data: str) -> None:
                 _mode_prompt_text(draft), parse_mode="Markdown", reply_markup=_goal_mode_keyboard(draft),
             )
         elif target == "value":
-            await query.edit_message_text(_value_prompt_text(draft), parse_mode="Markdown")
+            msg = await query.edit_message_text(
+                _value_prompt_text(draft), parse_mode="Markdown", reply_markup=_goal_value_keyboard(draft),
+            )
+            _record_prompt(draft, msg)
+            await _save_draft(tg_id, draft)
         elif target == "count":
-            await query.edit_message_text(_count_prompt_text(draft), parse_mode="Markdown")
+            msg = await query.edit_message_text(
+                _count_prompt_text(draft), parse_mode="Markdown", reply_markup=_goal_count_keyboard(draft),
+            )
+            _record_prompt(draft, msg)
+            await _save_draft(tg_id, draft)
         elif target == "daily":
             await query.edit_message_text(
                 _daily_prompt_text(draft), parse_mode="Markdown", reply_markup=_goal_daily_keyboard(draft),
@@ -1666,7 +1841,7 @@ async def _handle_goal_callbacks(query, data: str) -> None:
         metric = data[len("goal:metric:"):]
         draft = await _load_draft(tg_id)
         if not draft:
-            await query.edit_message_text("Session expired. Please try /goals again.")
+            await query.edit_message_text("Session expired. Please try /goals again.", reply_markup=_session_expired_keyboard())
             return
         draft["metric"] = metric
         draft["step"] = "mode"
@@ -1681,12 +1856,15 @@ async def _handle_goal_callbacks(query, data: str) -> None:
         mode = data[len("goal:mode:"):]
         draft = await _load_draft(tg_id)
         if not draft:
-            await query.edit_message_text("Session expired. Please try /goals again.")
+            await query.edit_message_text("Session expired. Please try /goals again.", reply_markup=_session_expired_keyboard())
             return
         draft["aggregation"] = mode
         draft["step"] = "value"
+        msg = await query.edit_message_text(
+            _value_prompt_text(draft), parse_mode="Markdown", reply_markup=_goal_value_keyboard(draft),
+        )
+        _record_prompt(draft, msg)
         await _save_draft(tg_id, draft)
-        await query.edit_message_text(_value_prompt_text(draft), parse_mode="Markdown")
         return
 
     # ── Daily multi-instance answer → recurrence-type picker ────────────────
@@ -1694,7 +1872,7 @@ async def _handle_goal_callbacks(query, data: str) -> None:
         answer = data[len("goal:multiday:"):]
         draft = await _load_draft(tg_id)
         if not draft:
-            await query.edit_message_text("Session expired. Please try /goals again.")
+            await query.edit_message_text("Session expired. Please try /goals again.", reply_markup=_session_expired_keyboard())
             return
         draft["allow_multiple_daily"] = (answer == "yes")
         draft["step"] = "rectype"
@@ -1712,7 +1890,7 @@ async def _handle_goal_callbacks(query, data: str) -> None:
         rectype = data[len("goal:rectype:"):]
         draft = await _load_draft(tg_id)
         if not draft:
-            await query.edit_message_text("Session expired. Please try /goals again.")
+            await query.edit_message_text("Session expired. Please try /goals again.", reply_markup=_session_expired_keyboard())
             return
         draft["rectype"] = rectype
         draft["step"] = "final"
@@ -1732,7 +1910,7 @@ async def _handle_goal_callbacks(query, data: str) -> None:
         period = data[len("goal:period:"):]
         draft = await _load_draft(tg_id)
         if not draft or "sport" not in draft or "value" not in draft:
-            await query.edit_message_text("Session expired. Please try /goals again.")
+            await query.edit_message_text("Session expired. Please try /goals again.", reply_markup=_session_expired_keyboard())
             return
         await _save_goal_and_confirm(query, tg_id, draft, period, recurrence="none")
         return
@@ -1743,7 +1921,7 @@ async def _handle_goal_callbacks(query, data: str) -> None:
         recurrence = data[len("goal:recurrence:"):]
         draft = await _load_draft(tg_id)
         if not draft or "sport" not in draft or "value" not in draft:
-            await query.edit_message_text("Session expired. Please try /goals again.")
+            await query.edit_message_text("Session expired. Please try /goals again.", reply_markup=_session_expired_keyboard())
             return
         await _save_goal_and_confirm(query, tg_id, draft, "This Year", recurrence)
         return
@@ -1764,21 +1942,21 @@ async def _handle_goal_callbacks(query, data: str) -> None:
             return
 
         sport_label = _sport_display_label(goal.activity_type)
+        emoji = _goal_sport_emoji(goal.activity_type)
         target_line = "" if goal.aggregation == "cumulative" else (
             f"Target: *{goal.target_count} session{'s' if goal.target_count != 1 else ''}*\n"
         )
         await query.edit_message_text(
             f"Delete this goal?\n\n"
-            f"Sport: *{sport_label}*\n"
-            f"Goal: *{goal.category}*\n"
+            f"{emoji} *{sport_label} : {goal.category}*\n"
             f"{target_line}"
-            f"Window: {_format_goal_date_range(goal.start_date, goal.end_date)}\n\n"
+            f"_{_format_goal_date_range(goal.start_date, goal.end_date)}_\n\n"
             f"This can't be undone.",
             parse_mode="Markdown",
-            reply_markup=confirm_keyboard(
-                confirm_data=f"goal:confirm_delete:{goal_id}",
-                cancel_data="goal:delete_menu",
-            ),
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(_pad("Delete", _PAD_2COL), callback_data=f"goal:confirm_delete:{goal_id}"),
+                InlineKeyboardButton(_pad("Keep It", _PAD_2COL), callback_data="goal:delete_menu"),
+            ]]),
         )
         return
 
@@ -1792,6 +1970,7 @@ async def _handle_goal_callbacks(query, data: str) -> None:
             goal = result.scalar_one_or_none()
             if goal:
                 sport_label = _sport_display_label(goal.activity_type)
+                emoji = _goal_sport_emoji(goal.activity_type)
                 target_line = "" if goal.aggregation == "cumulative" else (
                     f"Target: *{goal.target_count} session{'s' if goal.target_count != 1 else ''}*\n"
                 )
@@ -1799,8 +1978,7 @@ async def _handle_goal_callbacks(query, data: str) -> None:
                 await db.commit()
                 await query.edit_message_text(
                     f"✅ *Goal deleted*\n\n"
-                    f"Sport: *{sport_label}*\n"
-                    f"Goal: *{goal.category}*\n"
+                    f"{emoji} *{sport_label} : {goal.category}*\n"
                     f"{target_line}\n"
                     f"Use /goals to manage your goals.",
                     parse_mode="Markdown",
@@ -1840,13 +2018,15 @@ async def _handle_goal_text_input(update: Update) -> bool:
     if text.lower() == "/back" and step in ("value", "count"):
         prev = _goal_prev_step(draft, step) or "sport"
         draft["step"] = prev
-        await _save_draft(tg_id, draft)
         if prev == "mode":
-            await update.message.reply_text(
-                _mode_prompt_text(draft), parse_mode="Markdown", reply_markup=_goal_mode_keyboard(draft),
+            await _advance_via_message(
+                update, draft, _mode_prompt_text(draft), reply_markup=_goal_mode_keyboard(draft),
             )
         elif prev == "value":
-            await update.message.reply_text(_value_prompt_text(draft), parse_mode="Markdown")
+            await _advance_via_message(
+                update, draft, _value_prompt_text(draft), reply_markup=_goal_value_keyboard(draft),
+            )
+        await _save_draft(tg_id, draft)
         return True
 
     if step == "value":
@@ -1855,13 +2035,11 @@ async def _handle_goal_text_input(update: Update) -> bool:
         aggregation = draft.get("aggregation", "frequency")
         unit = _goal_metric_unit(sport, metric, aggregation)
         unit_word = _UNIT_WORDS.get(unit, unit)
-        try:
-            val = float(text.replace(",", "."))
-            if val <= 0:
-                raise ValueError
-        except ValueError:
+        val = _parse_goal_number(text)
+        if val is None or val <= 0:
             await update.message.reply_text(
-                f"Please enter a positive number in {unit_word} ({unit}) — e.g. *100* or *21.1*:",
+                f"Please enter a positive number in {unit_word} ({unit}) — just the number, "
+                f"e.g. *100* or *21.1* (no need to type the unit):",
                 parse_mode="Markdown",
             )
             return True
@@ -1870,31 +2048,32 @@ async def _handle_goal_text_input(update: Update) -> bool:
 
         if aggregation == "cumulative":
             draft["step"] = "daily"
-            await _save_draft(tg_id, draft)
-            await update.message.reply_text(
-                _daily_prompt_text(draft), parse_mode="Markdown", reply_markup=_goal_daily_keyboard(draft),
+            await _advance_via_message(
+                update, draft, _daily_prompt_text(draft), reply_markup=_goal_daily_keyboard(draft),
             )
         else:
             draft["step"] = "count"
-            await _save_draft(tg_id, draft)
-            await update.message.reply_text(_count_prompt_text(draft), parse_mode="Markdown")
+            await _advance_via_message(
+                update, draft, _count_prompt_text(draft), reply_markup=_goal_count_keyboard(draft),
+            )
+        await _save_draft(tg_id, draft)
         return True
 
     if step == "count":
-        if not text.isdigit() or int(text) < 1:
+        count = _parse_goal_count(text)
+        if count is None or count < 1:
             await update.message.reply_text(
                 "Please enter a positive whole number — e.g. *4*:",
                 parse_mode="Markdown",
             )
             return True
 
-        draft["count"] = int(text)
+        draft["count"] = count
         draft["step"]  = "daily"
-        await _save_draft(tg_id, draft)
-
-        await update.message.reply_text(
-            _daily_prompt_text(draft), parse_mode="Markdown", reply_markup=_goal_daily_keyboard(draft),
+        await _advance_via_message(
+            update, draft, _daily_prompt_text(draft), reply_markup=_goal_daily_keyboard(draft),
         )
+        await _save_draft(tg_id, draft)
         return True
 
     return False
@@ -1923,20 +2102,21 @@ async def _show_delete_menu(query) -> None:
         return
 
     def _delete_row_label(g: Goal) -> str:
-        target = "" if g.aggregation == "cumulative" else f" x{g.target_count}"
-        return (
-            f"{_sport_display_label(g.activity_type)}"
-            f" — {g.category}{target} ({g.start_date} to {g.end_date})"
-        )
+        # Short on purpose — sport + goal only. Target count, dates, etc.
+        # are already redundant here (the tap-through confirmation screen
+        # shows the full detail) and long labels just get clipped by the
+        # Telegram client on narrower screens.
+        emoji = _SPORT_EMOJI.get(g.activity_type, "🏅")
+        return f"{emoji} {_sport_display_label(g.activity_type)} — {g.category}"
 
     rows = [
         [InlineKeyboardButton(
-            _pad(_delete_row_label(g), 42),
+            _pad(_delete_row_label(g), _PAD_FULL),
             callback_data=f"goal:delete_pick:{g.id}",
         )]
         for g in goals
     ]
-    rows.append([InlineKeyboardButton(_pad("Back", 42), callback_data="goal:back")])
+    rows.append([InlineKeyboardButton(_pad("Back", _PAD_FULL), callback_data="goal:back")])
     await query.edit_message_text(
         "Tap a goal to delete it:",
         reply_markup=InlineKeyboardMarkup(rows),
@@ -1998,6 +2178,13 @@ async def _show_goal_status(query) -> None:
                     banner = f"💔 Failed — missed {first_missed.label.split()[0] if first_missed else '?'}"
                 else:
                     banner = f"▶️ In progress — {recurring.met_count}/{recurring.elapsed_count} met"
+                    current_sp = next(
+                        (sp for sp in recurring.sub_periods if sp.status == "in_progress"), None
+                    )
+                    if current_sp:
+                        pace = _goal_pace_label(current_sp.progress.pct, current_sp.start, current_sp.end)
+                        if pace:
+                            banner += f"\n{current_sp.label}: {pace} ({round(current_sp.progress.pct)}%)"
 
                 lines.append(
                     f"{emoji} *{sport_label} : {g.category}*\n\n"
@@ -2029,10 +2216,14 @@ async def _show_goal_status(query) -> None:
             else:
                 session_word = "session" if g.target_count == 1 else "sessions"
                 progress_line = f"🎯 {int(progress.current)}/{g.target_count} {session_word} ({pct}%)"
+
+            pace = _goal_pace_label(progress.pct, g.start_date, g.end_date)
+            pace_line = f"{pace}\n" if pace else ""
             lines.append(
                 f"{emoji} *{sport_label} : {g.category}*\n\n"
                 f"{progress_line}\n"
                 f"{bar}\n"
+                f"{pace_line}"
                 f"_{_format_goal_date_range(g.start_date, g.end_date)}_"
             )
             lines.append(divider)
