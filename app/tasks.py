@@ -526,14 +526,25 @@ async def sync_user_activities(
                 logger.warning("sync failure DM failed for telegram_id=%s", notify_telegram_id)
 
 
-async def _sync_user_activities_async(user_id: str, full: bool = False) -> None:
+async def _sync_user_activities_async(user_id: str, full: bool = False) -> dict:
     """Sync Strava activities for a user.
 
     full=False (default / /sync): incremental — fetches only since the most
-    recent stored activity.  Fast and cheap on Strava API quota.
+    recent stored activity.  Fast and cheap on Strava API quota. Existing
+    rows are left untouched (ON CONFLICT DO NOTHING) — webhooks are assumed
+    to already keep them fresh.
 
-    full=True (/fullsync or first connect): fetches entire history.
-    Use only when the user reports inaccurate statistics.
+    full=True (/fullsync, first connect, or the weekly reconcile sweep):
+    fetches entire history AND upserts every row (ON CONFLICT DO UPDATE),
+    so this is also what actually corrects drift for activities Strava
+    changed after they were first synced — a manual distance/GPS
+    correction, a sport-type reclassification, etc. — which never trigger
+    an update webhook in the first place (Strava's webhook only fires on
+    title/type/privacy changes).
+
+    Returns a dict of {"fetched", "inserted", "updated", "deleted"} counts
+    so callers (e.g. reconcile_sweep) can tell whether anything actually
+    needed fixing.
 
     Raises:
         _NotConnected: If the user doesn't exist, is inactive, or has no
@@ -587,8 +598,21 @@ async def _sync_user_activities_async(user_id: str, full: bool = False) -> None:
             len(activities), user_id,
         )
 
+        # On a full sync, snapshot existing rows first so we can tell which
+        # incoming activities are genuinely new vs. already-known-but-now-
+        # different (drift) vs. unchanged — full-sync callers want to know
+        # this to report/alert on real corrections, not just "ran OK".
+        existing_by_id: dict[int, Activity] = {}
+        if full:
+            existing_result = await db.execute(
+                select(Activity).where(Activity.user_id == user.id)
+            )
+            existing_by_id = {a.strava_activity_id: a for a in existing_result.scalars().all()}
+
         # Upsert all activities returned by Strava
         strava_ids: set[int] = set()
+        inserted_count = 0
+        updated_count = 0
         for data in activities:
             strava_id = int(data["id"])
             strava_ids.add(strava_id)
@@ -600,28 +624,53 @@ async def _sync_user_activities_async(user_id: str, full: bool = False) -> None:
                 bool(data.get("trainer", False))
                 or str(data.get("sport_type") or data.get("type", "")).startswith("Virtual")
             )
-            stmt = (
-                pg_insert(Activity)
-                .values(
-                    strava_activity_id=strava_id,
-                    user_id=user.id,
-                    activity_name=data.get("name") or "Unnamed Activity",
-                    activity_type=data.get("sport_type") or data.get("type") or "Unknown",
-                    activity_date=activity_date,
-                    distance_meters=float(data.get("distance") or 0),
-                    moving_time_seconds=int(data.get("moving_time") or 0),
-                    elapsed_time_seconds=int(data.get("elapsed_time") or 0),
-                    elevation_gain=float(data.get("total_elevation_gain") or 0),
-                    average_speed=float(data.get("average_speed") or 0),
-                    max_speed=float(data.get("max_speed") or 0),
-                    average_heartrate=_optional_float(data.get("average_heartrate")),
-                    max_heartrate=_optional_float(data.get("max_heartrate")),
-                    calories=_optional_float(data.get("calories")),
-                    is_indoor=is_indoor,
-                )
-                .on_conflict_do_nothing(index_elements=["strava_activity_id"])
+            values = dict(
+                activity_name=data.get("name") or "Unnamed Activity",
+                activity_type=data.get("sport_type") or data.get("type") or "Unknown",
+                activity_date=activity_date,
+                distance_meters=float(data.get("distance") or 0),
+                moving_time_seconds=int(data.get("moving_time") or 0),
+                elapsed_time_seconds=int(data.get("elapsed_time") or 0),
+                elevation_gain=float(data.get("total_elevation_gain") or 0),
+                average_speed=float(data.get("average_speed") or 0),
+                max_speed=float(data.get("max_speed") or 0),
+                average_heartrate=_optional_float(data.get("average_heartrate")),
+                max_heartrate=_optional_float(data.get("max_heartrate")),
+                calories=_optional_float(data.get("calories")),
+                is_indoor=is_indoor,
             )
+            insert_values = dict(
+                strava_activity_id=strava_id, user_id=user.id, **values,
+            )
+
+            existing = existing_by_id.get(strava_id)
+            if full:
+                # Source of truth is Strava — always overwrite, so this is
+                # also what fixes drift from edits that never fire an
+                # update webhook (manual distance/GPS corrections, sport
+                # type reclassification, etc).
+                stmt = (
+                    pg_insert(Activity)
+                    .values(**insert_values)
+                    .on_conflict_do_update(index_elements=["strava_activity_id"], set_=values)
+                )
+            else:
+                stmt = (
+                    pg_insert(Activity)
+                    .values(**insert_values)
+                    .on_conflict_do_nothing(index_elements=["strava_activity_id"])
+                )
             await db.execute(stmt)
+
+            if existing is None:
+                inserted_count += 1
+            elif full and (
+                existing.activity_type != values["activity_type"]
+                or abs(existing.distance_meters - values["distance_meters"]) > 1
+                or abs(existing.elevation_gain - values["elevation_gain"]) > 1
+                or existing.moving_time_seconds != values["moving_time_seconds"]
+            ):
+                updated_count += 1
 
         # On a full sync, reconcile deletions — remove any DB rows whose
         # strava_activity_id is no longer present in the API response.
@@ -629,12 +678,7 @@ async def _sync_user_activities_async(user_id: str, full: bool = False) -> None:
         # or before the webhook subscription was active.
         deleted_count = 0
         if full and strava_ids:
-            db_ids_result = await db.execute(
-                select(Activity.strava_activity_id)
-                .where(Activity.user_id == user.id)
-            )
-            db_ids: set[int] = {row[0] for row in db_ids_result.fetchall()}
-            orphaned = db_ids - strava_ids
+            orphaned = set(existing_by_id.keys()) - strava_ids
             if orphaned:
                 from sqlalchemy import delete as sa_delete
                 await db.execute(
@@ -653,9 +697,15 @@ async def _sync_user_activities_async(user_id: str, full: bool = False) -> None:
 
         await db.commit()
         logger.info(
-            "sync_user_activities: upserted=%s deleted=%s for user_id=%s",
-            len(activities), deleted_count, user_id,
+            "sync_user_activities: fetched=%s inserted=%s updated=%s deleted=%s for user_id=%s",
+            len(activities), inserted_count, updated_count, deleted_count, user_id,
         )
+        return {
+            "fetched": len(activities),
+            "inserted": inserted_count,
+            "updated": updated_count,
+            "deleted": deleted_count,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -1023,8 +1073,15 @@ async def _build_goal_lines(db, user: User) -> list[tuple[str, str]]:
 # had actually gone wrong. That scales Strava usage as O(users x ticks) —
 # at 500 users on a 5-minute tick that's ~144,000 calls/day against a
 # 2,000/day quota. This version makes catch-up event-driven instead of a
-# blind poll, in three layers, each only spending Strava calls when there's
+# blind poll, in five layers, each only spending Strava calls when there's
 # real evidence something might have been missed:
+#
+#   Layer 0 (webhook subscription health check) — confirms Strava's
+#     webhook subscription still points at this deployment; if it doesn't,
+#     every user has silently fallen back onto Layers 1-4 to cover 100% of
+#     what real-time webhooks were meant to handle, which is worth an
+#     active DM, not just a startup-time log line. Cost: 1 Strava call,
+#     throttled to once/day. See check_webhook_subscription_health().
 #
 #   Layer 1 (repair pending webhook events) — retries any WebhookEvent row
 #     left unprocessed by a crash/restart. Cost: 1 Strava call per row that
@@ -1039,20 +1096,26 @@ async def _build_goal_lines(db, user: User) -> list[tuple[str, str]]:
 #
 #   Layer 3 (daily rotation safety net) — a distant backstop in case Layers
 #     1-2 miss something (e.g. a silent bug). Each user is checked at most
-#     once per rotation window (default 24h), spread evenly across ticks via
-#     a deterministic hash — so total daily cost is O(users), not
-#     O(users x ticks), regardless of how often the cron actually fires.
+#     once per rotation window (default 24h), via a slot claimed from a
+#     monotonic Redis counter each tick (not wall-clock time-of-day, which
+#     would only ever land on the small fraction of slots that happen to
+#     align with the cron's actual firing times) — so total daily cost is
+#     O(users), not O(users x ticks), regardless of how often or how
+#     regularly the cron actually fires.
 #
-#   Layer 4 (monthly full-history reconciliation) — Layers 1-3 only ever
+#   Layer 4 (weekly full-history reconciliation) — Layers 1-3 only ever
 #     look at *recent* activity (an incremental fetch since the last known
 #     timestamp), so they can't catch things that don't show up as "new":
-#     an activity edited long ago, a type change, or a deletion that
-#     happened while a webhook was missed. Each user gets one full /fullsync
-#     -equivalent re-fetch per calendar month, on a fixed day derived from
-#     their user id (1-28, spread evenly), so the cost is O(users/28) per
-#     day, not O(users) all at once. See monthly_reconcile_sweep().
+#     an activity edited long ago (Strava doesn't send an update webhook
+#     for metric-only edits like a distance/GPS correction — only for
+#     title/type/privacy changes), a sport-type reclassification, or a
+#     deletion that happened while a webhook was missed. Each user gets one
+#     full /fullsync-equivalent re-fetch+upsert per calendar week, on a
+#     fixed day derived from their user id (spread evenly across the 7 days
+#     of the week), so the cost is O(users/7) per day, not O(users) all at
+#     once. See reconcile_sweep().
 #
-# All four layers respect Strava's rate-limit headers via
+# Layers 1-4 all respect Strava's rate-limit headers via
 # app.strava.client.is_rate_limited() and back off before ever hitting 429.
 
 # Must match webhook.py so both systems agree on dedup key lifetime.
@@ -1068,17 +1131,27 @@ _HEARTBEAT_GAP_THRESHOLD_SECONDS = 720  # 12 minutes
 # across ticks — bounds the safety-net's total Strava usage to ~users/day
 # regardless of actual cron frequency.
 _DAILY_SWEEP_WINDOW_SECONDS = 86_400  # 24 hours
-_DAILY_SWEEP_SLOTS = 288  # 5-minute-equivalent granularity within the window
+# Sized to the cron's real cadence (~30-min ticks via cron-job.org, i.e.
+# ~48 ticks/day) rather than an assumed 5-min cadence. The slot itself now
+# comes from a Redis tick counter (see key_daily_sweep_tick), not
+# wall-clock time-of-day — a time-of-day slot only gets visited if some
+# tick happens to land in that exact window, which a 30-min cadence would
+# never do for ~5/6 of the 288 possible values. Cycling through a fixed
+# counter instead guarantees every slot is claimed once per _DAILY_SWEEP_SLOTS
+# ticks, independent of how often or how regularly the cron actually fires.
+_DAILY_SWEEP_SLOTS = 48
 
-# Layer 4: each user is assigned a fixed day-of-month (1-28) on which their
-# entire Strava history is reconciled. Capped at 28 (not the calendar's 28-31)
-# so every user gets exactly one reconciliation day every month regardless
-# of how long that month is.
-_MONTHLY_RECONCILE_DAYS = 28
-# Longer than any month so a user can never be double-reconciled even if
-# their assigned day is re-evaluated on a later cron tick before the key
-# would otherwise expire.
-_MONTHLY_RECONCILE_DEDUP_TTL_SECONDS = 40 * 86_400
+# Layer 4: each user is assigned a fixed day-of-week (Mon=0..Sun=6) on which
+# their entire Strava history is reconciled — shortened from monthly to
+# weekly so drift (missed webhooks, silent metric edits, sport-type
+# reclassifications) is caught within days, not up to a month, well within
+# Strava's rate limit for a group this size.
+_RECONCILE_WEEKDAYS = 7
+# Longer than a week so a user can never be double-reconciled even if their
+# assigned day is re-evaluated on a later cron tick before the key would
+# otherwise expire, but well short of a month so a missed week doesn't
+# compound.
+_RECONCILE_DEDUP_TTL_SECONDS = 10 * 86_400
 
 
 async def _sync_recent_activities_for_user(
@@ -1234,55 +1307,149 @@ async def process_pending_webhook_events(*, max_events: int = 50) -> dict:
     return {"repaired": len(pending_ids)}
 
 
-async def monthly_reconcile_sweep(users: list[User], *, redis, now: datetime) -> dict:
+async def _notify_admin(text: str) -> None:
+    """Best-effort DM to ADMIN_TELEGRAM_ID for system-health alerts (weekly
+    reconcile drift, webhook subscription issues). No-ops quietly if unset
+    — these checks still run and log either way, they just can't page
+    anyone without it configured."""
+    if not settings.admin_telegram_id:
+        return
+    try:
+        bot = TelegramBot(token=settings.telegram_bot_token)
+        async with bot:
+            await bot.send_message(
+                chat_id=settings.admin_telegram_id, text=text, parse_mode="Markdown",
+            )
+    except Exception:
+        logger.warning("_notify_admin: failed to send DM")
+
+
+async def reconcile_sweep(users: list[User], *, redis, now: datetime) -> dict:
     """Layer 4 — low-frequency full-history reconciliation safety net.
 
-    Each connected user is assigned a fixed day-of-month (1-28, derived
+    Each connected user is assigned a fixed day-of-week (derived
     deterministically from their user id) on which their entire Strava
     history is silently re-fetched and reconciled against the local DB —
-    the exact same path as /fullsync (upsert everything, delete local rows
-    no longer present on Strava), just silent (no completion DM) and run
-    automatically instead of waiting for the user to notice something's off.
+    the exact same path as /fullsync (upsert everything so edited/
+    reclassified activities are corrected too, delete local rows no longer
+    present on Strava), just silent (no completion DM to the user) and run
+    automatically instead of waiting for someone to notice something's off.
 
-    A Redis dedup key ensures each user is only reconciled once per calendar
-    month even though this is called every few minutes on their assigned day.
+    Unlike a plain "ran OK" sweep, this reports back (and DMs
+    ADMIN_TELEGRAM_ID about) any user where the reconcile actually found
+    and fixed real drift — a missed activity, a deletion, or a changed
+    activity — since that's the case worth knowing about, not just the
+    fact that the sweep ran.
+
+    A Redis dedup key ensures each user is only reconciled once per ISO
+    week even though this is called every few minutes on their assigned day.
     """
-    from app.redis_client import key_monthly_reconcile
+    from app.redis_client import key_reconcile_sweep
     from app.strava.client import is_rate_limited
 
-    period = f"{now.year}-{now.month:02d}"
-    today = now.day
+    iso_year, iso_week, weekday = now.isocalendar()  # weekday: Mon=1..Sun=7
+    period = f"{iso_year}-W{iso_week:02d}"
     due_users = [
         u for u in users
-        if (u.id.int % _MONTHLY_RECONCILE_DAYS) + 1 == today
+        if (u.id.int % _RECONCILE_WEEKDAYS) + 1 == weekday
     ]
 
     processed, errors = 0, 0
+    drifted: list[dict] = []
     for user in due_users:
-        dedup_key = key_monthly_reconcile(user.id, period)
-        if not await redis.set(dedup_key, "1", ex=_MONTHLY_RECONCILE_DEDUP_TTL_SECONDS, nx=True):
-            continue  # already reconciled this user this month
+        dedup_key = key_reconcile_sweep(user.id, period)
+        if not await redis.set(dedup_key, "1", ex=_RECONCILE_DEDUP_TTL_SECONDS, nx=True):
+            continue  # already reconciled this user this week
         if await is_rate_limited():
-            logger.warning("monthly_reconcile: rate limit reached mid-sweep — stopping")
+            logger.warning("reconcile_sweep: rate limit reached mid-sweep — stopping")
             break
         try:
-            await _sync_user_activities_async(user_id=str(user.id), full=True)
+            stats = await _sync_user_activities_async(user_id=str(user.id), full=True)
             processed += 1
-            logger.info("monthly_reconcile: reconciled user_id=%s", user.id)
+            logger.info("reconcile_sweep: reconciled user_id=%s stats=%s", user.id, stats)
+            if stats["inserted"] or stats["updated"] or stats["deleted"]:
+                drifted.append({
+                    "name": user.strava_athlete_name or user.telegram_first_name,
+                    **stats,
+                })
         except Exception:
-            logger.exception("monthly_reconcile: error for user_id=%s", user.id)
+            logger.exception("reconcile_sweep: error for user_id=%s", user.id)
             errors += 1
 
     if due_users:
         logger.info(
-            "monthly_reconcile: day=%s due=%s processed=%s errors=%s",
-            today, len(due_users), processed, errors,
+            "reconcile_sweep: weekday=%s due=%s processed=%s errors=%s drifted=%s",
+            weekday, len(due_users), processed, errors, len(drifted),
         )
-    return {"due": len(due_users), "processed": processed, "errors": errors}
+
+    if drifted:
+        lines = ["⚠️ *Weekly reconcile found drift* (now fixed):"]
+        for d in drifted:
+            parts = []
+            if d["inserted"]:
+                parts.append(f"{d['inserted']} missed")
+            if d["updated"]:
+                parts.append(f"{d['updated']} edited")
+            if d["deleted"]:
+                parts.append(f"{d['deleted']} deleted")
+            lines.append(f"• {d['name']}: {', '.join(parts)} activity(ies)")
+        fire_and_forget(_notify_admin("\n".join(lines)))
+
+    return {"due": len(due_users), "processed": processed, "errors": errors, "drifted": drifted}
+
+
+async def check_webhook_subscription_health(*, redis) -> dict:
+    """Layer 0 — confirm Strava's webhook subscription still points at
+    this deployment.
+
+    If it doesn't (deactivated by Strava after repeated failed callbacks,
+    re-pointed at a stale domain, or simply never created), every user
+    silently falls back onto the polling layers above, which then have to
+    cover 100% of the load they were only ever designed to backstop — that
+    deserves an active alert, not just the startup-time log line this
+    codebase already had (which nobody is watching mid-deployment).
+
+    Cheap (one Strava call, no per-user cost) but still throttled to once
+    per calendar day via Redis, since there's no reason to check more
+    often than that.
+    """
+    from app.redis_client import key_webhook_health_check
+    from app.strava.client import view_webhook_subscription
+
+    today = datetime.now(timezone.utc).date().isoformat()
+    dedup_key = key_webhook_health_check()
+    if await redis.get(dedup_key) == today:
+        return {"checked": False}
+    await redis.set(dedup_key, today, ex=2 * 86_400)
+
+    valid_urls = settings.strava_webhook_valid_callback_urls
+
+    try:
+        subs = await view_webhook_subscription()
+    except Exception as exc:
+        logger.warning("check_webhook_subscription_health: could not query Strava: %s", exc)
+        return {"checked": True, "ok": None, "error": str(exc)}
+
+    registered_urls = [s.get("callback_url") for s in subs]
+    ok = any(url in valid_urls for url in registered_urls)
+
+    if not ok:
+        logger.warning(
+            "check_webhook_subscription_health: MISMATCH — expected one of %s, found %s",
+            sorted(valid_urls), registered_urls,
+        )
+        fire_and_forget(_notify_admin(
+            "⚠️ *Strava webhook subscription mismatch*\n"
+            f"Expected a callback under `{settings.base_url}`, found: {registered_urls or 'none'}.\n"
+            "New activities will stop arriving in real time (polling layers "
+            "will still catch up eventually) until this is fixed — run "
+            "scripts/register_strava_webhook.py."
+        ))
+    return {"checked": True, "ok": ok, "registered_urls": registered_urls}
 
 
 async def catchup_sync_all_users() -> dict:
-    """Reliability safety net — see module comment above for the 3-layer design.
+    """Reliability safety net — see module comment above for the 5-layer design.
 
     Called every few minutes via GET /cron/sync-all. Unlike the old blind
     per-user scan, this only spends Strava API calls when there's concrete
@@ -1293,6 +1460,9 @@ async def catchup_sync_all_users() -> dict:
 
     redis = await get_redis()
     now_ts = int(datetime.now(timezone.utc).timestamp())
+
+    # --- Layer 0: Strava webhook subscription health check ---------------
+    webhook_health = await check_webhook_subscription_health(redis=redis)
 
     # --- Layer 1: repair anything left unprocessed by a crash/restart -----
     repair_result = await process_pending_webhook_events()
@@ -1306,11 +1476,12 @@ async def catchup_sync_all_users() -> dict:
     if await is_rate_limited():
         logger.warning("catchup_sync: Strava daily usage near quota — skipping bulk scans this tick")
         return {
+            "webhook_health": webhook_health,
             "repaired": repair_result["repaired"],
             "outage_gap_seconds": gap_seconds,
             "outage_scan": None,
             "daily_sweep": None,
-            "monthly_reconcile": None,
+            "reconcile_sweep": None,
             "rate_limited": True,
         }
 
@@ -1352,9 +1523,13 @@ async def catchup_sync_all_users() -> dict:
 
     # --- Layer 3: low-frequency daily rotation safety net ------------------
     if users:
-        slot_now = (now_ts % _DAILY_SWEEP_WINDOW_SECONDS) // (
-            _DAILY_SWEEP_WINDOW_SECONDS // _DAILY_SWEEP_SLOTS
-        )
+        # Claim the next slot from a monotonic counter rather than deriving
+        # one from wall-clock time-of-day — see key_daily_sweep_tick's
+        # docstring for why a time-of-day slot mostly never got visited at
+        # the cron's real ~30-min cadence.
+        from app.redis_client import key_daily_sweep_tick
+        tick = await redis.incr(key_daily_sweep_tick())
+        slot_now = tick % _DAILY_SWEEP_SLOTS
         sweep_after_ts = now_ts - _DAILY_SWEEP_WINDOW_SECONDS
         due_users = [
             u for u in users
@@ -1377,23 +1552,24 @@ async def catchup_sync_all_users() -> dict:
                     errors += 1
             daily_sweep = {"users_processed": processed, "new_activities": new_activities, "errors": errors}
 
-    # --- Layer 4: low-frequency monthly full-history reconciliation -------
-    monthly_reconcile: dict | None = None
+    # --- Layer 4: low-frequency weekly full-history reconciliation --------
+    reconcile: dict | None = None
     if users:
-        monthly_reconcile = await monthly_reconcile_sweep(
+        reconcile = await reconcile_sweep(
             users, redis=redis, now=datetime.now(timezone.utc)
         )
 
     logger.info(
-        "catchup_sync complete — repaired=%s gap=%ss outage_scan=%s daily_sweep=%s monthly_reconcile=%s",
-        repair_result["repaired"], gap_seconds, outage_scan, daily_sweep, monthly_reconcile,
+        "catchup_sync complete — webhook_health=%s repaired=%s gap=%ss outage_scan=%s daily_sweep=%s reconcile_sweep=%s",
+        webhook_health, repair_result["repaired"], gap_seconds, outage_scan, daily_sweep, reconcile,
     )
     return {
+        "webhook_health": webhook_health,
         "repaired": repair_result["repaired"],
         "outage_gap_seconds": gap_seconds,
         "outage_scan": outage_scan,
         "daily_sweep": daily_sweep,
-        "monthly_reconcile": monthly_reconcile,
+        "reconcile_sweep": reconcile,
         "rate_limited": False,
     }
 

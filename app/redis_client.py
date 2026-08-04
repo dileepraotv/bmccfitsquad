@@ -88,13 +88,34 @@ def key_strava_rate_limit() -> str:
     return "strava:rate_limit:usage"
 
 
-def key_monthly_reconcile(user_id, period: str) -> str:
-    """Dedup key ensuring a user's monthly full-history reconciliation sync
-    (see monthly_reconcile_sweep() in tasks.py) runs at most once per
-    calendar month even though the cron ticks every few minutes on their
-    assigned day. *period* is a "YYYY-MM" string.
+def key_reconcile_sweep(user_id, period: str) -> str:
+    """Dedup key ensuring a user's periodic full-history reconciliation sync
+    (see reconcile_sweep() in tasks.py) runs at most once per period even
+    though the cron ticks every few minutes on their assigned day. *period*
+    is an ISO "YYYY-Www" week string.
     """
-    return f"reconcile:monthly:{user_id}:{period}"
+    return f"reconcile:sweep:{user_id}:{period}"
+
+
+def key_daily_sweep_tick() -> str:
+    """Monotonically incrementing counter for Layer 3's daily rotation
+    sweep — each catchup_sync_all_users() tick claims the next slot via
+    INCR, rather than deriving a slot from wall-clock time-of-day. A
+    time-of-day slot only gets visited if some tick happens to land in
+    that exact 5-minute window; since the cron actually fires roughly
+    every 30 min (not every 5), most of the 288 time-of-day slots would
+    never be visited at all. A tick counter guarantees every slot value
+    is eventually claimed once per full cycle, regardless of the cron's
+    actual cadence or alignment.
+    """
+    return "ops:daily_sweep:tick"
+
+
+def key_webhook_health_check() -> str:
+    """Dedup key so the Strava webhook-subscription health check (part of
+    catchup_sync_all_users()) only actually calls Strava's subscription API
+    once per day, not on every cron tick."""
+    return "ops:webhook_health_check:last_run_date"
 
 
 # Recap text is no longer cached (see app/stats/recap.py) — removed

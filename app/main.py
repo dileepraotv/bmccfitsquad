@@ -81,16 +81,16 @@ async def lifespan(app: FastAPI):
     try:
         from app.strava.client import view_webhook_subscription
         subs = await view_webhook_subscription()
-        expected = settings.strava_webhook_callback_url
-        registered = any(s.get("callback_url") == expected for s in subs)
+        valid_urls = settings.strava_webhook_valid_callback_urls
+        registered = any(s.get("callback_url") in valid_urls for s in subs)
         if registered:
-            logger.info("Strava webhook subscription OK: %s", expected)
+            logger.info("Strava webhook subscription OK: %s", [s.get("callback_url") for s in subs])
         else:
             logger.warning(
                 "Strava webhook subscription MISMATCH or missing. "
-                "Expected callback_url=%s but found: %s. "
+                "Expected one of %s but found: %s. "
                 "Run scripts/register_strava_webhook.py to fix.",
-                expected,
+                sorted(valid_urls),
                 [s.get("callback_url") for s in subs],
             )
     except Exception as exc:
@@ -193,10 +193,10 @@ async def cron_sync_all(secret: str = ""):
     """Called periodically (UptimeRobot/cron-job.org) as a reliability safety net.
 
     Event-driven, not a blind poll — see the module docstring above
-    catchup_sync_all_users() in tasks.py for the 4-layer design (repair
-    pending webhook events, heartbeat-gated outage recovery, low-frequency
-    daily rotation, monthly full-history reconciliation). Strava API usage
-    no longer scales with (users x ticks).
+    catchup_sync_all_users() in tasks.py for the 5-layer design (webhook
+    subscription health check, repair pending webhook events, heartbeat-gated
+    outage recovery, low-frequency daily rotation, weekly full-history
+    reconciliation). Strava API usage no longer scales with (users x ticks).
 
     Protected by: ?secret={CRON_SECRET} query parameter
     """

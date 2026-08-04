@@ -28,3 +28,7 @@ services:
         sync: false
       - key: BASE_URL
         sync: false          # set to https://<your-service>.onrender.com
+      - key: CRON_SECRET
+        sync: false
+      - key: ADMIN_TELEGRAM_ID
+        sync: false          # optional — receives weekly drift / webhook-health alerts

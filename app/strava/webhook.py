@@ -104,14 +104,14 @@ async def strava_webhook_status():
         logger.error("Failed to fetch webhook subscriptions: %s", exc)
         return {"status": "error", "detail": str(exc), "subscriptions": []}
 
-    expected_url = settings.strava_webhook_callback_url
+    valid_urls = settings.strava_webhook_valid_callback_urls
     return {
         "status": "ok",
         "count": len(subscriptions),
         "subscriptions": subscriptions,
-        "expected_callback_url": expected_url,
+        "expected_callback_url": sorted(valid_urls),
         "webhook_registered": any(
-            s.get("callback_url") == expected_url for s in subscriptions
+            s.get("callback_url") in valid_urls for s in subscriptions
         ),
     }
 
