@@ -382,6 +382,134 @@ async def ops_send_recap(
     }
 
 
+@app.get(
+    "/ops/compare-stats",
+    tags=["ops"],
+    summary="Compare Postgres-computed activity totals against Strava's live /athlete/activities feed",
+)
+async def ops_compare_stats(secret: str = "", names: str = ""):
+    """Diagnostic: for each matching user, sums every stored `Activity` row
+    per sport and compares it against a fresh pull straight from Strava's
+    `/athlete/activities` (not the pre-aggregated `/athlete/stats` endpoint
+    — see fetch_athlete_stats' docstring in app/strava/client.py for why
+    the bot doesn't use that one for anything user-facing). Surfaces any
+    activity present on one side but not the other (id-level diff), plus
+    per-sport count/distance/elevation/time mismatches.
+
+    Must run in this environment (not locally) since it needs the
+    deployed ENCRYPTION_KEY to decrypt each user's stored Strava tokens.
+
+    ?names=Dileep,Manoj,Ganesh — comma-separated, case-insensitive
+    substring match against telegram_first_name / strava_athlete_name /
+    telegram_username. Each name may match more than one account (e.g. two
+    "Manoj"s) — all matches are reported.
+
+    Protected by: ?secret={CRON_SECRET} query parameter
+    """
+    if not settings.cron_secret or secret != settings.cron_secret:
+        raise HTTPException(status_code=401, detail="invalid or missing secret")
+    if not names:
+        raise HTTPException(status_code=400, detail="?names= is required (comma-separated)")
+
+    from collections import defaultdict
+
+    from sqlalchemy import select
+
+    from app.database import AsyncSessionLocal
+    from app.models import Activity, User
+    from app.strava.auth import get_valid_access_token
+    from app.strava.client import fetch_activities
+
+    def _totals(rows_or_dicts, is_pg: bool) -> dict:
+        totals: dict = defaultdict(lambda: {"count": 0, "distance_m": 0.0, "elev_m": 0.0, "moving_s": 0})
+        for a in rows_or_dicts:
+            if is_pg:
+                sport = a.activity_type
+                d, e, m = a.distance_meters or 0.0, a.elevation_gain or 0.0, a.moving_time_seconds or 0
+            else:
+                sport = a.get("sport_type") or a.get("type") or "Unknown"
+                d, e, m = a.get("distance") or 0.0, a.get("total_elevation_gain") or 0.0, a.get("moving_time") or 0
+            t = totals[sport]
+            t["count"] += 1
+            t["distance_m"] += d
+            t["elev_m"] += e
+            t["moving_s"] += m
+        return totals
+
+    report = []
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(User))
+        all_users = result.scalars().all()
+
+        for name in [n.strip() for n in names.split(",") if n.strip()]:
+            needle = name.lower()
+            matches = [
+                u for u in all_users
+                if needle in (u.telegram_first_name or "").lower()
+                or needle in (u.strava_athlete_name or "").lower()
+                or needle in (u.telegram_username or "").lower()
+            ]
+            if not matches:
+                report.append({"name": name, "error": "no matching user found"})
+                continue
+
+            for user in matches:
+                entry = {
+                    "name": name,
+                    "telegram_first_name": user.telegram_first_name,
+                    "strava_athlete_name": user.strava_athlete_name,
+                    "strava_athlete_id": user.strava_athlete_id,
+                }
+                if not user.is_strava_connected:
+                    entry["error"] = "not connected to Strava"
+                    report.append(entry)
+                    continue
+
+                pg_rows = (await db.execute(
+                    select(Activity).where(Activity.user_id == user.id)
+                )).scalars().all()
+
+                try:
+                    token = await get_valid_access_token(db, user)
+                    sv_rows = await fetch_activities(token)
+                except Exception as exc:
+                    entry["error"] = f"Strava fetch failed: {exc!r}"
+                    report.append(entry)
+                    continue
+
+                pg_ids = {a.strava_activity_id for a in pg_rows}
+                sv_ids = {a["id"] for a in sv_rows}
+                pg_totals = _totals(pg_rows, is_pg=True)
+                sv_totals = _totals(sv_rows, is_pg=False)
+
+                per_sport = []
+                for sport in sorted(set(pg_totals) | set(sv_totals)):
+                    p = pg_totals.get(sport, {"count": 0, "distance_m": 0.0, "elev_m": 0.0, "moving_s": 0})
+                    s = sv_totals.get(sport, {"count": 0, "distance_m": 0.0, "elev_m": 0.0, "moving_s": 0})
+                    match = (
+                        p["count"] == s["count"]
+                        and abs(p["distance_m"] - s["distance_m"]) < 5
+                        and abs(p["moving_s"] - s["moving_s"]) < 5
+                    )
+                    per_sport.append({
+                        "sport": sport,
+                        "postgres": p,
+                        "strava": s,
+                        "match": match,
+                    })
+
+                entry.update({
+                    "postgres_activity_count": len(pg_ids),
+                    "strava_activity_count": len(sv_ids),
+                    "on_strava_not_in_postgres": sorted(sv_ids - pg_ids),
+                    "in_postgres_not_on_strava": sorted(pg_ids - sv_ids),
+                    "per_sport": per_sport,
+                })
+                report.append(entry)
+
+    return {"report": report}
+
+
 @app.get("/telegram/status", tags=["ops"], summary="Telegram's own view of webhook delivery health")
 async def telegram_status():
     """Surfaces Telegram's getWebhookInfo so we can tell an app outage
