@@ -1281,7 +1281,7 @@ def _format_goal_date_range(start, end) -> str:
     return f"{start_str} – {end_str}"
 
 
-_GOAL_PACE_LEGEND = "🔼 On pace    🔽 Behind pace    ✅ Goal met"
+_GOAL_PACE_LEGEND = "🔼 On pace · 🔽 Behind · ✅ Met"
 
 
 def _goal_pace_icon(pct: float, start_date, end_date) -> str:
