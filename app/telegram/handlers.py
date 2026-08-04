@@ -1117,9 +1117,15 @@ def _goal_mode_prompt_text(sport: str, metric: str) -> str:
     elif metric == "duration":
         cum_example = f"e.g. 20 {cum_unit} total"
         ses_example = f"e.g. a 30 {ses_unit} {noun}, 4 sessions"
-    else:  # distance
-        cum_example = f"e.g. 1,000 {cum_unit} total"
-        ses_example = f"e.g. a 10 {ses_unit} {noun}, 4 sessions"
+    elif ses_unit == "m":  # Swim distance
+        cum_example = f"e.g. 50,000 {cum_unit} total"
+        ses_example = f"e.g. a 1,500 {ses_unit} {noun}, 4 sessions"
+    else:  # distance — sport-specific so a Run example reads like a race
+        # distance (e.g. "a 10 km run") instead of a generic Ride-scale number.
+        _SES_HEADLINE = {"Run": "10", "Walk": "5", "Ride": "50", "Ride Endurance": "200", "Hiking": "10"}
+        _CUM_HEADLINE = {"Run": "100", "Walk": "60", "Ride": "300", "Ride Endurance": "800", "Hiking": "60"}
+        cum_example = f"e.g. {_CUM_HEADLINE.get(sport, '1,000')} {cum_unit} total"
+        ses_example = f"e.g. a {_SES_HEADLINE.get(sport, '10')} {ses_unit} {noun}, 4 sessions"
 
     return (
         "How should this goal be tracked?\n"
@@ -1359,18 +1365,48 @@ def _format_goal_category(sport: str, metric: str, aggregation: str,
     return f"{display_val} {unit}{suffix}"
 
 
-def _goal_value_examples(metric: str, aggregation: str, unit: str) -> str:
+# Realistic per-session distance examples by sport, in the sport's own
+# display unit (km) — a Run goal should show race distances (5K/10K/half/
+# marathon), not a generic "50, 100, 200" that only makes sense for Ride.
+# Ride Endurance additionally floors at 200 km (see the goal.activity_type
+# == "RideEndurance" filter in get_goal_progress), so its examples must all
+# be >= 200 or they'd describe a threshold the goal could never actually award.
+_DISTANCE_SESSION_EXAMPLES: dict[str, str] = {
+    "Run":            "`5`, `10`, `21.1`, `42.2`",
+    "Walk":           "`3`, `5`, `8`, `10`",
+    "Ride":           "`20`, `50`, `100`, `160`",
+    "Ride Endurance": "`200`, `300`, `400`",
+    "Hiking":         "`5`, `10`, `15`, `20`",
+}
+
+# Realistic cumulative-total distance examples by sport — a monthly Run
+# total of 1,000 km is unrealistic for almost anyone, but it's a perfectly
+# normal *cumulative* Ride total, so these can't share one generic list either.
+_DISTANCE_CUMULATIVE_EXAMPLES: dict[str, str] = {
+    "Run":            "`50`, `100`, `200`, `300`",
+    "Walk":           "`30`, `60`, `100`, `150`",
+    "Ride":           "`100`, `300`, `500`, `1,000`",
+    "Ride Endurance": "`400`, `800`, `1,200`",
+    "Hiking":         "`30`, `60`, `100`",
+}
+
+
+def _goal_value_examples(sport: str, metric: str, aggregation: str, unit: str) -> str:
     """Example numbers shown alongside the free-text value prompt, tuned to
-    the metric/aggregation combination so a cumulative yearly elevation
+    the sport/metric/aggregation combination so a cumulative yearly elevation
     target (tens of thousands of metres) doesn't show the same examples as
-    a per-ride elevation threshold (hundreds of metres)."""
+    a per-ride elevation threshold (hundreds of metres), and a Run distance
+    goal shows race distances rather than Ride-scale numbers."""
     if metric == "duration":
         return "`5`, `10`, `20`" if aggregation == "cumulative" else "`30`, `45`, `60`"
     if metric == "elevation":
         return "`10,000`, `50,000`, `100,000`" if aggregation == "cumulative" else "`500`, `1,000`"
     if unit == "m":  # Swim distance
         return "`10,000`, `50,000`" if aggregation == "cumulative" else "`500`, `1,000`, `1,500`, `3,800`"
-    return "`150`, `1,000`, `5,000`" if aggregation == "cumulative" else "`50`, `100`, `200`"
+    examples = (
+        _DISTANCE_CUMULATIVE_EXAMPLES if aggregation == "cumulative" else _DISTANCE_SESSION_EXAMPLES
+    )
+    return examples.get(sport, "`150`, `1,000`, `5,000`" if aggregation == "cumulative" else "`50`, `100`, `200`")
 
 
 def _parse_goal_number(text: str) -> float | None:
@@ -1491,7 +1527,7 @@ def _value_prompt_text(draft: dict) -> str:
     else:
         noun = "session length" if metric == "duration" else metric
         prompt = f"✏️ *What is your per-session {noun} goal for {sport}?*"
-    eg = _goal_value_examples(metric, mode, unit)
+    eg = _goal_value_examples(sport, metric, mode, unit)
     return (
         f"*{_goal_step_progress(draft, 'value')}*\n\n"
         f"{prompt}\n\n"
