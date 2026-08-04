@@ -481,6 +481,23 @@ async def ops_compare_stats(secret: str = "", names: str = ""):
                 sv_ids = {a["id"] for a in sv_rows}
                 pg_totals = _totals(pg_rows, is_pg=True)
                 sv_totals = _totals(sv_rows, is_pg=False)
+                sv_by_id = {a["id"]: a for a in sv_rows}
+                pg_by_id = {a.strava_activity_id: a for a in pg_rows}
+
+                # Activities present on both sides but whose sport type
+                # disagrees — e.g. the athlete reclassified a ride on
+                # Strava (GravelRide -> Ride) after it was originally
+                # synced, and no "update" webhook ever reached us to pick
+                # up the change.
+                reclassified = []
+                for i in sorted(pg_ids & sv_ids):
+                    pg_type = pg_by_id[i].activity_type
+                    sv_type = sv_by_id[i].get("sport_type") or sv_by_id[i].get("type")
+                    if pg_type != sv_type:
+                        reclassified.append({
+                            "id": i, "name": pg_by_id[i].activity_name,
+                            "postgres_sport_type": pg_type, "strava_sport_type": sv_type,
+                        })
 
                 per_sport = []
                 for sport in sorted(set(pg_totals) | set(sv_totals)):
@@ -501,8 +518,25 @@ async def ops_compare_stats(secret: str = "", names: str = ""):
                 entry.update({
                     "postgres_activity_count": len(pg_ids),
                     "strava_activity_count": len(sv_ids),
-                    "on_strava_not_in_postgres": sorted(sv_ids - pg_ids),
-                    "in_postgres_not_on_strava": sorted(pg_ids - sv_ids),
+                    "on_strava_not_in_postgres": [
+                        {
+                            "id": i, "name": sv_by_id[i].get("name"),
+                            "sport_type": sv_by_id[i].get("sport_type") or sv_by_id[i].get("type"),
+                            "start_date": sv_by_id[i].get("start_date"),
+                            "distance_m": sv_by_id[i].get("distance"),
+                        }
+                        for i in sorted(sv_ids - pg_ids)
+                    ],
+                    "in_postgres_not_on_strava": [
+                        {
+                            "id": i, "name": pg_by_id[i].activity_name,
+                            "sport_type": pg_by_id[i].activity_type,
+                            "start_date": pg_by_id[i].activity_date.isoformat(),
+                            "distance_m": pg_by_id[i].distance_meters,
+                        }
+                        for i in sorted(pg_ids - sv_ids)
+                    ],
+                    "reclassified_sport_type": reclassified,
                     "per_sport": per_sport,
                 })
                 report.append(entry)
