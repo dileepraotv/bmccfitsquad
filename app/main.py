@@ -278,6 +278,92 @@ async def recent_errors(secret: str = ""):
 
 
 @app.get(
+    "/ops/fix-webhook-subscription",
+    tags=["ops"],
+    summary="Delete and re-create the Strava webhook subscription pointing at BASE_URL",
+)
+async def ops_fix_webhook_subscription(secret: str = "", confirm: bool = False):
+    """Strava only allows one webhook subscription per app, so this is the
+    delete-then-recreate dance scripts/register_strava_webhook.py does
+    locally, exposed here so it can be run against the deployed
+    ENCRYPTION_KEY-having environment without needing local Strava
+    credentials.
+
+    Strava sends a synchronous GET hub.challenge to the new callback_url
+    as part of creating the subscription, so this app must already be
+    live and publicly reachable at BASE_URL for the create step to succeed.
+
+    ?confirm=true is required to actually delete/create — without it this
+    just reports the current subscription so you can see what would change.
+
+    Protected by: ?secret={CRON_SECRET} query parameter
+    """
+    if not settings.cron_secret or secret != settings.cron_secret:
+        raise HTTPException(status_code=401, detail="invalid or missing secret")
+
+    from app.strava.client import (
+        create_webhook_subscription,
+        delete_webhook_subscription,
+        view_webhook_subscription,
+    )
+
+    existing = await view_webhook_subscription()
+    target_url = settings.strava_webhook_callback_url
+    valid_urls = settings.strava_webhook_valid_callback_urls
+    already_ok = any(s.get("callback_url") in valid_urls for s in existing)
+
+    if not confirm:
+        return {
+            "dry_run": True,
+            "existing_subscriptions": existing,
+            "target_callback_url": target_url,
+            "already_pointing_here": already_ok,
+            "note": "Call again with ?confirm=true to delete existing and create new.",
+        }
+
+    if already_ok:
+        return {"changed": False, "existing_subscriptions": existing, "note": "Already correct — no action taken."}
+
+    for sub in existing:
+        await delete_webhook_subscription(sub["id"])
+
+    created = await create_webhook_subscription(
+        verify_token=settings.strava_webhook_verify_token,
+        callback_url=target_url,
+    )
+    return {"changed": True, "deleted": [s["id"] for s in existing], "created": created}
+
+
+@app.get(
+    "/ops/test-admin-alert",
+    tags=["ops"],
+    summary="Send a test DM to ADMIN_TELEGRAM_ID to verify the system-alert path works",
+)
+async def ops_test_admin_alert(secret: str = ""):
+    """Exercises the exact same code path used by the weekly reconcile
+    drift alert and the webhook-health-check alert (app.tasks._notify_admin),
+    so a successful send here means both of those will actually reach you
+    too — the only per-alert-type risk left is whether that specific check
+    itself ever fires, not whether delivery works.
+
+    Protected by: ?secret={CRON_SECRET} query parameter
+    """
+    if not settings.cron_secret or secret != settings.cron_secret:
+        raise HTTPException(status_code=401, detail="invalid or missing secret")
+    if not settings.admin_telegram_id:
+        raise HTTPException(status_code=400, detail="ADMIN_TELEGRAM_ID is not configured")
+
+    from app.tasks import _notify_admin
+
+    await _notify_admin(
+        "✅ *Test alert* — if you're reading this, ADMIN_TELEGRAM_ID is "
+        "wired up correctly. Weekly reconcile drift and webhook-health "
+        "alerts will reach you here too."
+    )
+    return {"sent": True, "admin_telegram_id": settings.admin_telegram_id}
+
+
+@app.get(
     "/ops/scan-duplicates",
     tags=["ops"],
     summary="One-off scan of activity history for possible duplicates + alert affected users",
