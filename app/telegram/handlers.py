@@ -2509,7 +2509,9 @@ async def _send_stats(query, sport: str, time_frame: str) -> None:
 
         if total_activities == 0 and user.strava_athlete_id:
             from app.tasks import fire_and_forget, sync_user_activities
-            fire_and_forget(sync_user_activities(user_id=str(user.id), full=True))
+            fire_and_forget(sync_user_activities(
+                user_id=str(user.id), full=True, notify_telegram_id=query.from_user.id,
+            ))
             await query.edit_message_text(
                 "⏳ No activity data found — syncing your Strava history now\\.\n\n"
                 "This may take a minute\\. Please use /stats again in a moment\\.",

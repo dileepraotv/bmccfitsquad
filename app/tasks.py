@@ -464,21 +464,29 @@ async def sync_user_activities(
     Retries up to 2 times with exponential back-off on failure.
     """
     try:
-        await _sync_user_activities_async(user_id=user_id, full=full)
+        stats = await _sync_user_activities_async(user_id=user_id, full=full)
         if notify_telegram_id:
-            msg = (
-                "✅ *Full sync complete\\!* Your entire Strava history has been "
-                "rebuilt\\. Use /stats to see your updated numbers\\."
-                if full else
-                "✅ *Sync complete\\!* Use /stats to see your latest numbers\\."
-            )
+            inserted = stats["inserted"]
+            noun = "activity" if inserted == 1 else "activities"
+            if full:
+                # "Import" reads naturally for a first connect (the common
+                # trigger for full=True) and equally fine for a re-run
+                # /fullsync — either way the user was left waiting with no
+                # confirmation before, just a "please check back" message.
+                msg = f"✅ *Import complete — {inserted} {noun} loaded\\!*"
+            elif inserted:
+                msg = f"✅ *Sync complete — {inserted} new {noun} added\\!*"
+            else:
+                msg = "✅ *Sync complete\\!* No new activities since your last sync\\."
             try:
+                from app.telegram.keyboards import post_dismiss_keyboard
                 bot = TelegramBot(token=settings.telegram_bot_token)
                 async with bot:
                     await bot.send_message(
                         chat_id=notify_telegram_id,
                         text=msg,
                         parse_mode="MarkdownV2",
+                        reply_markup=post_dismiss_keyboard(),
                     )
             except Exception:
                 logger.warning("sync completion DM failed for telegram_id=%s", notify_telegram_id)

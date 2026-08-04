@@ -360,7 +360,9 @@ async def strava_oauth_callback(
     from app.tasks import fire_and_forget, sync_user_activities
 
     user_id_str = str(user.id)
-    fire_and_forget(sync_user_activities(user_id=user_id_str, full=True))
+    fire_and_forget(sync_user_activities(
+        user_id=user_id_str, full=True, notify_telegram_id=telegram_user_id,
+    ))
     logger.info("Full history sync scheduled for user_id=%s", user_id_str)
 
     # ------------------------------------------------------------------
