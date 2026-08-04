@@ -72,6 +72,18 @@ def key_activity_edit(telegram_user_id: int) -> str:
     return f"activity:edit:{telegram_user_id}"
 
 
+def key_activity_edit_recent(telegram_user_id: int) -> str:
+    """Longer-lived pointer to the activity_id last opened for editing.
+
+    Outlives the short-TTL draft above (key_activity_edit) so that if a
+    user's edit session times out, the "Session expired" recovery message
+    can still offer a one-tap 'Try Again' back into editing the same
+    activity instead of leaving them with no way back short of finding the
+    original Strava notification again.
+    """
+    return f"activity:edit:recent:{telegram_user_id}"
+
+
 def key_heartbeat() -> str:
     """Last-seen timestamp updated by /ping and /cron/sync-all.
 

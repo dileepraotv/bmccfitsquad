@@ -2583,6 +2583,27 @@ async def _do_disconnect(query) -> None:
 # ---------------------------------------------------------------------------
 
 _ACTIVITY_EDIT_TTL = 600  # 10 minutes
+_ACTIVITY_EDIT_RECENT_TTL = 86_400  # 24 hours — see key_activity_edit_recent
+
+
+async def _activity_edit_expired_keyboard(tg_id: int) -> InlineKeyboardMarkup:
+    """Recovery keyboard for a dead-end activity-edit callback/text — mirrors
+    the goal flow's _session_expired_keyboard so the two flows feel
+    consistent instead of goals having a one-tap recovery and activity
+    edits leaving the user stuck. Offers 'Try Again' (re-opens editing for
+    the same activity, via key_activity_edit_recent) when we still know
+    which activity that was, alongside 'Dismiss' either way."""
+    from app.redis_client import get_redis, key_activity_edit_recent
+
+    r = await get_redis()
+    activity_id = await r.get(key_activity_edit_recent(tg_id))
+    rows = []
+    if activity_id:
+        rows.append([InlineKeyboardButton(
+            _pad("Try Again", _PAD_FULL), callback_data=f"activity:edit:{activity_id}",
+        )])
+    rows.append([InlineKeyboardButton(_pad("Dismiss", _PAD_FULL), callback_data="activity:dismiss")])
+    return InlineKeyboardMarkup(rows)
 
 
 async def _handle_activity_desc_skip(query) -> None:
@@ -2593,7 +2614,10 @@ async def _handle_activity_desc_skip(query) -> None:
     r = await get_redis()
     raw = await r.get(key_activity_edit(tg_id))
     if not raw:
-        await query.message.reply_text("Nothing to skip.")
+        await query.edit_message_text(
+            "This activity-edit session expired.",
+            reply_markup=await _activity_edit_expired_keyboard(tg_id),
+        )
         return
     draft = _json.loads(raw)
     if draft.get("step") != "description":
@@ -2621,7 +2645,10 @@ async def _handle_activity_desc_cancel(query) -> None:
     tg_id = query.from_user.id
     r = await get_redis()
     if not await r.get(key_activity_edit(tg_id)):
-        await query.message.reply_text("Nothing to cancel.")
+        await query.edit_message_text(
+            "This activity-edit session expired.",
+            reply_markup=await _activity_edit_expired_keyboard(tg_id),
+        )
         return
     await r.delete(key_activity_edit(tg_id))
     _users_with_draft.discard(tg_id)
@@ -2639,13 +2666,16 @@ async def _handle_activity_edit_start(query, data: str) -> None:
     activity_id = int(data.split(":")[-1])
     tg_id = query.from_user.id
 
-    from app.redis_client import get_redis, key_activity_edit
+    from app.redis_client import get_redis, key_activity_edit, key_activity_edit_recent
     r = await get_redis()
     await r.set(
         key_activity_edit(tg_id),
         _json.dumps({"activity_id": activity_id, "step": "name"}),
         ex=_ACTIVITY_EDIT_TTL,
     )
+    # Outlives the draft above so a later "Session expired" message can
+    # still offer a one-tap 'Try Again' back into this same activity.
+    await r.set(key_activity_edit_recent(tg_id), activity_id, ex=_ACTIVITY_EDIT_RECENT_TTL)
     _users_with_draft.add(tg_id)   # mark in-process so handle_unknown skips Redis
     await query.edit_message_reply_markup(reply_markup=None)
     await query.message.reply_text(
@@ -2672,7 +2702,11 @@ async def _handle_activity_edit_text(update: Update) -> bool:
     raw = await r.get(key_activity_edit(tg_id))
     if not raw:
         _users_with_draft.discard(tg_id)
-        return False
+        await update.message.reply_text(
+            "This activity-edit session expired.",
+            reply_markup=await _activity_edit_expired_keyboard(tg_id),
+        )
+        return True
 
     draft = _json.loads(raw)
     text  = update.message.text.strip()
