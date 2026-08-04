@@ -1281,15 +1281,21 @@ def _format_goal_date_range(start, end) -> str:
     return f"{start_str} – {end_str}"
 
 
-def _goal_pace_label(pct: float, start_date, end_date) -> str:
-    """On-pace / behind-pace indicator — compares % of target reached to
-    % of the period elapsed, so 20% progress with 80% of the period gone
-    reads very differently from 20% progress with only 20% gone. Returns
-    "" when the period hasn't started yet or has already ended (pacing
-    only makes sense mid-period; a closed period's result speaks for
-    itself)."""
+_GOAL_PACE_LEGEND = "🟢 On pace    🔺 Behind pace    🏆 Goal met"
+
+
+def _goal_pace_icon(pct: float, start_date, end_date) -> str:
+    """On-pace / behind-pace icon — compares % of target reached to % of
+    the period elapsed, so 20% progress with 80% of the period gone reads
+    very differently from 20% progress with only 20% gone. A single-glyph
+    icon (rather than a "On pace"/"Behind pace" text label, whose very
+    different lengths made the header line look unaligned goal-to-goal)
+    keeps every header line the same shape; see _GOAL_PACE_LEGEND for what
+    each icon means. Returns "" when the period hasn't started yet or has
+    already ended (pacing only makes sense mid-period — a closed period's
+    result speaks for itself)."""
     if pct >= 100:
-        return "🏆 Goal met"
+        return "🏆"
     today = datetime.now(timezone.utc).date()
     if today < start_date or today > end_date:
         return ""
@@ -1301,10 +1307,10 @@ def _goal_pace_label(pct: float, start_date, end_date) -> str:
         return ""
     progress_frac = pct / 100.0
     # Small grace margin so being a couple points behind on any given day
-    # doesn't flip-flop the label.
+    # doesn't flip-flop the icon.
     if progress_frac + 0.05 >= elapsed_frac:
-        return "🟢 On pace"
-    return "🔴 Behind pace"
+        return "🟢"
+    return "🔺"
 
 
 def _format_goal_summary(sport_display: str, category: str, aggregation: str,
@@ -2157,6 +2163,7 @@ async def _show_goal_status(query) -> None:
         from app.tasks import format_goal_progress_value, get_goal_progress, get_recurring_goal_progress
 
         detail_rows = []
+        any_pace_shown = False
 
         for g in goals:
             sport_label = _sport_display_label(g.activity_type)
@@ -2185,11 +2192,13 @@ async def _show_goal_status(query) -> None:
                         (sp for sp in recurring.sub_periods if sp.status == "in_progress"), None
                     )
                     if current_sp:
-                        pace = _goal_pace_label(current_sp.progress.pct, current_sp.start, current_sp.end)
+                        pace = _goal_pace_icon(current_sp.progress.pct, current_sp.start, current_sp.end)
                         if pace:
                             # Tacked onto the header line itself (pushed
-                            # right with padding) rather than its own line.
+                            # right with padding) rather than its own line
+                            # — see _GOAL_PACE_LEGEND for what it means.
                             header += f"   {pace}"
+                            any_pace_shown = True
 
                 lines.append(
                     f"{header}\n\n"
@@ -2223,12 +2232,13 @@ async def _show_goal_status(query) -> None:
                 progress_line = f"🎯 {int(progress.current)}/{g.target_count} {session_word} ({pct}%)"
 
             header = f"{emoji} *{sport_label} : {g.category}*"
-            pace = _goal_pace_label(progress.pct, g.start_date, g.end_date)
+            pace = _goal_pace_icon(progress.pct, g.start_date, g.end_date)
             if pace:
                 # Tacked onto the header line itself (pushed right with
-                # padding) rather than a line of its own — saves vertical
-                # space, especially with several goals on one screen.
+                # padding) rather than a line of its own — see
+                # _GOAL_PACE_LEGEND for what it means.
                 header += f"   {pace}"
+                any_pace_shown = True
             lines.append(
                 f"{header}\n\n"
                 f"{progress_line}\n"
@@ -2236,6 +2246,9 @@ async def _show_goal_status(query) -> None:
                 f"_{_format_goal_date_range(g.start_date, g.end_date)}_"
             )
             lines.append(divider)
+
+        if any_pace_shown:
+            lines.append(f"_{_GOAL_PACE_LEGEND}_")
 
     keyboard = InlineKeyboardMarkup(detail_rows + list(_goals_main_keyboard().inline_keyboard))
     await query.edit_message_text(
