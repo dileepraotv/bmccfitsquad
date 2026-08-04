@@ -1281,7 +1281,7 @@ def _format_goal_date_range(start, end) -> str:
     return f"{start_str} – {end_str}"
 
 
-_GOAL_PACE_LEGEND = "🟢 On pace    🔺 Behind pace    🏆 Goal met"
+_GOAL_PACE_LEGEND = "🔼 On pace    🔽 Behind pace    ✅ Goal met"
 
 
 def _goal_pace_icon(pct: float, start_date, end_date) -> str:
@@ -1291,11 +1291,14 @@ def _goal_pace_icon(pct: float, start_date, end_date) -> str:
     icon (rather than a "On pace"/"Behind pace" text label, whose very
     different lengths made the header line look unaligned goal-to-goal)
     keeps every header line the same shape; see _GOAL_PACE_LEGEND for what
-    each icon means. Returns "" when the period hasn't started yet or has
-    already ended (pacing only makes sense mid-period — a closed period's
-    result speaks for itself)."""
+    each icon means. Unicode has no colored "green triangle" emoji, so
+    up/down (🔼/🔽) rather than green/red carries the on-track/off-track
+    meaning here; ✅ (rather than 🏆) keeps the achieved state the same
+    visual size as the other two. Returns "" when the period hasn't
+    started yet or has already ended (pacing only makes sense mid-period
+    — a closed period's result speaks for itself)."""
     if pct >= 100:
-        return "🏆"
+        return "✅"
     today = datetime.now(timezone.utc).date()
     if today < start_date or today > end_date:
         return ""
@@ -1309,8 +1312,8 @@ def _goal_pace_icon(pct: float, start_date, end_date) -> str:
     # Small grace margin so being a couple points behind on any given day
     # doesn't flip-flop the icon.
     if progress_frac + 0.05 >= elapsed_frac:
-        return "🟢"
-    return "🔺"
+        return "🔼"
+    return "🔽"
 
 
 def _format_goal_summary(sport_display: str, category: str, aggregation: str,
