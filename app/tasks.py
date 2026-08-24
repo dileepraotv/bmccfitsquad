@@ -39,6 +39,7 @@ from app.utils import SPORT_ACTIVITY_TYPES as _SPORT_ACTIVITY_TYPES
 from app.utils import goal_canonical_to_display as _goal_canonical_to_display
 from app.utils import goal_metric_unit as _goal_metric_unit
 from app.utils import format_goal_number as _format_goal_number
+from app.utils import seconds_to_hhmmss
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -621,6 +622,12 @@ async def _sync_user_activities_async(user_id: str, full: bool = False) -> dict:
         strava_ids: set[int] = set()
         inserted_count = 0
         updated_count = 0
+        # Per-activity field-level diffs for the activities that turned out
+        # to have actually changed on Strava since we last stored them —
+        # threaded through to reconcile_sweep's admin alert so "N edited
+        # activities" comes with enough detail to know *what* changed
+        # instead of just that something did (see _diff_activity_fields).
+        updated_details: list[dict] = []
         for data in activities:
             strava_id = int(data["id"])
             strava_ids.add(strava_id)
@@ -672,13 +679,16 @@ async def _sync_user_activities_async(user_id: str, full: bool = False) -> dict:
 
             if existing is None:
                 inserted_count += 1
-            elif full and (
-                existing.activity_type != values["activity_type"]
-                or abs(existing.distance_meters - values["distance_meters"]) > 1
-                or abs(existing.elevation_gain - values["elevation_gain"]) > 1
-                or existing.moving_time_seconds != values["moving_time_seconds"]
-            ):
-                updated_count += 1
+            elif full:
+                changes = _diff_activity_fields(existing, values)
+                if changes:
+                    updated_count += 1
+                    updated_details.append({
+                        "strava_activity_id": strava_id,
+                        "name": values["activity_name"],
+                        "date": activity_date,
+                        "changes": changes,
+                    })
 
         # On a full sync, reconcile deletions — remove any DB rows whose
         # strava_activity_id is no longer present in the API response.
@@ -708,11 +718,17 @@ async def _sync_user_activities_async(user_id: str, full: bool = False) -> dict:
             "sync_user_activities: fetched=%s inserted=%s updated=%s deleted=%s for user_id=%s",
             len(activities), inserted_count, updated_count, deleted_count, user_id,
         )
+        if updated_details:
+            logger.info(
+                "sync_user_activities: field-level changes for user_id=%s: %s",
+                user_id, updated_details,
+            )
         return {
             "fetched": len(activities),
             "inserted": inserted_count,
             "updated": updated_count,
             "deleted": deleted_count,
+            "updated_details": updated_details,
         }
 
 
@@ -1380,6 +1396,11 @@ async def reconcile_sweep(users: list[User], *, redis, now: datetime) -> dict:
                     "name": user.strava_athlete_name or user.telegram_first_name,
                     **stats,
                 })
+                # The drift is in this user's own training data — they're
+                # better placed than the admin to judge whether a change
+                # (e.g. a sport-type reclassification) actually matches
+                # what happened, so DM them directly too, not just the admin.
+                fire_and_forget(_notify_user_of_drift(user, stats))
         except Exception:
             logger.exception("reconcile_sweep: error for user_id=%s", user.id)
             errors += 1
@@ -1400,10 +1421,68 @@ async def reconcile_sweep(users: list[User], *, redis, now: datetime) -> dict:
                 parts.append(f"{d['updated']} edited")
             if d["deleted"]:
                 parts.append(f"{d['deleted']} deleted")
-            lines.append(f"• {d['name']}: {', '.join(parts)} activity(ies)")
+            lines.append(f"• {_md_safe(d['name'])}: {', '.join(parts)} activity(ies)")
+            lines.extend(_drift_detail_lines(d))
         fire_and_forget(_notify_admin("\n".join(lines)))
 
     return {"due": len(due_users), "processed": processed, "errors": errors, "drifted": drifted}
+
+
+def _drift_detail_lines(stats: dict, *, indent: str = "    ") -> list[str]:
+    """Per-activity field-change detail lines ("_Name_ (date) — Field: old
+    → new") for one user's reconcile stats, capped at 5 activities so one
+    person's big history-cleanup session can't blow out the message into an
+    unreadable wall of text. Shared by the admin alert (grouped across all
+    drifted users) and each individual user's own drift DM below."""
+    updated_details = stats.get("updated_details", [])
+    lines: list[str] = []
+    for detail in updated_details[:5]:
+        safe_name = _md_safe(detail["name"])
+        date_str = detail["date"].strftime("%b %d") if detail.get("date") else "?"
+        for change in detail["changes"]:
+            lines.append(f"{indent}_{safe_name}_ ({date_str}) — {change}")
+    if len(updated_details) > 5:
+        lines.append(f"{indent}…and {len(updated_details) - 5} more edited")
+    return lines
+
+
+async def _notify_user_of_drift(user: User, stats: dict) -> None:
+    """DM the affected user directly when their own weekly reconcile finds
+    and fixes drift — sent in addition to (not instead of) the grouped
+    ADMIN_TELEGRAM_ID alert. The user is better placed than the admin to
+    judge whether a correction (a sport-type reclassification, a distance
+    edit) actually matches what really happened on their end, and it's
+    their training history that changed, so they shouldn't find out about
+    it only if they happen to notice their stats look different."""
+    parts = []
+    if stats["inserted"]:
+        parts.append(f"{stats['inserted']} missed")
+    if stats["updated"]:
+        parts.append(f"{stats['updated']} edited")
+    if stats["deleted"]:
+        parts.append(f"{stats['deleted']} deleted")
+    lines = [
+        "🔄 *Data sync update*",
+        "",
+        f"While double-checking your Strava history, I found and corrected "
+        f"{', '.join(parts)} activity(ies) that didn't match what Strava "
+        f"has — your stats and goals now reflect the corrected data.",
+    ]
+    lines.extend(_drift_detail_lines(stats, indent=""))
+    try:
+        from app.telegram.keyboards import post_dismiss_keyboard
+        bot = TelegramBot(token=settings.telegram_bot_token)
+        async with bot:
+            await bot.send_message(
+                chat_id=user.telegram_user_id,
+                text="\n".join(lines),
+                parse_mode="Markdown",
+                reply_markup=post_dismiss_keyboard(),
+            )
+    except Exception:
+        logger.warning(
+            "reconcile_sweep: drift DM failed for telegram_id=%s", user.telegram_user_id,
+        )
 
 
 async def check_webhook_subscription_health(*, redis) -> dict:
@@ -1828,3 +1907,47 @@ def _optional_float(value) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _md_safe(text: str) -> str:
+    """Strip legacy-Markdown-sensitive characters from third-party text
+    (Strava activity names) before interpolating it into an admin alert
+    sent with parse_mode="Markdown" — an unbalanced '*'/'_'/'`'/'[' in an
+    activity name would otherwise make Telegram reject the *entire* alert
+    with a "can't parse entities" error, silently swallowing it."""
+    for ch in ("*", "_", "`", "["):
+        text = text.replace(ch, "")
+    return text
+
+
+def _diff_activity_fields(existing: Activity, values: dict) -> list[str]:
+    """Compare a stored Activity row against the freshly-fetched Strava
+    values for the same activity, returning a human-readable "field: old →
+    new" line for each field that meaningfully differs.
+
+    Used by the full-sync path (first connect, /fullsync, and the weekly
+    reconcile_sweep) to explain *what* changed for an activity that drifted,
+    rather than just counting that it did — this is what powers the
+    per-activity detail in reconcile_sweep's admin drift alert. The same
+    >1 metre / exact-second thresholds as the updated_count check above are
+    used here so "changed" here always agrees with whether the activity was
+    counted as updated at all.
+    """
+    changes: list[str] = []
+    if existing.activity_type != values["activity_type"]:
+        changes.append(f"Sport: {existing.activity_type} → {values['activity_type']}")
+    if abs(existing.distance_meters - values["distance_meters"]) > 1:
+        changes.append(
+            f"Distance: {existing.distance_meters / 1000:.2f} km → "
+            f"{values['distance_meters'] / 1000:.2f} km"
+        )
+    if abs(existing.elevation_gain - values["elevation_gain"]) > 1:
+        changes.append(
+            f"Elevation: {existing.elevation_gain:.0f} m → {values['elevation_gain']:.0f} m"
+        )
+    if existing.moving_time_seconds != values["moving_time_seconds"]:
+        changes.append(
+            f"Moving time: {seconds_to_hhmmss(existing.moving_time_seconds)} → "
+            f"{seconds_to_hhmmss(values['moving_time_seconds'])}"
+        )
+    return changes
