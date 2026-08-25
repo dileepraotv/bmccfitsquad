@@ -119,10 +119,10 @@ def _random_greeting() -> str:
 # Below this distance → roast; at/above → kudos. Keyed by SPORT_ACTIVITY_TYPES
 # bucket name (not raw Strava type) — see _roast_bucket_for_type() below.
 _ROAST_THRESHOLDS_M: dict[str, float] = {
-    "Ride": 50_000,
-    "Run": 10_000,
-    "Swim": 1_500,
-    "Walk": 5_000,
+    "Ride": 25_000,
+    "Run": 2_000,
+    "Swim": 500,
+    "Walk": 3_000,
 }
 
 # Raw Strava activity_type -> bucket name, built once from the shared sport
