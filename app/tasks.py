@@ -1348,6 +1348,17 @@ async def _notify_admin(text: str) -> None:
         logger.warning("_notify_admin: failed to send DM")
 
 
+# Prepended to both the admin alert and the user's own DM below so neither
+# reads as an unexplained "something broke" — it's context for *why* this
+# kind of drift can happen at all despite the webhook integration.
+_DRIFT_CONTEXT_NOTE = (
+    "_Strava webhooks only trigger for title, sport-type, and privacy "
+    "changes, missing silent updates due to Strava auto corrections like "
+    "GPS corrections or elevation recalculations, manual trim or resync "
+    "etc. This weekly check catches and fixes them._"
+)
+
+
 async def reconcile_sweep(users: list[User], *, redis, now: datetime) -> dict:
     """Layer 4 — low-frequency full-history reconciliation safety net.
 
@@ -1412,7 +1423,7 @@ async def reconcile_sweep(users: list[User], *, redis, now: datetime) -> dict:
         )
 
     if drifted:
-        lines = ["⚠️ *Weekly reconcile found drift* (now fixed):"]
+        lines = [_DRIFT_CONTEXT_NOTE, "", "⚠️ *Weekly reconcile found drift* (now fixed):"]
         for d in drifted:
             parts = []
             if d["inserted"]:
@@ -1462,6 +1473,8 @@ async def _notify_user_of_drift(user: User, stats: dict) -> None:
     if stats["deleted"]:
         parts.append(f"{stats['deleted']} deleted")
     lines = [
+        _DRIFT_CONTEXT_NOTE,
+        "",
         "🔄 *Data sync update*",
         "",
         f"While double-checking your Strava history, I found and corrected "
