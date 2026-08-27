@@ -1352,10 +1352,10 @@ async def _notify_admin(text: str) -> None:
 # reads as an unexplained "something broke" — it's context for *why* this
 # kind of drift can happen at all despite the webhook integration.
 _DRIFT_CONTEXT_NOTE = (
-    "_Sometimes Strava auto-corrects distances and recalculates elevation "
-    "OR the user may have trimmed the activity or resync'd from a "
-    "different device. These changes may have caused a silent drift with "
-    "Strava data. This check catches and fixes them._"
+    "_Sometimes Strava auto-corrects distances and recalculates elevation, "
+    "or users may trim an activity or resync from a different device. "
+    "These changes can cause a silent drift with Strava data. This was "
+    "fixed!_"
 )
 
 
