@@ -84,13 +84,21 @@ def stats_period_keyboard(sport: str) -> InlineKeyboardMarkup:
 
 
 def stats_nav_keyboard(sport: str) -> InlineKeyboardMarkup:
-    """Navigation keyboard shown below a stats result."""
+    """Navigation keyboard shown below a stats result.
+
+    Shortened from "Change Period" / "Change Sport" to "Period" / "Sport"
+    so all three buttons can share one row without Telegram truncating
+    them on narrow phones — three equal columns only give each one ~33%
+    of the row width, which isn't enough for a 13-character label but is
+    plenty for a 6-character one. Still unambiguous here since the user is
+    already looking at a stats result when they see these.
+    """
     from app.utils import OTHER_ACTIVITY_SPORTS
     change_sport_target = "stats:other" if sport in OTHER_ACTIVITY_SPORTS else "stats:menu"
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton(_padded("Change Period", _PAD_3COL), callback_data=f"stats:sport:{sport}"),
-        InlineKeyboardButton(_padded("Change Sport", _PAD_3COL),  callback_data=change_sport_target),
-        InlineKeyboardButton(_padded("Close", _PAD_3COL),         callback_data="stats:exit"),
+        InlineKeyboardButton(_padded("Period", _PAD_3COL), callback_data=f"stats:sport:{sport}"),
+        InlineKeyboardButton(_padded("Sport", _PAD_3COL),  callback_data=change_sport_target),
+        InlineKeyboardButton(_padded("Close", _PAD_3COL),  callback_data="stats:exit"),
     ]])
 
 

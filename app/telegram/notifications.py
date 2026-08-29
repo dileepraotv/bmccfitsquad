@@ -353,7 +353,7 @@ async def format_activity_notification(
         else None
     )
     if roast_line:
-        header = f"{emoji} *{first_name}, {roast_line} new {sport_word} activity logged.*"
+        header = f"{emoji} *{first_name}, {roast_line} New {sport_word} activity logged.*"
     else:
         header = f"{emoji} *{_random_greeting()}, {first_name} — new {sport_word} activity logged!*"
     lines: list[str] = [
