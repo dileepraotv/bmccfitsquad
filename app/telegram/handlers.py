@@ -60,6 +60,7 @@ from app.telegram.keyboards import (
     activity_edit_description_keyboard,
     confirm_keyboard,
     connect_strava_keyboard,
+    leaderboard_keyboard,
     nav_keyboard,
     post_dismiss_keyboard,
     recap_goal_prompt_keyboard,
@@ -552,6 +553,41 @@ def _leaderboard_metric_display(sport: str, value: float) -> str:
     return f"{value:.0f} km"
 
 
+def _leaderboard_name(name: str) -> str:
+    """Cap displayed leaderboard names so the rank/name/points line never
+    wraps to a second line. Club-suffix names like "Manoj Manoharan |
+    Beyond Miles Cycling Club" are cut at the separator first, since the
+    suffix carries no per-member information; anything still too long
+    after that falls back to a straight character cap with an ellipsis."""
+    name = name.strip()
+    if "|" in name:
+        name = name.split("|", 1)[0].strip()
+    max_len = 20
+    if len(name) > max_len:
+        name = name[: max_len - 1].rstrip() + "…"
+    return name
+
+
+def _leaderboard_legend_text() -> str:
+    """The point-values/bonus-tier legend, shown on demand via the 'How
+    Points Work' button rather than appended to every /leaderboard message
+    — most repeat viewers already know the rules."""
+    per_km_lines = _format_kv_lines([
+        ("Run", "10"), ("Swim", "40"), ("Hiking", "8"),
+        ("Walk", "6"), ("Ride", "3"),
+    ])
+    per_30min_lines = _format_kv_lines([
+        ("Racket Sports", "15"), ("Strength Training", "12"), ("Yoga", "5"),
+    ])
+    return (
+        f"*Point Values \\(per km\\)*\n"
+        f"{per_km_lines}\n\n"
+        f"*Point Values \\(per 30 min\\)*\n"
+        f"{per_30min_lines}\n\n"
+        "_Multi\\-sport bonus: 2 sports \\+5% · 3 sports \\+10% · 4\\+ sports \\+15%_"
+    )
+
+
 async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/leaderboard — a shared, month-wide aggregation across every member,
     so (unlike per-user data such as /stats or /recap) the exact same
@@ -570,7 +606,9 @@ async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     except Exception:
         cached = None
     if cached:
-        await update.message.reply_text(cached, parse_mode="MarkdownV2")
+        await update.message.reply_text(
+            cached, parse_mode="MarkdownV2", reply_markup=leaderboard_keyboard(),
+        )
         return
 
     text = await _build_leaderboard_text(now)
@@ -580,7 +618,9 @@ async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     except Exception:
         logger.warning("leaderboard cache: failed to write cache for %s", cache_key)
 
-    await update.message.reply_text(text, parse_mode="MarkdownV2")
+    await update.message.reply_text(
+        text, parse_mode="MarkdownV2", reply_markup=leaderboard_keyboard(),
+    )
 
 
 async def _build_leaderboard_text(now: datetime) -> str:
@@ -649,47 +689,35 @@ async def _build_leaderboard_text(now: datetime) -> str:
     # A fixed-width monospace table overflows on narrow phone screens once
     # names or enough sports are involved — a stacked card per member reads
     # naturally at any screen width instead of forcing horizontal scroll.
-    # The points/breakdown line is wrapped in a single `code` span so the
-    # numbers render in the same monospace font as /stats and activity
-    # notifications — consistent styling across the bot. Note: content
-    # inside a code span only needs backtick/backslash escaped (not the
-    # full MarkdownV2 set _escape_md applies), and everything here is
+    # Each card is two short lines: rank+name+points (nothing else, so it
+    # never has enough content to wrap), then the sport breakdown — grouped
+    # two-per-line with explicit `\n` joins so wrapping is controlled by the
+    # bot rather than however wide the reader's screen happens to be. Each
+    # line is wrapped in its own `code` span for the monospace numbers;
+    # content inside a code span only needs backtick/backslash escaped (not
+    # the full MarkdownV2 set _escape_md applies), and everything here is
     # app-generated (emoji, digits, units) so no escaping is needed at all.
     medals = ["🥇", "🥈", "🥉"]
     lines = ["🏆 *BMCC Leaderboard — This Month*\n"]
     for i, e in enumerate(board):
         rank = medals[i] if i < 3 else f"{i + 1}\\."
         metrics = e["metrics"]
-        breakdown = "  ·  ".join(
+        items = [
             f"{_LEADERBOARD_ICONS[s]} {_leaderboard_metric_display(s, metrics[s])}"
             for s in _LEADERBOARD_SPORTS if metrics[s] > 0
-        )
-        bonus_note = f"  (+{e['bonus_pct']}%)" if e["bonus_pct"] else ""
+        ]
+        if e["bonus_pct"]:
+            items.append(f"⚡ +{e['bonus_pct']}%")
+        breakdown_lines = [
+            "  ".join(items[j:j + 2]) for j in range(0, len(items), 2)
+        ]
+        breakdown = "\n".join(f"`{bl}`" for bl in breakdown_lines)
         lines.append(
-            f"{rank} *{_escape_md(e['name'])}*\n"
-            f"`{e['total_points']:.0f} pts{bonus_note}  ·  {breakdown}`\n"
+            f"{rank} *{_escape_md(_leaderboard_name(e['name']))}* — "
+            f"`{e['total_points']:.0f} pts`\n"
+            f"{breakdown}\n"
         )
 
-    # A clearly demarcated, monospace-aligned legend. Telegram has no way to
-    # shrink font size, so instead of one long "pts/30 min" suffix repeated
-    # on every line (which wrapped on narrow phones), the unit is stated
-    # once per group header and each line is just "Label : points" — much
-    # shorter, no wrapping, still lines up in a straight column.
-    per_km_lines = _format_kv_lines([
-        ("Run", "10"), ("Swim", "40"), ("Hiking", "8"),
-        ("Walk", "6"), ("Ride", "3"),
-    ])
-    per_30min_lines = _format_kv_lines([
-        ("Racket Sports", "15"), ("Strength Training", "12"), ("Yoga", "5"),
-    ])
-    lines.append(
-        f"{_SEPARATOR}\n\n"
-        f"*Point Values \\(per km\\)*\n"
-        f"{per_km_lines}\n\n"
-        f"*Point Values \\(per 30 min\\)*\n"
-        f"{per_30min_lines}\n\n"
-        "_Multi\\-sport bonus: 2 sports \\+5% · 3 sports \\+10% · 4\\+ sports \\+15%_"
-    )
     return "\n".join(lines)
 
 
@@ -2461,6 +2489,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     elif data == "stats:exit":
         await query.edit_message_text("Stats closed. Use /stats anytime to check your numbers.")
+
+    elif data == "leaderboard:legend":
+        await query.message.reply_text(_leaderboard_legend_text(), parse_mode="MarkdownV2")
 
     elif data == "quote:random":
         await query.edit_message_text(f'💬 *"{_random_quote()}"*', parse_mode="Markdown")

@@ -149,6 +149,16 @@ def post_dismiss_keyboard() -> InlineKeyboardMarkup:
     ]])
 
 
+def leaderboard_keyboard() -> InlineKeyboardMarkup:
+    """Shown under /leaderboard — the point-values/bonus-tier legend is
+    tucked behind this button instead of being appended to every message,
+    since most repeat viewers already know the rules and only the ranking
+    itself needs to be read every time."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(_padded("ℹ️ How Points Work", _PAD_FULL), callback_data="leaderboard:legend"),
+    ]])
+
+
 def recap_goal_prompt_keyboard() -> InlineKeyboardMarkup:
     """Shown under the monthly recap caption, offering to set next month's goal."""
     return InlineKeyboardMarkup([[
