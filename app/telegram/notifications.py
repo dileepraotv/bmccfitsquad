@@ -22,9 +22,9 @@ Template anatomy
   Date: Sat, 18 Jul 2026
 
   ```
-  Distance : … km        (Swim: Distance/Pace/Moving Time/Avg HR;
-  Avg Speed: … km/h       duration sports: Duration/Calories/Avg HR)
-  Elevation: … m
+  Distance : … km        (Run: Distance/Avg Pace/Elevation;
+  Avg Speed: … km/h       Swim: Distance/Pace/Moving Time/Avg HR;
+  Elevation: … m          duration sports: Duration/Calories/Avg HR)
   ```
 
   ─────────────────
@@ -256,6 +256,7 @@ def _roast_or_kudos_line(
 
 
 _SWIM_TYPES = {"Swim", "OpenWaterSwim"}
+_RUN_TYPES = {"Run", "VirtualRun", "TrailRun"}
 
 # Raw Strava activity_type strings with no meaningful GPS distance (Yoga,
 # Racket Sports, Strength Training) — these get a time/effort-focused
@@ -272,6 +273,17 @@ def _format_pace_per_100m(avg_speed_ms: float | int | None) -> str:
     pace_seconds = 100 / float(avg_speed_ms)
     minutes, secs = divmod(round(pace_seconds), 60)
     return f"{minutes:02d}:{secs:02d}"
+
+
+def _format_pace_per_km(avg_speed_ms: float | int | None) -> str:
+    """Convert average speed (m/s) to a run pace string like ``"5:42"`` per km —
+    runners think in pace, not speed, so this replaces Avg Speed for Run
+    notifications the same way _format_pace_per_100m does for swims."""
+    if not avg_speed_ms:
+        return "N/A"
+    pace_seconds = 1000 / float(avg_speed_ms)
+    minutes, secs = divmod(round(pace_seconds), 60)
+    return f"{minutes}:{secs:02d}"
 
 
 # Friendly one/two-word names for the greeting line ("new <word> activity
@@ -393,6 +405,17 @@ async def format_activity_notification(
             pairs.append(("Calories", f"{int(calories)} kcal"))
         if avg_hr is not None:
             pairs.append(("Avg HR", f"{int(avg_hr)} bpm"))
+        lines += ["", format_kv_lines(pairs)]
+    elif activity_type in _RUN_TYPES:
+        distance_km = meters_to_km(activity.get("distance"))
+        pace        = _format_pace_per_km(activity.get("average_speed"))
+        elevation_m = activity.get("total_elevation_gain") or 0
+
+        pairs = [
+            ("Distance", f"{distance_km:.2f} km"),
+            ("Avg Pace", f"{pace} /km"),
+            ("Elevation Gain", f"{int(elevation_m)} m"),
+        ]
         lines += ["", format_kv_lines(pairs)]
     else:
         distance_km   = meters_to_km(activity.get("distance"))
