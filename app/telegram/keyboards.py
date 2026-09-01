@@ -102,19 +102,6 @@ def stats_nav_keyboard(sport: str) -> InlineKeyboardMarkup:
     ]])
 
 
-def goals_keyboard(goals: list) -> InlineKeyboardMarkup:
-    """Goal management keyboard listing active goals with delete options."""
-    rows = [
-        [InlineKeyboardButton(
-            _padded(f"{g.metric} — {g.target_value} {g.unit}", _PAD_2COL),
-            callback_data=f"goal:delete:{g.id}"
-        )]
-        for g in goals
-    ]
-    rows.append([InlineKeyboardButton(_padded("Add Goal", _PAD_2COL), callback_data="goal:add")])
-    return InlineKeyboardMarkup(rows)
-
-
 def confirm_keyboard(confirm_data: str, cancel_data: str = "cancel") -> InlineKeyboardMarkup:
     """Generic Yes / No confirmation keyboard."""
     return InlineKeyboardMarkup([[
@@ -167,12 +154,3 @@ def recap_goal_prompt_keyboard() -> InlineKeyboardMarkup:
     ]])
 
 
-def activity_type_keyboard() -> InlineKeyboardMarkup:
-    """Let the user pick an activity type when setting a goal."""
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(_padded("Ride", _PAD_2COL), callback_data="goal:type:Ride"),
-         InlineKeyboardButton(_padded("Run", _PAD_2COL),  callback_data="goal:type:Run")],
-        [InlineKeyboardButton(_padded("Swim", _PAD_2COL), callback_data="goal:type:Swim"),
-         InlineKeyboardButton(_padded("Walk", _PAD_2COL), callback_data="goal:type:Walk")],
-        [InlineKeyboardButton(_padded("Any", _PAD_FULL),  callback_data="goal:type:Any")],
-    ])

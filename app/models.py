@@ -196,9 +196,10 @@ class Goal(Base):
     activity_type: Mapped[str] = mapped_column(Text, nullable=False)
 
     # Display-cache string, derived from the structured columns below at
-    # write time (e.g. "100 km", "Total 150 km"). No longer the source of
-    # truth for progress calculation — kept so any legacy display code
-    # reading it during the Phase 1 transition keeps working.
+    # write time (e.g. "100 km", "Total 150 km"). Not the source of truth
+    # for progress calculation (that's metric/aggregation/target_value/
+    # target_count below) — kept purely for cheap display without having
+    # to re-derive it from those columns every time a goal is listed.
     category: Mapped[str] = mapped_column(Text, nullable=False)
 
     # What's being measured per activity: "distance" | "elevation" | "duration"
@@ -221,8 +222,12 @@ class Goal(Base):
     # metric) counts toward progress — see get_goal_achieved_count().
     allow_multiple_daily: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
-    # "none" | "monthly" | "quarterly" — reserved for the Phase 2 recurrence
-    # engine; Phase 1 only ever writes "none".
+    # "none" — a single one-time goal over [start_date, end_date].
+    # "monthly" | "quarterly" — a repeating goal spanning the full year
+    # (start_date/end_date cover Jan 1 - Dec 31); target_value/target_count
+    # apply per sub-period rather than to the year as a whole, and progress
+    # for each sub-period is evaluated independently by
+    # tasks.get_recurring_goal_progress.
     recurrence: Mapped[str] = mapped_column(Text, nullable=False, default="none")
 
     # Goal window

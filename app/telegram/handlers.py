@@ -132,6 +132,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("goals",         cmd_goals,         filters=_priv))
     app.add_handler(CommandHandler("cancel",        cmd_cancel,        filters=_priv))
     app.add_handler(CommandHandler("skip",          cmd_skip,          filters=_priv))
+    app.add_handler(CommandHandler("back",          cmd_back,          filters=_priv))
     app.add_handler(CommandHandler("leaderboard",   cmd_leaderboard,   filters=_priv))
     app.add_handler(CommandHandler("notifications", cmd_notifications, filters=_priv))
     app.add_handler(CommandHandler("roastmode",     cmd_roastmode,     filters=_priv))
@@ -923,17 +924,37 @@ async def cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def cmd_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Explicit /back command for the goal-creation free-text steps.
+
+    PTB routes any "/"-prefixed message to the command dispatcher, and
+    handle_unknown's own MessageHandler explicitly excludes commands — so
+    with no CommandHandler registered for "back", typing /back previously
+    went nowhere at all, silently swallowed. (The equivalent
+    ``text.lower() == "/back"`` check inside _handle_goal_text_input, which
+    handles the "Back" *button* generated text, was consequently
+    unreachable via an actual typed /back command.)
+    """
+    tg_id = update.effective_user.id
+    draft = await _load_draft(tg_id)
+    if not draft or draft.get("step") not in ("value", "count"):
+        await update.message.reply_text("Nothing to go back from right now. Use /goals to start.")
+        return
+    await _handle_goal_text_input(update)
+
+
 # ---------------------------------------------------------------------------
 # Goals — callback-driven sport selection + Redis-backed free-text entry
 # ---------------------------------------------------------------------------
-# Flow:
+# Flow (see the fuller step-by-step description in the module docstring at
+# the top of this file, and _GOAL_STEP_ORDER below for the canonical order):
 #   /goals  →  main menu keyboard
-#   ➕ Add Goal  →  sport keyboard (stats-style layout)
-#   sport chosen  →  bot sends NEW message asking for goal description (free text)
-#                    draft stored in Redis: goal_draft:{tg_id} = JSON{sport, step}
-#   user types goal (e.g. "100 km")  →  bot asks for count (e.g. "4")
-#   user types count  →  bot asks for period (keyboard)
-#   period chosen  →  saved, confirmation shown
+#   Add Goal  →  sport keyboard  →  metric  →  mode (Session Count / Cumulative)
+#   Session Count mode  →  how many sessions (free text)  →  per-session target (free text)
+#   Cumulative mode     →  total target (free text)
+#   →  same-day handling  →  one-time period or repeating recurrence  →  saved
+# All answers accumulate in the Redis draft (goal_draft:{tg_id}); callback_data
+# only ever carries the current step's choice.
 # ---------------------------------------------------------------------------
 
 import json as _json
@@ -968,6 +989,14 @@ _GOAL_PERIODS = [
 ]
 
 _GOAL_DRAFT_TTL = 600  # seconds — draft expires after 10 min of inactivity
+
+# BMCC's users are all IST-based — every "today"/"this month" used to decide
+# goal period boundaries and deadlines must be evaluated in IST, not UTC.
+# Using UTC directly here means anyone opening the goal flow between 00:00
+# and 05:29 IST (still the previous UTC day) would silently get the *previous*
+# month/quarter/year/week's boundaries — a goal created at 1am IST on the
+# 1st of a new month would be dated into the month that just ended.
+_IST = timezone(timedelta(hours=5, minutes=30))
 
 # Guardrails on goal creation — without these a user can pile up unlimited
 # and/or exact-duplicate goals, which both clutters Goal Status/Delete (and
@@ -1276,7 +1305,7 @@ def _goal_period_dates(period: str):
     displays as e.g. 2026-01-01 → 2026-12-31.  The DB query uses
     ``activity_date < end_dt + 1 day`` (exclusive upper bound) to stay correct.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(_IST)
     y = now.year
 
     if period == "This Month":
@@ -1318,7 +1347,7 @@ def _format_goal_date_range(start, end) -> str:
     """Compact human-readable window — "Aug 1 – Aug 31" (year appended only
     once, and only if either end falls outside the current year) instead
     of the verbose ISO "2026-08-01 → 2026-08-31"."""
-    cur_year = datetime.now(timezone.utc).year
+    cur_year = datetime.now(_IST).year
     start_str = start.strftime("%b %-d")
     end_str = end.strftime("%b %-d")
     if start.year != cur_year or end.year != cur_year:
@@ -1346,7 +1375,7 @@ def _goal_pace_icon(pct: float, start_date, end_date) -> str:
     — a closed period's result speaks for itself)."""
     if pct >= 100:
         return "✅"
-    today = datetime.now(timezone.utc).date()
+    today = datetime.now(_IST).date()
     if today < start_date or today > end_date:
         return ""
     total_days = (end_date - start_date).days + 1
@@ -1450,6 +1479,19 @@ def _goal_value_examples(sport: str, metric: str, aggregation: str, unit: str) -
     return examples.get(sport, "`150`, `1,000`, `5,000`" if aggregation == "cumulative" else "`50`, `100`, `200`")
 
 
+# Sanity ceilings — not meant to box in genuinely extreme athletes (RAAM-
+# level annual cycling totals, ultra-swims, multi-day events), just to catch
+# fat-finger/absurd entries ("999999999") that would otherwise sail through
+# the ">  0" check with no other bound at all. Generous on purpose.
+_VALUE_MAX_BY_UNIT: dict[str, float] = {
+    "km":  50_000,   # ~a very serious cyclist's whole-year distance, several times over
+    "m":   500_000,  # covers both ultra-swim distances and extreme cumulative elevation
+    "hrs": 3_000,    # well beyond any realistic year of cumulative training hours
+    "min": 2_880,    # 48 hours — covers multi-day endurance events
+}
+_MAX_GOAL_COUNT = 366  # can't do more sessions than there are days in a year
+
+
 def _parse_goal_number(text: str) -> float | None:
     """Forgiving float parse for the value step — accepts a bare number
     ("100"), a number with the unit typed alongside it ("100km", "10 km"),
@@ -1472,9 +1514,14 @@ def _parse_goal_number(text: str) -> float | None:
 
 def _parse_goal_count(text: str) -> int | None:
     """Forgiving whole-number parse for the session-count step — accepts
-    "4", "4x", or "4 sessions", not just a bare digit string."""
-    match = re.match(r"\s*(\d+)", text.strip())
-    return int(match.group(1)) if match else None
+    "4", "4x", or "4 sessions", not just a bare digit string. Rejects a
+    fractional value ("4.7") outright rather than silently truncating it to
+    4 — a typo that happens to parse as a smaller, wrong number is worse
+    than an explicit re-prompt."""
+    match = re.match(r"\s*(\d+)(\.\d+)?", text.strip())
+    if not match or match.group(2):
+        return None
+    return int(match.group(1))
 
 
 def _record_prompt(draft: dict, msg) -> None:
@@ -1669,7 +1716,7 @@ async def _nearest_deadline_line(db, user: "User", goals: list) -> str | None:
     the deadline that's actually approaching."""
     from app.tasks import get_recurring_goal_progress
 
-    today = datetime.now(timezone.utc).date()
+    today = datetime.now(_IST).date()
     best_deadline = None
     best_goal = None
     for g in goals:
@@ -1754,11 +1801,20 @@ async def _save_goal_and_confirm(query, tg_id: int, draft: dict, period: str, re
         )
         existing_goals = existing_res.scalars().all()
 
+        # Matches on the *target* too (value/count/allow_multi), not just
+        # sport+metric+mode+period — otherwise two goals for the same sport
+        # and period but genuinely different targets (e.g. 50 km vs 100 km)
+        # would be wrongly blocked as "exact duplicates", and a goal that
+        # only differs by its same-day-collapse setting could never coexist
+        # with one that does.
         duplicate = next((
             g for g in existing_goals
             if g.activity_type == sport_db and g.metric == metric
             and g.aggregation == aggregation and g.recurrence == recurrence
             and g.start_date == start and g.end_date == end
+            and abs(g.target_value - target_value) < 1e-6
+            and g.target_count == count
+            and g.allow_multiple_daily == allow_multi
         ), None)
         if duplicate:
             emoji = _goal_sport_emoji(sport_db)
@@ -1934,6 +1990,14 @@ async def _handle_goal_callbacks(query, data: str) -> None:
         if not draft:
             await query.edit_message_text("Session expired. Please try /goals again.", reply_markup=_session_expired_keyboard())
             return
+        # Guard against a crafted/replayed callback_data setting a metric that
+        # isn't actually valid for this sport (e.g. "duration" for a sport
+        # that only supports distance/elevation) — this would otherwise flow
+        # straight into DB storage and confuse progress calculation later.
+        valid_metrics = _GOAL_SPORT_METRICS.get(draft.get("sport"), [])
+        if metric not in valid_metrics:
+            await query.edit_message_text("Session expired. Please try /goals again.", reply_markup=_session_expired_keyboard())
+            return
         draft["metric"] = metric
         draft["step"] = "mode"
         await _save_draft(tg_id, draft)
@@ -1953,6 +2017,13 @@ async def _handle_goal_callbacks(query, data: str) -> None:
             return
         draft["aggregation"] = mode
         if mode == "cumulative":
+            # Cumulative mode never asks for a session count — drop any
+            # count left behind from a previous pass through frequency mode
+            # (e.g. the user went Back and switched modes), otherwise the
+            # stale value survives into the save step (target_count =
+            # draft.get("count", 1)) and gets written to a cumulative goal
+            # that has no business having a target_count at all.
+            draft.pop("count", None)
             draft["step"] = "value"
             msg = await query.edit_message_text(
                 _value_prompt_text(draft), parse_mode="Markdown", reply_markup=_goal_value_keyboard(draft),
@@ -2037,7 +2108,7 @@ async def _handle_goal_callbacks(query, data: str) -> None:
             goal = result.scalar_one_or_none()
 
         if not goal:
-            await query.edit_message_text("Goal not found.")
+            await query.edit_message_text("Goal not found.", reply_markup=_goals_main_keyboard())
             return
 
         sport_label = _sport_display_label(goal.activity_type)
@@ -2050,7 +2121,7 @@ async def _handle_goal_callbacks(query, data: str) -> None:
             f"{emoji} *{sport_label} : {goal.category}*\n"
             f"{target_line}"
             f"_{_format_goal_date_range(goal.start_date, goal.end_date)}_\n\n"
-            f"This can't be undone.",
+            f"It'll be removed from your active goals — you can always add the same target again later.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton(_pad("Delete", _PAD_2COL), callback_data=f"goal:confirm_delete:{goal_id}"),
@@ -2086,7 +2157,7 @@ async def _handle_goal_callbacks(query, data: str) -> None:
                     ]]),
                 )
             else:
-                await query.edit_message_text("Goal not found.")
+                await query.edit_message_text("Goal not found.", reply_markup=_goals_main_keyboard())
         return
 
 
@@ -2107,7 +2178,17 @@ async def _handle_goal_text_input(update: Update) -> bool:
 
     draft = await _load_draft(tg_id)
     if not draft:
-        return False
+        # Consistent with every callback-step expiry (goal:metric:, goal:mode:,
+        # etc.), which all show this same message + Start Over button —
+        # previously a free-text step (count/value) expiring mid-flow instead
+        # fell through to handle_unknown's generic fallback with no obvious
+        # way back into the flow, unlike every other step.
+        _goal_draft_users.discard(tg_id)
+        await update.message.reply_text(
+            "Session expired. Please try /goals again.",
+            reply_markup=_session_expired_keyboard(),
+        )
+        return True
 
     step = draft.get("step")
 
@@ -2140,6 +2221,18 @@ async def _handle_goal_text_input(update: Update) -> bool:
                 "Please enter a positive whole number — e.g. *4*:",
                 parse_mode="Markdown",
             )
+            # Refresh the draft TTL even on a failed parse — otherwise a user
+            # who takes a couple of tries to get the format right can have
+            # their whole draft expire mid-correction (the TTL only used to
+            # reset on a *successful* answer).
+            await _save_draft(tg_id, draft)
+            return True
+        if count > _MAX_GOAL_COUNT:
+            await update.message.reply_text(
+                f"That's a lot of sessions — please enter a number up to *{_MAX_GOAL_COUNT}*:",
+                parse_mode="Markdown",
+            )
+            await _save_draft(tg_id, draft)
             return True
 
         draft["count"] = count
@@ -2163,6 +2256,30 @@ async def _handle_goal_text_input(update: Update) -> bool:
                 f"e.g. *100* or *21.1* (no need to type the unit):",
                 parse_mode="Markdown",
             )
+            await _save_draft(tg_id, draft)  # refresh TTL — see the "count" step for why
+            return True
+        max_val = _VALUE_MAX_BY_UNIT.get(unit)
+        if max_val and val > max_val:
+            await update.message.reply_text(
+                f"That's higher than expected — please enter a number up to "
+                f"*{_format_goal_number(max_val)}* {unit_word} ({unit}):",
+                parse_mode="Markdown",
+            )
+            await _save_draft(tg_id, draft)
+            return True
+
+        # H3: Ride Endurance's own progress math only ever counts rides of
+        # >=200km (see get_goal_progress in tasks.py) — a lower target here
+        # would create a goal that can mathematically never register any
+        # progress, so this is caught before it's ever saved rather than
+        # leaving the user to discover it via a permanently-0% goal.
+        if sport == "Ride Endurance" and metric == "distance" and val < 200:
+            await update.message.reply_text(
+                "Ride Endurance goals only count rides of 200 km or more, so "
+                "the target itself needs to be *at least 200* km:",
+                parse_mode="Markdown",
+            )
+            await _save_draft(tg_id, draft)
             return True
 
         draft["value"] = val
@@ -2213,7 +2330,13 @@ async def _show_delete_menu(query) -> None:
         )]
         for g in goals
     ]
-    rows.append([InlineKeyboardButton(_pad("Back", _PAD_FULL), callback_data="goal:back")])
+    # "goal:menu" (not "goal:back") — the sport-picker screen's Back button
+    # deliberately clears any in-progress creation draft since it's the exit
+    # from step 1 of that same draft, but Delete Goal is a separate flow
+    # entirely; if a user opens Delete Goal while mid-way through adding a
+    # goal, backing out of the delete list shouldn't wipe their unrelated
+    # in-progress draft.
+    rows.append([InlineKeyboardButton(_pad("Back", _PAD_FULL), callback_data="goal:menu")])
     await query.edit_message_text(
         "Tap a goal to delete it:",
         reply_markup=InlineKeyboardMarkup(rows),
@@ -2237,7 +2360,7 @@ async def _show_goal_status(query) -> None:
 
         if not goals:
             await query.edit_message_text(
-                "You have no active goals. Use ➕ Add Goal to create one.",
+                "You have no active goals. Use Add Goal to create one.",
                 reply_markup=_goals_main_keyboard(),
             )
             return
@@ -2368,12 +2491,27 @@ async def _show_goal_detail(query, goal_id: str) -> None:
             await query.edit_message_text("Goal not found.", reply_markup=_goals_main_keyboard())
             return
 
-        from app.tasks import get_recurring_goal_progress
+        from app.tasks import format_goal_progress_value, get_recurring_goal_progress
         recurring = await get_recurring_goal_progress(db, user, goal)
 
     sport_label = _sport_display_label(goal.activity_type)
     emoji = _SPORT_EMOJI.get(goal.activity_type, "🏅")
     period_word = "month" if goal.recurrence == "monthly" else "quarter"
+    unit = _goal_metric_unit(sport_label, goal.metric, goal.aggregation)
+
+    def _sp_detail(sp) -> str:
+        # H5: the compact status list only ever showed met/missed/in-progress
+        # icons per sub-period with no numbers — e.g. a "missed March" gave
+        # no sense of whether it was a near-miss or nowhere close. This is
+        # exactly the place for that, since users only tap through to Details
+        # when they want the fuller picture.
+        p = sp.progress
+        if goal.aggregation == "cumulative":
+            cur = format_goal_progress_value(goal, p.current)
+            tgt = format_goal_progress_value(goal, p.target)
+            return f"{cur}/{tgt} {unit}"
+        sessions = "session" if p.target == 1 else "sessions"
+        return f"{int(p.current)}/{int(p.target)} {sessions}"
 
     sp_lines = []
     pending_count = 0
@@ -2382,7 +2520,7 @@ async def _show_goal_detail(query, goal_id: str) -> None:
             pending_count += 1
             continue
         icon = {"met": "✅", "missed": "❌", "in_progress": "🔵"}[sp.status]
-        sp_lines.append(f"{icon} {sp.label}")
+        sp_lines.append(f"{icon} {sp.label} — {_sp_detail(sp)}")
     if pending_count:
         sp_lines.append(f"⏳ {pending_count} {period_word}{'s' if pending_count != 1 else ''} remaining")
 
@@ -2938,13 +3076,27 @@ async def handle_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except ValueError:
             pass
         if _is_numeric:
-            await update.message.reply_text(
-                "Were you adding a goal? Your session may have expired. "
-                "Type /goals to start again."
-            )
+            # Self-heal path: this is where the "one extra GET" promised in
+            # the comment above actually happens. Everyday non-numeric
+            # chatter never touches Redis (the else branch below), so this
+            # is the only place a post-restart false-negative gets paid for
+            # — and only for messages that plausibly look like a flow answer.
+            from app.redis_client import get_redis, key_activity_edit
+
+            r = await get_redis()
+            if await r.get(key_activity_edit(tg_id)):
+                _activity_edit_draft_users.add(tg_id)
+            elif await _load_draft(tg_id):
+                _goal_draft_users.add(tg_id)
+            else:
+                await update.message.reply_text(
+                    "Were you adding a goal? Your session may have expired. "
+                    "Type /goals to start again."
+                )
+                return
         else:
             await update.message.reply_text("Use /help to see what I can do.")
-        return
+            return
 
     # Draft is in-flight — check both flows (order matters: activity edit first)
     if await _handle_activity_edit_text(update):
