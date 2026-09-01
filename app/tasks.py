@@ -1685,6 +1685,36 @@ async def catchup_sync_all_users() -> dict:
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 _RECAP_HOUR_IST = 21
+# Catch-up cutoff: if no cron tick lands anywhere in the 21:00-23:59 IST
+# primary window (e.g. Render was asleep or the cron pinger had a gap right
+# then), _period_end_reference_date() below gives one more chance to fire
+# during the first few hours of the next day, for the day that just ended.
+_RECAP_CATCHUP_CUTOFF_HOUR_IST = 9
+
+
+def _period_end_reference_date(now_ist: datetime):
+    """The calendar date to treat as "the day whose end-of-period events
+    (monthly/yearly recap, goal checkpoints) are due right now", or None if
+    neither the primary nor catch-up window is currently open.
+
+    Primary window: today itself, from 21:00 IST onward — the normal case,
+    where a cron tick lands within the ~3 hour window on the actual day in
+    question.
+
+    Catch-up window: yesterday, during the first 00:00-09:00 IST hours of
+    today — covers the case where *no* tick landed in the primary window at
+    all. Without this, callers that gate on "is today the last day of the
+    month" would simply never match again once the date rolls over,
+    silently dropping that period's recap/checkpoints forever (this is
+    exactly what happened to the Aug 31 2026 monthly recap). The per-period
+    Redis dedup keys each caller already uses make this safe to re-check
+    every tick without ever double-sending.
+    """
+    if now_ist.hour >= _RECAP_HOUR_IST:
+        return now_ist.date()
+    if now_ist.hour < _RECAP_CATCHUP_CUTOFF_HOUR_IST:
+        return (now_ist - timedelta(days=1)).date()
+    return None
 
 
 async def maybe_send_monthly_recaps() -> dict:
@@ -1697,12 +1727,16 @@ async def maybe_send_monthly_recaps() -> dict:
     from app.stats.recap import get_or_build_recap
 
     now_ist = datetime.now(_IST)
-    last_day = _calendar.monthrange(now_ist.year, now_ist.month)[1]
-    if now_ist.day != last_day or now_ist.hour < _RECAP_HOUR_IST:
+    ref_date = _period_end_reference_date(now_ist)
+    if ref_date is None:
         return {"skipped": True, "reason": "not yet"}
+    last_day = _calendar.monthrange(ref_date.year, ref_date.month)[1]
+    if ref_date.day != last_day:
+        return {"skipped": True, "reason": "not yet"}
+    target_year, target_month = ref_date.year, ref_date.month
 
     redis = await get_redis()
-    dedup_key = f"recap:sent:{now_ist.year}-{now_ist.month:02d}"
+    dedup_key = f"recap:sent:{target_year}-{target_month:02d}"
     if not await redis.set(dedup_key, "1", ex=40 * 86_400, nx=True):
         return {"skipped": True, "reason": "already sent this month"}
 
@@ -1723,7 +1757,7 @@ async def maybe_send_monthly_recaps() -> dict:
         for user in users:
             try:
                 async with AsyncSessionLocal() as db:
-                    text = await get_or_build_recap(db, user, now_ist.year, now_ist.month)
+                    text = await get_or_build_recap(db, user, target_year, target_month)
 
                 from app.telegram.keyboards import recap_goal_prompt_keyboard
                 from app.telegram.notifications import send_recap_message
@@ -1759,11 +1793,13 @@ async def maybe_send_yearly_recap() -> dict:
     from app.stats.recap import get_or_build_yearly_recap
 
     now_ist = datetime.now(_IST)
-    if now_ist.month != 12 or now_ist.day != 31 or now_ist.hour < _RECAP_HOUR_IST:
+    ref_date = _period_end_reference_date(now_ist)
+    if ref_date is None or ref_date.month != 12 or ref_date.day != 31:
         return {"skipped": True, "reason": "not yet"}
+    target_year = ref_date.year
 
     redis = await get_redis()
-    dedup_key = f"yearrecap:sent:{now_ist.year}"
+    dedup_key = f"yearrecap:sent:{target_year}"
     if not await redis.set(dedup_key, "1", ex=40 * 86_400, nx=True):
         return {"skipped": True, "reason": "already sent this year"}
 
@@ -1784,7 +1820,7 @@ async def maybe_send_yearly_recap() -> dict:
         for user in users:
             try:
                 async with AsyncSessionLocal() as db:
-                    text = await get_or_build_yearly_recap(db, user, now_ist.year)
+                    text = await get_or_build_yearly_recap(db, user, target_year)
 
                 from app.telegram.keyboards import recap_goal_prompt_keyboard
                 from app.telegram.notifications import send_recap_message
@@ -1827,11 +1863,14 @@ async def maybe_send_goal_checkpoints() -> dict:
     from app.redis_client import get_redis
 
     now_ist = datetime.now(_IST)
-    last_day = _calendar.monthrange(now_ist.year, now_ist.month)[1]
-    if now_ist.day != last_day or now_ist.hour < _RECAP_HOUR_IST:
+    ref_date = _period_end_reference_date(now_ist)
+    if ref_date is None:
+        return {"skipped": True, "reason": "not yet"}
+    last_day = _calendar.monthrange(ref_date.year, ref_date.month)[1]
+    if ref_date.day != last_day:
         return {"skipped": True, "reason": "not yet"}
 
-    recurrences = ["monthly"] + (["quarterly"] if now_ist.month in (3, 6, 9, 12) else [])
+    recurrences = ["monthly"] + (["quarterly"] if ref_date.month in (3, 6, 9, 12) else [])
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(
@@ -1861,7 +1900,7 @@ async def maybe_send_goal_checkpoints() -> dict:
                 # for a quarterly goal this only ever matches on a
                 # quarter-end month since its sub-periods only end then.
                 closed_sp = next(
-                    (sp for sp in recurring.sub_periods if sp.end == now_ist.date()), None
+                    (sp for sp in recurring.sub_periods if sp.end == ref_date), None
                 )
                 if closed_sp is None or closed_sp.status not in ("met", "missed"):
                     continue
