@@ -16,8 +16,11 @@ flow grew from 3 steps to 6:
   goal:metric:<metric>      → distance | elevation | duration
   goal:mode:<mode>          → cumulative (total target) | frequency (per-
                                session threshold x count)
-  (free text)               → target value, then — frequency mode only —
-                               how many times
+  (free text)               → cumulative mode: target value only.
+                               frequency mode: how many sessions, then the
+                               per-session target for each of them — count
+                               comes first since "how many, then how much
+                               each" is the order people naturally think in.
   goal:multiday:<yes|no>    → count every activity separately, or collapse
                                same-day activities to the day's best one
   goal:period:<period>      → period chosen → reads the full draft → saves
@@ -1027,7 +1030,7 @@ _PAD_3COL  = 20  # 3 buttons sharing a row
 # are always present, so the total never depends on which of those two is
 # picked — only on what's skippable earlier in the flow.
 # ---------------------------------------------------------------------------
-_GOAL_STEP_ORDER = ["sport", "metric", "mode", "value", "count", "daily", "rectype", "final"]
+_GOAL_STEP_ORDER = ["sport", "metric", "mode", "count", "value", "daily", "rectype", "final"]
 
 
 def _goal_step_progress(draft: dict, step_key: str) -> str:
@@ -1199,7 +1202,7 @@ def _goal_value_keyboard(draft: dict) -> InlineKeyboardMarkup:
 
 def _goal_count_keyboard(draft: dict) -> InlineKeyboardMarkup:
     """Back/Exit for the free-text session-count step — see _goal_value_keyboard."""
-    back_target = _goal_prev_step(draft, "count") or "value"
+    back_target = _goal_prev_step(draft, "count") or "mode"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(_pad("Back", _PAD_2COL), callback_data=f"goal:prev:{back_target}"),
          InlineKeyboardButton(_pad("Exit", _PAD_2COL), callback_data="goal:exit")],
@@ -1520,8 +1523,8 @@ def _draft_summary_text(draft: dict) -> str:
         lines.append(f"Target: *Total {val_str} {unit}*")
     else:
         count = draft.get("count", 1)
-        lines.append(f"Per-session: *{val_str} {unit}*")
         lines.append(f"Target: *{count} session{'s' if count != 1 else ''}*")
+        lines.append(f"Per-session: *{val_str} {unit}*")
     return "\n".join(lines)
 
 
@@ -1564,7 +1567,13 @@ def _value_prompt_text(draft: dict) -> str:
         prompt = f"✏️ *What's your total {metric} target for {sport} this period?*"
     else:
         noun = "session length" if metric == "duration" else metric
-        prompt = f"✏️ *What is your per-session {noun} goal for {sport}?*"
+        # Count is already known at this point (it's asked first in
+        # frequency mode — see _GOAL_STEP_ORDER), so name it here instead of
+        # just repeating "per-session", which reads as a non-sequitur once
+        # the user has already committed to a specific number of sessions.
+        count = draft.get("count")
+        count_note = f" for each of your {count} session{'s' if count != 1 else ''}" if count else ""
+        prompt = f"✏️ *What is your per-session {noun} goal for {sport}{count_note}?*"
     eg = _goal_value_examples(sport, metric, mode, unit)
     return (
         f"*{_goal_step_progress(draft, 'value')}*\n\n"
@@ -1575,12 +1584,11 @@ def _value_prompt_text(draft: dict) -> str:
 
 
 def _count_prompt_text(draft: dict) -> str:
-    val_str = _format_goal_number(draft.get("value", 0))
-    unit = _goal_metric_unit(draft["sport"], draft["metric"], draft["aggregation"])
+    sport = draft.get("sport", "this sport")
+    noun = _GOAL_ACTIVITY_NOUN.get(sport, "session")
     return (
         f"*{_goal_step_progress(draft, 'count')}*\n\n"
-        f"Per-session goal: *{val_str} {unit}*\n\n"
-        f"How many sessions do you want to achieve this in?\n"
+        f"✏️ *How many {sport} {noun}s do you want to complete this period?*\n\n"
         f"Enter a whole number — e.g. *4*\n\n"
         f"Type /back to go to the previous step, or /cancel to exit."
     )
@@ -1934,7 +1942,9 @@ async def _handle_goal_callbacks(query, data: str) -> None:
         )
         return
 
-    # ── Mode chosen → prompt for the target value as free text ─────────────
+    # ── Mode chosen → prompt for the next free-text answer. Cumulative mode
+    #    only ever asks for the total value; frequency mode asks "how many
+    #    sessions" before "how much per session" (see _GOAL_STEP_ORDER). ────
     if data.startswith("goal:mode:"):
         mode = data[len("goal:mode:"):]
         draft = await _load_draft(tg_id)
@@ -1942,10 +1952,16 @@ async def _handle_goal_callbacks(query, data: str) -> None:
             await query.edit_message_text("Session expired. Please try /goals again.", reply_markup=_session_expired_keyboard())
             return
         draft["aggregation"] = mode
-        draft["step"] = "value"
-        msg = await query.edit_message_text(
-            _value_prompt_text(draft), parse_mode="Markdown", reply_markup=_goal_value_keyboard(draft),
-        )
+        if mode == "cumulative":
+            draft["step"] = "value"
+            msg = await query.edit_message_text(
+                _value_prompt_text(draft), parse_mode="Markdown", reply_markup=_goal_value_keyboard(draft),
+            )
+        else:
+            draft["step"] = "count"
+            msg = await query.edit_message_text(
+                _count_prompt_text(draft), parse_mode="Markdown", reply_markup=_goal_count_keyboard(draft),
+            )
         _record_prompt(draft, msg)
         await _save_draft(tg_id, draft)
         return
@@ -2095,8 +2111,9 @@ async def _handle_goal_text_input(update: Update) -> bool:
 
     step = draft.get("step")
 
-    # ── True Back from a free-text step. Both text steps' predecessor is a
-    #    button step (mode, or value itself), so this always re-sends a
+    # ── True Back from a free-text step. Each text step's predecessor is
+    #    either a button step (mode) or the other text step (count, when
+    #    backing out of value in frequency mode), so this always re-sends a
     #    fresh message with the target step's own screen. ──────────────────
     if text.lower() == "/back" and step in ("value", "count"):
         prev = _goal_prev_step(draft, step) or "sport"
@@ -2105,10 +2122,31 @@ async def _handle_goal_text_input(update: Update) -> bool:
             await _advance_via_message(
                 update, draft, _mode_prompt_text(draft), reply_markup=_goal_mode_keyboard(draft),
             )
-        elif prev == "value":
+        elif prev == "count":
             await _advance_via_message(
-                update, draft, _value_prompt_text(draft), reply_markup=_goal_value_keyboard(draft),
+                update, draft, _count_prompt_text(draft), reply_markup=_goal_count_keyboard(draft),
             )
+        await _save_draft(tg_id, draft)
+        return True
+
+    # ── Frequency mode asks "how many sessions" before "how much per
+    #    session" — see _GOAL_STEP_ORDER — so this always leads into the
+    #    value step next; cumulative mode never reaches this branch since it
+    #    skips straight from mode to value. ──────────────────────────────────
+    if step == "count":
+        count = _parse_goal_count(text)
+        if count is None or count < 1:
+            await update.message.reply_text(
+                "Please enter a positive whole number — e.g. *4*:",
+                parse_mode="Markdown",
+            )
+            return True
+
+        draft["count"] = count
+        draft["step"]  = "value"
+        await _advance_via_message(
+            update, draft, _value_prompt_text(draft), reply_markup=_goal_value_keyboard(draft),
+        )
         await _save_draft(tg_id, draft)
         return True
 
@@ -2128,31 +2166,7 @@ async def _handle_goal_text_input(update: Update) -> bool:
             return True
 
         draft["value"] = val
-
-        if aggregation == "cumulative":
-            draft["step"] = "daily"
-            await _advance_via_message(
-                update, draft, _daily_prompt_text(draft), reply_markup=_goal_daily_keyboard(draft),
-            )
-        else:
-            draft["step"] = "count"
-            await _advance_via_message(
-                update, draft, _count_prompt_text(draft), reply_markup=_goal_count_keyboard(draft),
-            )
-        await _save_draft(tg_id, draft)
-        return True
-
-    if step == "count":
-        count = _parse_goal_count(text)
-        if count is None or count < 1:
-            await update.message.reply_text(
-                "Please enter a positive whole number — e.g. *4*:",
-                parse_mode="Markdown",
-            )
-            return True
-
-        draft["count"] = count
-        draft["step"]  = "daily"
+        draft["step"] = "daily"
         await _advance_via_message(
             update, draft, _daily_prompt_text(draft), reply_markup=_goal_daily_keyboard(draft),
         )
