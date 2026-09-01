@@ -87,13 +87,23 @@ _QUOTES_PATH = pathlib.Path("data/quotes.txt")
 # ---------------------------------------------------------------------------
 # In-process draft registry — avoids Redis round-trips on every message
 # ---------------------------------------------------------------------------
-# When a goal draft OR activity-edit draft is created, we record the
-# telegram_user_id here.  handle_unknown skips both Redis GETs unless the
-# user is in this set.  The set is process-local so it resets on restart,
-# but that is fine: after a restart the draft in Redis has also expired or
-# the user is starting fresh.  The cost of one extra GET after a restart is
-# trivial compared to eliminating GETs for every unrelated message.
-_users_with_draft: set[int] = set()
+# When a goal draft or an activity-edit draft is created, we record the
+# telegram_user_id in the matching set below.  handle_unknown skips both
+# Redis GETs unless the user is in at least one of them.  Two separate sets
+# (not one shared one) matter: _handle_activity_edit_text used to short-
+# circuit on membership in a single shared set, so a user mid-goal-draft
+# (who's only ever added to the goal set) would incorrectly be told "This
+# activity-edit session expired" the moment they typed a free-text goal
+# value — the activity-edit checker ran first, saw them "in the set", found
+# no activity-edit Redis key (because there never was one), and reported a
+# session expiry for a flow they were never in.
+#
+# Both sets are process-local so they reset on restart, but that's fine:
+# after a restart the draft in Redis has also expired or the user is
+# starting fresh. The cost of one extra GET after a restart is trivial
+# compared to eliminating GETs for every unrelated message.
+_goal_draft_users: set[int] = set()
+_activity_edit_draft_users: set[int] = set()
 
 
 # ---------------------------------------------------------------------------
@@ -873,14 +883,14 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     tg_id = update.effective_user.id
     # Try to cancel activity edit first
     if await r.delete(key_activity_edit(tg_id)):
-        _users_with_draft.discard(tg_id)
+        _activity_edit_draft_users.discard(tg_id)
         await update.message.reply_text(
             "Activity update cancelled.", reply_markup=post_dismiss_keyboard(),
         )
         return
     # Then try goal draft
     if await r.delete(_draft_key(tg_id)):
-        _users_with_draft.discard(tg_id)
+        _goal_draft_users.discard(tg_id)
         await update.message.reply_text("Goal entry cancelled. Use /goals anytime.")
         return
     await update.message.reply_text("Nothing to cancel.")
@@ -900,7 +910,7 @@ async def cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Nothing to skip at this step.")
         return
     await r.delete(key_activity_edit(tg_id))
-    _users_with_draft.discard(tg_id)
+    _activity_edit_draft_users.discard(tg_id)
     await _push_activity_update(
         telegram_user_id=tg_id,
         reply_message=update.message,
@@ -1625,7 +1635,7 @@ async def _save_draft(tg_id: int, data: dict) -> None:
     from app.redis_client import get_redis
     r = await get_redis()
     await r.set(_draft_key(tg_id), _json.dumps(data), ex=_GOAL_DRAFT_TTL)
-    _users_with_draft.add(tg_id)
+    _goal_draft_users.add(tg_id)
 
 
 async def _load_draft(tg_id: int) -> dict | None:
@@ -1633,7 +1643,7 @@ async def _load_draft(tg_id: int) -> dict | None:
     r = await get_redis()
     raw = await r.get(_draft_key(tg_id))
     if raw is None:
-        _users_with_draft.discard(tg_id)
+        _goal_draft_users.discard(tg_id)
     return _json.loads(raw) if raw else None
 
 
@@ -1641,7 +1651,7 @@ async def _clear_draft(tg_id: int) -> None:
     from app.redis_client import get_redis
     r = await get_redis()
     await r.delete(_draft_key(tg_id))
-    _users_with_draft.discard(tg_id)
+    _goal_draft_users.discard(tg_id)
 
 
 async def _nearest_deadline_line(db, user: "User", goals: list) -> str | None:
@@ -2661,7 +2671,7 @@ async def _handle_activity_desc_skip(query) -> None:
     except Exception:
         pass
     await r.delete(key_activity_edit(tg_id))
-    _users_with_draft.discard(tg_id)
+    _activity_edit_draft_users.discard(tg_id)
     await _push_activity_update(
         telegram_user_id=tg_id,
         reply_message=query.message,
@@ -2684,7 +2694,7 @@ async def _handle_activity_desc_cancel(query) -> None:
         )
         return
     await r.delete(key_activity_edit(tg_id))
-    _users_with_draft.discard(tg_id)
+    _activity_edit_draft_users.discard(tg_id)
     try:
         await query.edit_message_reply_markup(reply_markup=None)
     except Exception:
@@ -2709,7 +2719,7 @@ async def _handle_activity_edit_start(query, data: str) -> None:
     # Outlives the draft above so a later "Session expired" message can
     # still offer a one-tap 'Try Again' back into this same activity.
     await r.set(key_activity_edit_recent(tg_id), activity_id, ex=_ACTIVITY_EDIT_RECENT_TTL)
-    _users_with_draft.add(tg_id)   # mark in-process so handle_unknown skips Redis
+    _activity_edit_draft_users.add(tg_id)   # mark in-process so handle_unknown skips Redis
     await query.edit_message_reply_markup(reply_markup=None)
     await query.message.reply_text(
         "Enter the *Activity Name* for this activity:\n\n"
@@ -2723,10 +2733,10 @@ async def _handle_activity_edit_text(update: Update) -> bool:
     """Handle free-text input for the activity name/description edit flow.
 
     Returns True if the message was consumed by this flow, False otherwise.
-    Only hits Redis if this user is flagged in _users_with_draft.
+    Only hits Redis if this user is flagged in _activity_edit_draft_users.
     """
     tg_id = update.effective_user.id
-    if tg_id not in _users_with_draft:
+    if tg_id not in _activity_edit_draft_users:
         return False
 
     from app.redis_client import get_redis, key_activity_edit
@@ -2734,7 +2744,7 @@ async def _handle_activity_edit_text(update: Update) -> bool:
     r = await get_redis()
     raw = await r.get(key_activity_edit(tg_id))
     if not raw:
-        _users_with_draft.discard(tg_id)
+        _activity_edit_draft_users.discard(tg_id)
         await update.message.reply_text(
             "This activity-edit session expired.",
             reply_markup=await _activity_edit_expired_keyboard(tg_id),
@@ -2761,7 +2771,7 @@ async def _handle_activity_edit_text(update: Update) -> bool:
     if step == "description":
         description = text
         await r.delete(key_activity_edit(tg_id))
-        _users_with_draft.discard(tg_id)
+        _activity_edit_draft_users.discard(tg_id)
         await _push_activity_update(
             telegram_user_id=tg_id,
             reply_message=update.message,
@@ -2899,13 +2909,14 @@ async def handle_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     text = update.message.text.strip()
     tg_id = update.effective_user.id
 
-    # Fast path: if no draft is in-flight for this user, skip ALL Redis calls.
-    # _users_with_draft is an in-process set maintained by _save_draft /
-    # _handle_activity_edit_start / clear helpers.  False negatives can happen
-    # after a process restart (the set is empty), but that is fine — we do one
-    # extra Redis GET per user on the first message post-restart, after which
-    # the set is self-healing.
-    if tg_id not in _users_with_draft:
+    # Fast path: if no draft is in-flight for this user (in either flow),
+    # skip ALL Redis calls. _goal_draft_users / _activity_edit_draft_users
+    # are in-process sets maintained by _save_draft / _handle_activity_edit_start
+    # / clear helpers. False negatives can happen after a process restart
+    # (the sets are empty), but that is fine — we do one extra Redis GET per
+    # user on the first message post-restart, after which the sets are
+    # self-healing.
+    if tg_id not in _activity_edit_draft_users and tg_id not in _goal_draft_users:
         _is_numeric = False
         try:
             float(text.replace(",", "."))
@@ -2929,8 +2940,9 @@ async def handle_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     # Draft flag was set but neither flow recognised the input (shouldn't happen
-    # often).  Clear the stale flag and give a helpful nudge.
-    _users_with_draft.discard(tg_id)
+    # often).  Clear the stale flags and give a helpful nudge.
+    _activity_edit_draft_users.discard(tg_id)
+    _goal_draft_users.discard(tg_id)
     await update.message.reply_text("Use /help to see what I can do.")
 
 
