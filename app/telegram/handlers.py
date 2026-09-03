@@ -2856,6 +2856,23 @@ async def _handle_activity_desc_cancel(query) -> None:
     )
 
 
+# Sport-aware examples for the activity-name prompt — a Ride example ("100
+# Km Ride") looked out of place and mildly confusing when shown while
+# renaming a Swim or a Yoga session, since it reads like an instruction to
+# rename *to* that rather than just an illustrative format.
+_ACTIVITY_NAME_EXAMPLES: dict[str, str] = {
+    "Ride": "100 Km Ride",
+    "RideEndurance": "200 Km Endurance Ride",
+    "Run": "10 Km Run",
+    "Swim": "Evening Swim",
+    "Walk": "Morning Walk",
+    "Hiking": "Nandi Hills Trek",
+    "Yoga": "Morning Yoga",
+    "RacketSports": "Badminton Session",
+    "StrengthTraining": "Gym Session",
+}
+
+
 async def _handle_activity_edit_start(query, data: str) -> None:
     """Callback: user tapped 'Update Activity' on a notification."""
     activity_id = int(data.split(":")[-1])
@@ -2873,9 +2890,15 @@ async def _handle_activity_edit_start(query, data: str) -> None:
     await r.set(key_activity_edit_recent(tg_id), activity_id, ex=_ACTIVITY_EDIT_RECENT_TTL)
     _activity_edit_draft_users.add(tg_id)   # mark in-process so handle_unknown skips Redis
     await query.edit_message_reply_markup(reply_markup=None)
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(Activity.activity_type).where(Activity.id == activity_id))
+        activity_type = result.scalar_one_or_none()
+    example = _ACTIVITY_NAME_EXAMPLES.get(activity_type, "100 Km Ride")
+
     await query.message.reply_text(
         "Enter the *Activity Name* for this activity:\n\n"
-        "_Example: 100 Km Ride_\n\n"
+        f"_Example: {example}_\n\n"
         "Type /cancel to abort.",
         parse_mode="Markdown",
     )
