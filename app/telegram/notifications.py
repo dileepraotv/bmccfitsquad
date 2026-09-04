@@ -437,11 +437,18 @@ def _roast_or_kudos_line(
 
     # Clearing the threshold by 2x+ ("absolutely smashed it") pulls from a
     # distinct, more emphatic pool instead of the everyday kudos mix — see
-    # _KUDOS_SMASH_MULTIPLIER.
+    # _KUDOS_SMASH_MULTIPLIER. Sport-specific lines are still mixed in for
+    # flavor/variety, but weighted 2:1 in favor of _KUDOS_SMASH so the
+    # emphatic tone actually shows up most of the time rather than being a
+    # coin flip against the (otherwise-identical-sounding) regular
+    # sport-specific kudos pool.
     if distance_m >= threshold_m * _KUDOS_SMASH_MULTIPLIER:
-        pool = _KUDOS_SMASH + _KUDOS_SPORT.get(bucket, [])
-    else:
-        pool = _KUDOS_GENERAL + _KUDOS_LEADERBOARD + _KUDOS_SPORT.get(bucket, [])
+        sport_lines = _KUDOS_SPORT.get(bucket, [])
+        pool = _KUDOS_SMASH + sport_lines
+        weights = [2] * len(_KUDOS_SMASH) + [1] * len(sport_lines)
+        return random.choices(pool, weights=weights, k=1)[0]
+
+    pool = _KUDOS_GENERAL + _KUDOS_LEADERBOARD + _KUDOS_SPORT.get(bucket, [])
     return random.choice(pool)
 
 
