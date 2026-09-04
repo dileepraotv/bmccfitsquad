@@ -2891,8 +2891,16 @@ async def _handle_activity_edit_start(query, data: str) -> None:
     _activity_edit_draft_users.add(tg_id)   # mark in-process so handle_unknown skips Redis
     await query.edit_message_reply_markup(reply_markup=None)
 
+    # activity_id here is Strava's own numeric activity ID (from the
+    # notification's callback_data, ultimately activity_data["id"]), not
+    # this app's internal Activity.id UUID primary key — must filter on
+    # strava_activity_id or this raises a type-mismatch DB error (which is
+    # exactly what produced the "Something went wrong" failure on every
+    # single Update Activity tap).
     async with AsyncSessionLocal() as db:
-        result = await db.execute(select(Activity.activity_type).where(Activity.id == activity_id))
+        result = await db.execute(
+            select(Activity.activity_type).where(Activity.strava_activity_id == activity_id)
+        )
         activity_type = result.scalar_one_or_none()
     example = _ACTIVITY_NAME_EXAMPLES.get(activity_type, "100 Km Ride")
 
