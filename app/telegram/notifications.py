@@ -133,50 +133,234 @@ _ROAST_BUCKET_BY_TYPE: dict[str, str] = {
     for raw_type in SPORT_ACTIVITY_TYPES.get(bucket, [])
 }
 
+# Every roast line (general, per-sport, elevation, and the time-based
+# "Other Activities" ones below) ends in 😝 by convention — it's the visual
+# tell that a line is a roast rather than a kudos, at a glance, without
+# having to read the text.
 _ROAST_GENERAL: list[str] = [
-    "Only {value} {unit}? My grandma's dog walk was longer 😏",
-    "{value} {unit}, huh? Bold of you to call that cardio.",
-    "That was less a workout, more a warm-up for the warm-up.",
-    "Congrats, you've officially out-walked your couch.",
-    "I've seen coffee breaks with more mileage.",
+    "Only {value} {unit}? My grandma's dog walk was longer 😝",
+    "{value} {unit}, huh? Bold of you to call that cardio. 😝",
+    "That was less a workout, more a warm-up for the warm-up. 😝",
+    "Congrats, you've officially out-walked your couch. 😝",
+    "I've seen coffee breaks with more mileage. 😝",
+    "That's cardio in theory only. 😝",
+    "The couch called, it wants its title back. 😝",
+    "Effort level: barely visible. 😝",
 ]
 
 _ROAST_SPORT: dict[str, list[str]] = {
     "Run": [
-        "That 'run' had more walking breaks than a mall food court.",
-        "Marathon training? More like light jogging with commitment issues.",
+        "That 'run' had more walking breaks than a mall food court. 😝",
+        "Marathon training? More like light jogging with commitment issues. 😝",
+        "That pace filed a missing person's report. 😝",
+        "The road barely noticed you were there. 😝",
     ],
     "Ride": [
-        "Your average speed suggests the bike was doing you a favor.",
-        "That's not a ride, that's a scenic bike-shaped stroll.",
+        "Your average speed suggests the bike was doing you a favor. 😝",
+        "That's not a ride, that's a scenic bike-shaped stroll. 😝",
+        "Even the chain was bored. 😝",
+        "That's not cycling, that's gentle drifting. 😝",
     ],
     "Swim": [
-        "Did you swim it or float there thinking about lunch?",
-        "That lap count says 'effort,' your pace says 'floatation device.'",
+        "Did you swim it or float there thinking about lunch? 😝",
+        "That lap count says 'effort,' your pace says 'floatation device.' 😝",
+        "The pool barely got wet. 😝",
+        "That's less a swim, more a polite dip. 😝",
     ],
     "Walk": [
-        "A 'walk' that short barely counts as leaving the building.",
-        "Technically movement. Generously, exercise.",
+        "A 'walk' that short barely counts as leaving the building. 😝",
+        "Technically movement. Generously, exercise. 😝",
+        "That's a walk to the fridge, not a workout. 😝",
+        "Your step count is filing a complaint. 😝",
     ],
 }
 
+# Kudos lines are layered so a big enough effort feels noticeably bigger,
+# not just a random pick from the same bucket every time:
+#   _KUDOS_GENERAL      — the everyday "solid effort" pool
+#   _KUDOS_LEADERBOARD  — cheeky, group-banter-flavored lines (this is a
+#                         group leaderboard bot, so these fit right into the
+#                         regular mix rather than needing their own trigger)
+#   _KUDOS_SPORT        — sport-specific flavor, always mixed in alongside
+#                         whichever general/leaderboard pool applies
+#   _KUDOS_SMASH        — reserved for when the activity clears its
+#                         threshold by _KUDOS_SMASH_MULTIPLIER or more (see
+#                         _roast_or_kudos_line), so a merely-solid effort and
+#                         a blow-the-doors-off one don't read the same.
 _KUDOS_GENERAL: list[str] = [
-    "That's not a workout, that's a statement. 💪",
-    "Distance like that doesn't happen by accident.",
-    "You didn't just log an activity, you logged a flex.",
-    "That's the kind of effort Strava screenshots are made of.",
-    "That's a certified good one. 🙌",
-    "Solid effort, no notes.",
-    "Textbook. Absolutely textbook.",
-    "That's the standard now — good luck topping it.",
+    "Now THAT is how you move. 🔥",
+    "You understood the assignment. 💪",
+    "That distance deserves a double-tap. 👏",
+    "Okay, show-off. 😎",
+    "The legs have spoken.",
+    "That's a serious chunk of mileage.",
+    "Someone woke up and chose distance.",
+    "That's a proper session. 🔥",
+    "Respect the grind. 🫡",
+    "Big distance. Bigger effort.",
+    "You came. You moved. You conquered.",
+    "Another one for the books. 📖",
+    "That's some serious engine work.",
+    "The leaderboard just got nervous.",
+    "Casually putting in the work. 😏",
+    "That's how you make kilometers count.",
+    "No shortcuts. Just kilometers.",
+    "That's a whole lot of moving.",
+    "Distance doesn't lie. Great work.",
+    "You didn't come to participate. 🔥",
+    "That's commitment measured in kilometers.",
+    "The consistency is getting dangerous.",
+    "That's not luck. That's legs.",
+    "Another day, another solid effort.",
+    "Your future self just said thank you.",
+    "That's one way to raise the bar.",
+    "Quietly stacking those kilometers. 👏",
+    "The mileage is speaking for itself.",
+    "That's a session worth bragging about.",
+    "And just like that, the bar moves higher.",
+]
+
+# Leaderboard-flavored cheeky lines — mixed into the same pool as
+# _KUDOS_GENERAL (see _roast_or_kudos_line) rather than gated behind an
+# actual leaderboard-rank check, since this bot's notifications already post
+# into the group chat these jokes are aimed at.
+_KUDOS_LEADERBOARD: list[str] = [
+    "Leaderboard: nervous sweating 😅",
+    "Someone's coming for the top spot.",
+    "The competition just got interesting.",
+    "That's going straight onto the leaderboard.",
+    "And there goes another person ruining everyone's chances. 😂",
+    "Please leave some kilometers for the rest of us.",
+    "At this rate, you're going to need your own leaderboard.",
+    "Casual flex. Very casual. 😎",
+    "Who gave you permission to go this far?",
+    "The leaderboard committee has taken notice.",
+    "Okay, we get it. You're fit. 😂",
+    "That's getting uncomfortably close to the top.",
+    "Someone woke up competitive.",
+    "That's not helping the rest of us catch up.",
+    "Respectfully… calm down. 😂",
+    "The leaderboard has entered its villain era.",
+    "Another activity. Another problem for the competition.",
+    "Your competitors would like a word.",
+    "This is becoming a habit. And we're here for it.",
+    "At this point, the leaderboard owes you commission.",
 ]
 
 _KUDOS_SPORT: dict[str, list[str]] = {
-    "Run": ["That run had 'no bad days' energy."],
-    "Ride": ["That ride had more power than patience — love it."],
-    "Swim": ["Smooth, strong, and barely made a splash. Class act."],
-    "Walk": ["Not every step needs to be a sprint — that was a solid, honest effort."],
+    "Run": [
+        "Those legs clearly had somewhere to be.",
+        "Run now, brag later. 😎",
+        "That wasn't a run. That was a mission.",
+        "Miles conquered. Excuses defeated.",
+        "You chased the distance and caught it.",
+        "That's some serious roadwork. 🏃",
+        "The pavement didn't stand a chance.",
+        "Another run, another victory.",
+        "You really don't believe in easy days, do you?",
+        "That's a proper leg-day without the gym.",
+        "Running like the finish line owes you money.",
+        "That's how you put the 'run' in run-rate. 😄",
+        "The road got a little shorter today.",
+        "That's a lot of forward motion.",
+        "Your shoes are filing for overtime.",
+        "Cardio department: absolutely nailed it.",
+        "That's some serious kilometre therapy.",
+        "You didn't run out of excuses — you ran out of road.",
+        "Pace, distance, attitude — all showing up.",
+        "The road was yours today.",
+    ],
+    "Ride": [
+        "Two wheels, zero excuses. 🚴",
+        "That's a serious amount of saddle time.",
+        "The bike clearly had places to be.",
+        "Pedals were put to very good use.",
+        "That's not a ride. That's an expedition.",
+        "Another day, another road conquered.",
+        "Legs + pedals = results.",
+        "That's some serious road therapy.",
+        "The chain is probably asking for a day off.",
+        "You didn't ride the distance. You owned it.",
+        "That's a proper sufferfest. Respect.",
+        "Someone's been feeding the legs watts. ⚡",
+        "The bike and legs were clearly having a good day.",
+        "That's a lot of road disappearing behind you.",
+        "The saddle deserves a medal too.",
+        "That's how you turn Sunday into a cycling story.",
+        "No traffic jam can stop these legs.",
+        "Rubber down, excuses up.",
+        "That's a long conversation between legs and pedals.",
+        "The bike computer is going to need a lie-down.",
+    ],
+    "Swim": [
+        "Making kilometers look effortless. 🏊",
+        "That's a serious amount of water covered.",
+        "The pool got a proper workout too.",
+        "Lane domination. 💦",
+        "Just casually converting water into distance.",
+        "That's some serious aquatic mileage.",
+        "The pool wasn't ready for this.",
+        "Smooth strokes, serious distance.",
+        "That's a lot of laps. Respect.",
+        "You basically paid rent in that pool today.",
+        "The water level may have dropped slightly. 😄",
+        "Another session, another lane conquered.",
+        "That's how you make a splash without making a splash.",
+        "Goggles on. Excuses off.",
+        "The chlorine knows your name now.",
+        "That's some serious time underwater.",
+        "Swimming laps like they're going out of fashion.",
+        "The pool has officially seen enough of you today.",
+        "Stroke after stroke, kilometer after kilometer.",
+        "That's a whole lot of blue mileage.",
+    ],
+    "Walk": [
+        "One step at a time. A LOT of steps. 👟",
+        "That's some serious footwork.",
+        "Walking? More like quietly crushing it.",
+        "The steps just kept coming.",
+        "That's how you turn a walk into a workout.",
+        "No rush. Just results.",
+        "Slow and steady? More like steady and unstoppable.",
+        "That's a serious amount of pavement covered.",
+        "Every step counted today.",
+        "The feet were clearly on a mission.",
+        "That's what we call productive wandering.",
+        "You walked your way straight onto the leaderboard.",
+        "Proof that you don't need to run to put in the work.",
+        "That's a lot of steps and zero shortcuts.",
+        "The neighborhood knows you by now.",
+        "Just walking... and casually stacking kilometers.",
+        "Those shoes have earned their dinner.",
+        "A leisurely stroll with highly non-leisurely mileage.",
+        "The legs don't care what the activity is. They showed up.",
+        "Walking strong. Walking long. 👏",
+    ],
 }
+
+# "Absolutely smashed it" tier — an activity that clears its roast/kudos
+# threshold by _KUDOS_SMASH_MULTIPLIER or more gets pulled from this pool
+# instead of _KUDOS_GENERAL/_KUDOS_LEADERBOARD, so e.g. a 100 km ride reads
+# differently from a 26 km one even though both are just "kudos".
+_KUDOS_SMASH_MULTIPLIER = 2.0
+
+_KUDOS_SMASH: list[str] = [
+    "Threshold? Absolutely obliterated. 💥",
+    "You didn't clear the bar. You launched it.",
+    "Threshold destroyed. 🔥",
+    "That's not meeting the target. That's making the target look small.",
+    "Target achieved. Then casually kept going.",
+    "You saw the threshold and said, 'Is that all?'",
+    "Minimum distance? Maximum disrespect. 😂",
+    "The target was merely a suggestion.",
+    "You didn't cross the line. You left it behind.",
+    "That threshold didn't stand a chance.",
+    "Target: ✅ Overachievement: ✅",
+    "That's how you turn a minimum into a masterpiece.",
+    "Mission accomplished. Then some.",
+    "The bar has officially been raised.",
+    "That's an emphatic YES. 💪",
+]
 
 # Suspiciously flat route roast — overrides the distance-earned kudos when a
 # ride/run/walk clears its distance bar but barely climbed anything. Matches
@@ -185,10 +369,10 @@ _ELEVATION_ROAST_SPORTS: set[str] = {"Ride", "Run", "Walk"}
 _ELEVATION_ROAST_M_PER_KM = 5.0
 
 _ELEVATION_ROAST: list[str] = [
-    "{km} km and barely a bump in sight — that's a runway, not a route.",
-    "Flat as a pancake out there. Where were the actual hills?",
-    "Zero hills were harmed in the making of this activity.",
-    "That elevation graph is basically a flat line with main character energy.",
+    "{km} km and barely a bump in sight — that's a runway, not a route. 😝",
+    "Flat as a pancake out there. Where were the actual hills? 😝",
+    "Zero hills were harmed in the making of this activity. 😝",
+    "That elevation graph is basically a flat line with main character energy. 😝",
 ]
 
 # "Other Activities" (Yoga, Racket Sports, Strength Training, Hiking) have no
@@ -200,10 +384,10 @@ _OTHER_SPORT_RAW_TYPES: set[str] = {
 }
 
 _OTHER_SPORT_ROAST: list[str] = [
-    "{minutes} minutes? That's a warm-up, not a session.",
-    "Blink and you'd have missed the whole workout.",
-    "That barely counts as showing up.",
-    "Short and not-so-sweet — give it a real effort next time.",
+    "{minutes} minutes? That's a warm-up, not a session. 😝",
+    "Blink and you'd have missed the whole workout. 😝",
+    "That barely counts as showing up. 😝",
+    "Short and not-so-sweet — give it a real effort next time. 😝",
 ]
 
 
@@ -231,7 +415,7 @@ def _roast_or_kudos_line(
         if moving_time_s < _OTHER_SPORT_ROAST_MAX_SECONDS:
             minutes = max(1, round(moving_time_s / 60))
             return random.choice(_OTHER_SPORT_ROAST).format(minutes=minutes)
-        return random.choice(_KUDOS_GENERAL)
+        return random.choice(_KUDOS_GENERAL + _KUDOS_LEADERBOARD)
 
     threshold_m = _ROAST_THRESHOLDS_M[bucket]
     distance_m = distance_m or 0
@@ -251,7 +435,13 @@ def _roast_or_kudos_line(
         if (elevation_gain_m / distance_km) < _ELEVATION_ROAST_M_PER_KM:
             return random.choice(_ELEVATION_ROAST).format(km=round(distance_km))
 
-    pool = _KUDOS_GENERAL + _KUDOS_SPORT.get(bucket, [])
+    # Clearing the threshold by 2x+ ("absolutely smashed it") pulls from a
+    # distinct, more emphatic pool instead of the everyday kudos mix — see
+    # _KUDOS_SMASH_MULTIPLIER.
+    if distance_m >= threshold_m * _KUDOS_SMASH_MULTIPLIER:
+        pool = _KUDOS_SMASH + _KUDOS_SPORT.get(bucket, [])
+    else:
+        pool = _KUDOS_GENERAL + _KUDOS_LEADERBOARD + _KUDOS_SPORT.get(bucket, [])
     return random.choice(pool)
 
 
