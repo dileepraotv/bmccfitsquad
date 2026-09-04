@@ -181,12 +181,11 @@ _ROAST_SPORT: dict[str, list[str]] = {
 #   _KUDOS_LEADERBOARD  — cheeky, group-banter-flavored lines (this is a
 #                         group leaderboard bot, so these fit right into the
 #                         regular mix rather than needing their own trigger)
-#   _KUDOS_SPORT        — sport-specific flavor, always mixed in alongside
-#                         whichever general/leaderboard pool applies
-#   _KUDOS_SMASH        — reserved for when the activity clears its
-#                         threshold by _KUDOS_SMASH_MULTIPLIER or more (see
-#                         _roast_or_kudos_line), so a merely-solid effort and
-#                         a blow-the-doors-off one don't read the same.
+#   _KUDOS_SPORT        — sport-specific flavor
+#   _KUDOS_SMASH        — extra "absolutely crushed it"-flavored lines
+# All four are mixed into one flat pool for every qualifying activity (see
+# _roast_or_kudos_line) rather than gated behind how far past the threshold
+# it landed — simpler, and keeps the rotation varied regardless of margin.
 _KUDOS_GENERAL: list[str] = [
     "Now THAT is how you move. 🔥",
     "You understood the assignment. 💪",
@@ -338,12 +337,9 @@ _KUDOS_SPORT: dict[str, list[str]] = {
     ],
 }
 
-# "Absolutely smashed it" tier — an activity that clears its roast/kudos
-# threshold by _KUDOS_SMASH_MULTIPLIER or more gets pulled from this pool
-# instead of _KUDOS_GENERAL/_KUDOS_LEADERBOARD, so e.g. a 100 km ride reads
-# differently from a 26 km one even though both are just "kudos".
-_KUDOS_SMASH_MULTIPLIER = 2.0
-
+# "Absolutely smashed it" flavored lines — mixed into the same flat kudos
+# pool as everything else (see _roast_or_kudos_line), not gated behind any
+# particular margin over the threshold.
 _KUDOS_SMASH: list[str] = [
     "Threshold? Absolutely obliterated. 💥",
     "You didn't clear the bar. You launched it.",
@@ -415,7 +411,7 @@ def _roast_or_kudos_line(
         if moving_time_s < _OTHER_SPORT_ROAST_MAX_SECONDS:
             minutes = max(1, round(moving_time_s / 60))
             return random.choice(_OTHER_SPORT_ROAST).format(minutes=minutes)
-        return random.choice(_KUDOS_GENERAL + _KUDOS_LEADERBOARD)
+        return random.choice(_KUDOS_GENERAL + _KUDOS_LEADERBOARD + _KUDOS_SMASH)
 
     threshold_m = _ROAST_THRESHOLDS_M[bucket]
     distance_m = distance_m or 0
@@ -435,20 +431,10 @@ def _roast_or_kudos_line(
         if (elevation_gain_m / distance_km) < _ELEVATION_ROAST_M_PER_KM:
             return random.choice(_ELEVATION_ROAST).format(km=round(distance_km))
 
-    # Clearing the threshold by 2x+ ("absolutely smashed it") pulls from a
-    # distinct, more emphatic pool instead of the everyday kudos mix — see
-    # _KUDOS_SMASH_MULTIPLIER. Sport-specific lines are still mixed in for
-    # flavor/variety, but weighted 2:1 in favor of _KUDOS_SMASH so the
-    # emphatic tone actually shows up most of the time rather than being a
-    # coin flip against the (otherwise-identical-sounding) regular
-    # sport-specific kudos pool.
-    if distance_m >= threshold_m * _KUDOS_SMASH_MULTIPLIER:
-        sport_lines = _KUDOS_SPORT.get(bucket, [])
-        pool = _KUDOS_SMASH + sport_lines
-        weights = [2] * len(_KUDOS_SMASH) + [1] * len(sport_lines)
-        return random.choices(pool, weights=weights, k=1)[0]
-
-    pool = _KUDOS_GENERAL + _KUDOS_LEADERBOARD + _KUDOS_SPORT.get(bucket, [])
+    # One flat mix-and-match pool for any qualifying activity, regardless of
+    # by how much it cleared the threshold — general, leaderboard-flavored,
+    # "smashed it", and sport-specific lines all in the same rotation.
+    pool = _KUDOS_GENERAL + _KUDOS_LEADERBOARD + _KUDOS_SMASH + _KUDOS_SPORT.get(bucket, [])
     return random.choice(pool)
 
 
