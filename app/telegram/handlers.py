@@ -251,7 +251,7 @@ async def _check_approval_or_prompt(update: Update, user: User) -> bool:
     if user.approval_status == "rejected":
         await update.message.reply_text(
             "Your request to join wasn't approved\\. If you think this is a "
-            "mistake, please reach out to Dileep directly\\.",
+            "mistake, please reach out to the BMCC Bot Admin directly\\.",
             parse_mode="MarkdownV2",
         )
         return False
@@ -309,7 +309,7 @@ async def _handle_admin_join_decision(query, data: str) -> None:
                 chat_id=tg_id,
                 text=(
                     "Your request to join wasn't approved. If you think this "
-                    "is a mistake, please reach out to Dileep directly."
+                    "is a mistake, please reach out to the BMCC Bot Admin directly."
                 ),
             )
         except Exception:
