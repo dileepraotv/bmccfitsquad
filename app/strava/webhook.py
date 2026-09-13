@@ -7,6 +7,17 @@ Strava webhook protocol
 2. Events: Strava POSTs JSON to the callback URL within seconds of each event.
    We MUST respond with HTTP 200 within 2 seconds.
 
+Direct vs. hub-relayed delivery
+--------------------------------
+Strava allows exactly one webhook subscription per app, and this app's
+Strava credentials are shared with hub.beyondmiles.cc — so at any given
+time, Strava's push goes to *either* this app's own POST /strava/webhook
+*or* to the hub, which relays it here via POST /hub/webhook-forward. Both
+routes call the same _ingest_strava_payload() and are always kept live
+regardless of which one Strava is actually calling — switching between
+them is purely a Strava subscription callback_url change (see
+GET /ops/fix-webhook-subscription's target_url param), never a deploy.
+
 Durable ack/process split
 --------------------------
 Rather than doing the real work (token refresh, Strava fetch, DB write,
@@ -50,6 +61,13 @@ from app.strava.client import fetch_activity_detail, view_webhook_subscription
 logger = logging.getLogger(__name__)
 settings = get_settings()
 router = APIRouter()
+
+# Separate, unprefixed router for the hub-relay endpoint — `router` above is
+# mounted in app/main.py with prefix="/strava" (so its routes land at
+# /strava/webhook etc.), but /hub/webhook-forward is deliberately namespaced
+# under /hub instead, matching the "who is calling this" convention rather
+# than living oddly at /strava/hub/webhook-forward.
+hub_router = APIRouter()
 
 # How long to keep deduplication keys in Redis (24 hours)
 _DEDUP_TTL_SECONDS = 86_400
@@ -117,20 +135,23 @@ async def strava_webhook_status():
 
 
 # ---------------------------------------------------------------------------
-# Webhook event receiver — POST /strava/webhook
+# Webhook event receiver — POST /strava/webhook (direct from Strava)
+# and POST /hub/webhook-forward (relayed by hub.beyondmiles.cc)
 # ---------------------------------------------------------------------------
+# Both routes funnel into the same _ingest_strava_payload() below, so
+# whichever one is currently the live front door for Strava's push
+# (controlled entirely by which callback_url the single app-wide webhook
+# subscription points at — see /ops/fix-webhook-subscription), the
+# durability/dedup/processing guarantees are identical. Switching between
+# them is a Strava subscription change, never a code change.
 
-@router.post(
-    "/webhook",
-    status_code=status.HTTP_200_OK,
-    summary="Receive Strava activity events",
-)
-async def strava_webhook_event(request: Request):
+async def _ingest_strava_payload(payload: dict) -> dict:
     """Durably persist a Strava event, ack, then process in the background.
 
     1. INSERT a WebhookEvent row (processed_at=NULL) — a single fast write,
        comfortably inside Strava's 2-second ack window.
-    2. Return HTTP 200 immediately.
+    2. Return immediately (caller acks its own caller — Strava directly, or
+       the hub relay — right after this returns).
     3. fire_and_forget the real processing — if it fails or the process is
        killed mid-flight, the row stays unprocessed and is retried by the
        next cron tick's repair pass instead of being lost forever.
@@ -142,8 +163,7 @@ async def strava_webhook_event(request: Request):
     - ``athlete / update``   → handle deauthorisation
     """
     from app.tasks import fire_and_forget
-    payload = await request.json()
-    logger.debug("Strava webhook payload received: %s", payload)
+    logger.debug("Strava event payload received: %s", payload)
 
     aspect_type: str = payload.get("aspect_type", "")
     object_type: str = payload.get("object_type", "")
@@ -178,8 +198,54 @@ async def strava_webhook_event(request: Request):
 
     fire_and_forget(process_webhook_event(event_id))
 
-    # Always return 200 immediately — Strava will retry on any other status
     return {"status": "ok"}
+
+
+@router.post(
+    "/webhook",
+    status_code=status.HTTP_200_OK,
+    summary="Receive Strava activity events directly",
+)
+async def strava_webhook_event(request: Request):
+    """Direct-from-Strava delivery — live whenever the app-wide webhook
+    subscription's callback_url points at this app. See
+    _ingest_strava_payload() for the actual durability/processing logic.
+    """
+    payload = await request.json()
+    result = await _ingest_strava_payload(payload)
+    # Always return 200 immediately — Strava will retry on any other status
+    return result
+
+
+@hub_router.post(
+    "/hub/webhook-forward",
+    status_code=status.HTTP_200_OK,
+    summary="Receive a Strava activity event relayed by hub.beyondmiles.cc",
+)
+async def hub_webhook_forward(request: Request):
+    """Relayed delivery — live whenever the app-wide webhook subscription
+    points at the hub instead of at this app, and the hub forwards each
+    event on here.
+
+    This endpoint is never Strava's own delivery target (Strava never
+    calls it directly, and never GET-challenges it), so it carries no
+    hub.challenge handshake of its own — just a shared-secret bearer check,
+    since this is server-to-server traffic between two apps we control.
+
+    Deliberately kept live and deployed at all times, cutover or not — the
+    only thing that determines whether it ever actually receives traffic
+    is which callback_url Strava's single subscription currently points
+    at. Rolling back to direct delivery never requires removing or
+    disabling this route.
+    """
+    auth_header = request.headers.get("authorization", "")
+    expected = f"Bearer {settings.hub_forward_secret}"
+    if not settings.hub_forward_secret or auth_header != expected:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid or missing secret")
+
+    payload = await request.json()
+    result = await _ingest_strava_payload(payload)
+    return result
 
 
 async def touch_heartbeat() -> None:

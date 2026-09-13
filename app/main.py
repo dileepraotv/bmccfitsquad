@@ -6,7 +6,8 @@ Routes
   GET|HEAD /ping            — instant keep-alive (UptimeRobot pings this every 5 min)
   GET  /health              — liveness probe with cached DB check
   GET  /strava/webhook      — Strava hub challenge verification
-  POST /strava/webhook      — Strava activity / athlete events
+  POST /strava/webhook      — Strava activity / athlete events (direct delivery)
+  POST /hub/webhook-forward — Strava activity / athlete events relayed by hub.beyondmiles.cc
   GET  /strava/callback     — OAuth redirect from Strava after user approval
   POST /telegram/webhook    — Telegram bot updates
 
@@ -32,6 +33,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.database import check_db_connection, init_db
 from app.redis_client import close_redis, get_redis
+from app.strava.webhook import hub_router as strava_hub_router
 from app.strava.webhook import router as strava_router
 from app.telegram.bot import router as telegram_router
 from app.telegram.bot import setup_bot, teardown_bot
@@ -138,6 +140,7 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 
 app.include_router(strava_router, prefix="/strava", tags=["strava"])
+app.include_router(strava_hub_router, tags=["strava"])  # /hub/webhook-forward — no prefix, see webhook.py
 app.include_router(telegram_router, prefix="/telegram", tags=["telegram"])
 
 # ---------------------------------------------------------------------------
@@ -280,18 +283,27 @@ async def recent_errors(secret: str = ""):
 @app.get(
     "/ops/fix-webhook-subscription",
     tags=["ops"],
-    summary="Delete and re-create the Strava webhook subscription pointing at BASE_URL",
+    summary="Delete and re-create the Strava webhook subscription pointing at a given callback_url",
 )
-async def ops_fix_webhook_subscription(secret: str = "", confirm: bool = False):
+async def ops_fix_webhook_subscription(secret: str = "", confirm: bool = False, target_url: str = ""):
     """Strava only allows one webhook subscription per app, so this is the
     delete-then-recreate dance scripts/register_strava_webhook.py does
     locally, exposed here so it can be run against the deployed
     ENCRYPTION_KEY-having environment without needing local Strava
     credentials.
 
+    Also doubles as the single switch for cutting real-time delivery over
+    to/back from the hub relay (see app/strava/webhook.py's module
+    docstring) — pass ?target_url=<hub's forward URL> to hand delivery to
+    the hub, or ?target_url=<this app's own /strava/webhook> (the default
+    when target_url is omitted) to roll back to direct delivery. Either
+    way this app's own receiving code never changes — only which
+    callback_url Strava is told to call.
+
     Strava sends a synchronous GET hub.challenge to the new callback_url
-    as part of creating the subscription, so this app must already be
-    live and publicly reachable at BASE_URL for the create step to succeed.
+    as part of creating the subscription, so *that* callback_url's own app
+    must already be live and publicly reachable for the create step to
+    succeed — test it manually first if it's not this app.
 
     ?confirm=true is required to actually delete/create — without it this
     just reports the current subscription so you can see what would change.
@@ -308,9 +320,13 @@ async def ops_fix_webhook_subscription(secret: str = "", confirm: bool = False):
     )
 
     existing = await view_webhook_subscription()
-    target_url = settings.strava_webhook_callback_url
-    valid_urls = settings.strava_webhook_valid_callback_urls
-    already_ok = any(s.get("callback_url") in valid_urls for s in existing)
+    target_url = target_url or settings.strava_webhook_callback_url
+    # Deliberately compared against target_url itself, not the broader
+    # strava_webhook_valid_callback_urls set — a caller asking to move the
+    # subscription to the hub shouldn't be told "already correct" just
+    # because this app's own URL (also a member of that set) happens to be
+    # what's currently registered.
+    already_ok = any(s.get("callback_url") == target_url for s in existing)
 
     if not confirm:
         return {

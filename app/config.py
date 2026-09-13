@@ -37,6 +37,14 @@ class Settings(BaseSettings):
     # this set.
     admin_telegram_id: int | None = None
 
+    # Hub-relayed webhook delivery (see app/strava/webhook.py's module
+    # docstring) — Strava allows only one webhook subscription per app, so
+    # at any given time it points at either this app directly or at the
+    # hub, which relays here. Both left empty means "hub relay isn't set
+    # up yet"; the direct POST /strava/webhook path keeps working either way.
+    hub_forward_secret: str = ""        # shared bearer secret, must match hub's config
+    hub_webhook_callback_url: str = ""  # e.g. https://hub.beyondmiles.cc/api/strava/webhook
+
     # Deployment
     app_env: str = "development"
     base_url: str  # Public HTTPS URL used to register webhooks, e.g. https://myapp.up.railway.app
@@ -59,15 +67,22 @@ class Settings(BaseSettings):
 
     @property
     def strava_webhook_valid_callback_urls(self) -> set[str]:
-        """Both are legitimate: /webhook is what the live Strava
-        subscription is actually registered to (see the comment above the
-        /webhook alias routes in app/main.py — it predates the
-        /strava/webhook prefix and was never re-registered rather than
-        risk losing the subscription), /strava/webhook is the "canonical"
-        namespaced path. The same handlers serve both, so either one
-        being registered is healthy — comparing against just one of them
-        produces a permanent false-positive mismatch warning."""
-        return {self.strava_webhook_callback_url, f"{self.base_url}/webhook"}
+        """/webhook and /strava/webhook are both legitimate direct-delivery
+        URLs: /webhook is what the live Strava subscription is actually
+        registered to historically (see the comment above the /webhook
+        alias routes in app/main.py — it predates the /strava/webhook
+        prefix and was never re-registered rather than risk losing the
+        subscription), /strava/webhook is the "canonical" namespaced path.
+        hub_webhook_callback_url is a third legitimate option once the hub
+        relay is in use (see app/strava/webhook.py) — Strava's subscription
+        then points there instead, and the hub forwards events here.
+        Comparing against just one of these produces a permanent
+        false-positive mismatch warning the moment any of the others is
+        what's actually registered."""
+        urls = {self.strava_webhook_callback_url, f"{self.base_url}/webhook"}
+        if self.hub_webhook_callback_url:
+            urls.add(self.hub_webhook_callback_url)
+        return urls
 
 
 @lru_cache
