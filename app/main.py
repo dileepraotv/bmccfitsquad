@@ -379,6 +379,37 @@ async def ops_test_admin_alert(secret: str = ""):
     return {"sent": True, "admin_telegram_id": settings.admin_telegram_id}
 
 
+@app.post(
+    "/ops/notify-admin",
+    tags=["ops"],
+    summary="Relay an alert from a trusted external service onto the admin's Telegram DM",
+)
+async def ops_notify_admin(request: Request):
+    """Lets a trusted external service — right now, hub's webhook relay
+    (bmcc-webhook-service) — ride this bot's existing Telegram admin-alert
+    channel instead of standing up its own separate Slack/email/SMS
+    integration just to page one person. Same trust boundary and secret as
+    POST /hub/webhook-forward, since both are hub-to-bot server calls.
+
+    Body: {"text": "...", "source": "hub-webhook-service"}  (source optional)
+    """
+    auth_header = request.headers.get("authorization", "")
+    expected = f"Bearer {settings.hub_forward_secret}"
+    if not settings.hub_forward_secret or auth_header != expected:
+        raise HTTPException(status_code=401, detail="invalid or missing secret")
+
+    body = await request.json()
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="'text' is required")
+    source = body.get("source") or "external service"
+
+    from app.tasks import _notify_admin
+
+    await _notify_admin(f"🔌 *Alert from {source}*\n{text}")
+    return {"status": "ok"}
+
+
 @app.get(
     "/ops/scan-duplicates",
     tags=["ops"],
