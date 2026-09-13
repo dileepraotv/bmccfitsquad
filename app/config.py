@@ -31,11 +31,18 @@ class Settings(BaseSettings):
     # to authenticate the /cron/sync-all keep-alive endpoint.
     cron_secret: str = ""
 
-    # Telegram user ID to DM with system-health alerts (weekly reconcile
-    # drift found, Strava webhook subscription mismatch). Optional — these
-    # checks still run and log either way, but can't page anyone without
-    # this set.
+    # Telegram user ID(s) to DM with system-health alerts (weekly reconcile
+    # drift found, Strava webhook subscription mismatch, new-user join
+    # requests). Optional — these checks still run and log either way, but
+    # can't page anyone without at least one of these set. A second admin
+    # is optional; either one can Approve/Reject join requests, and both
+    # receive every alert.
     admin_telegram_id: int | None = None
+    admin_telegram_id_2: int | None = None
+
+    @property
+    def admin_telegram_ids(self) -> list[int]:
+        return [i for i in (self.admin_telegram_id, self.admin_telegram_id_2) if i is not None]
 
     # Hub-relayed webhook delivery (see app/strava/webhook.py's module
     # docstring) — Strava allows only one webhook subscription per app, so

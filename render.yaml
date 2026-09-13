@@ -31,4 +31,6 @@ services:
       - key: CRON_SECRET
         sync: false
       - key: ADMIN_TELEGRAM_ID
-        sync: false          # optional — receives weekly drift / webhook-health alerts
+        sync: false          # optional — receives weekly drift / webhook-health / join-request alerts
+      - key: ADMIN_TELEGRAM_ID_2
+        sync: false          # optional — second admin, gets the exact same alerts

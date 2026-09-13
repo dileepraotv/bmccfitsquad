@@ -1343,18 +1343,24 @@ async def process_pending_webhook_events(*, max_events: int = 50) -> dict:
 
 
 async def _notify_admin(text: str) -> None:
-    """Best-effort DM to ADMIN_TELEGRAM_ID for system-health alerts (weekly
-    reconcile drift, webhook subscription issues). No-ops quietly if unset
+    """Best-effort DM to every configured admin (ADMIN_TELEGRAM_ID and, if
+    set, ADMIN_TELEGRAM_ID_2) for system-health alerts (weekly reconcile
+    drift, webhook subscription issues). No-ops quietly if neither is set
     — these checks still run and log either way, they just can't page
-    anyone without it configured."""
-    if not settings.admin_telegram_id:
+    anyone without at least one configured."""
+    admin_ids = settings.admin_telegram_ids
+    if not admin_ids:
         return
     try:
         bot = TelegramBot(token=settings.telegram_bot_token)
         async with bot:
-            await bot.send_message(
-                chat_id=settings.admin_telegram_id, text=text, parse_mode="Markdown",
-            )
+            for admin_id in admin_ids:
+                try:
+                    await bot.send_message(
+                        chat_id=admin_id, text=text, parse_mode="Markdown",
+                    )
+                except Exception:
+                    logger.warning("_notify_admin: failed to send DM to admin_id=%s", admin_id)
     except Exception:
         logger.warning("_notify_admin: failed to send DM")
 

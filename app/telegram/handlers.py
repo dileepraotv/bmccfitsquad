@@ -211,27 +211,32 @@ async def _get_or_create_user(update: Update) -> User:
 
 
 async def _notify_admin_of_join_request(update: Update, user: User) -> None:
-    """DM the admin an Approve/Reject prompt for a brand-new user."""
-    if not settings.admin_telegram_id:
+    """DM every configured admin an Approve/Reject prompt for a brand-new
+    user. Either admin can act on it — see _handle_admin_join_decision for
+    how a second admin tapping an already-resolved request is handled."""
+    admin_ids = settings.admin_telegram_ids
+    if not admin_ids:
         return
-    try:
-        username = f"@{user.telegram_username}" if user.telegram_username else "no username"
-        await update.get_bot().send_message(
-            chat_id=settings.admin_telegram_id,
-            text=(
-                "🆕 *New join request*\n"
-                f"{_escape_md(user.telegram_first_name)} \\({_escape_md(username)}\\) "
-                "wants to join BMCC FitSquad\\.\n"
-                f"Telegram ID: `{user.telegram_user_id}`"
-            ),
-            parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ Approve", callback_data=f"adminjoin:approve:{user.telegram_user_id}"),
-                InlineKeyboardButton("❌ Reject", callback_data=f"adminjoin:reject:{user.telegram_user_id}"),
-            ]]),
-        )
-    except Exception:
-        logger.warning("_notify_admin_of_join_request: failed to DM admin", exc_info=True)
+    username = f"@{user.telegram_username}" if user.telegram_username else "no username"
+    bot = update.get_bot()
+    for admin_id in admin_ids:
+        try:
+            await bot.send_message(
+                chat_id=admin_id,
+                text=(
+                    "🆕 *New join request*\n"
+                    f"{_escape_md(user.telegram_first_name)} \\({_escape_md(username)}\\) "
+                    "wants to join BMCC FitSquad\\.\n"
+                    f"Telegram ID: `{user.telegram_user_id}`"
+                ),
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Approve", callback_data=f"adminjoin:approve:{user.telegram_user_id}"),
+                    InlineKeyboardButton("❌ Reject", callback_data=f"adminjoin:reject:{user.telegram_user_id}"),
+                ]]),
+            )
+        except Exception:
+            logger.warning("_notify_admin_of_join_request: failed to DM admin_id=%s", admin_id, exc_info=True)
 
 
 async def _check_approval_or_prompt(update: Update, user: User) -> bool:
@@ -262,9 +267,12 @@ async def _handle_admin_join_decision(query, data: str) -> None:
     """Admin tapped Approve/Reject on a "New join request" DM.
 
     data is "adminjoin:approve:<telegram_user_id>" or
-    "adminjoin:reject:<telegram_user_id>".
+    "adminjoin:reject:<telegram_user_id>". With two admins configured,
+    both get the same prompt — whichever taps first wins, and the other
+    admin's copy is told it was already handled instead of silently
+    re-processing (and re-DMing the joining user) a second time.
     """
-    if not settings.admin_telegram_id or query.from_user.id != settings.admin_telegram_id:
+    if not settings.admin_telegram_ids or query.from_user.id not in settings.admin_telegram_ids:
         await query.answer("Not authorized.", show_alert=True)
         return
 
@@ -276,6 +284,11 @@ async def _handle_admin_join_decision(query, data: str) -> None:
         user = result.scalar_one_or_none()
         if user is None:
             await query.edit_message_text("⚠️ That user no longer exists.")
+            return
+        if user.approval_status != "pending":
+            # Already resolved by the other admin — don't re-process (and
+            # don't re-DM the joining user a second time).
+            await query.edit_message_text(f"ℹ️ Already {user.approval_status} — no action taken.")
             return
         user.approval_status = "approved" if decision == "approve" else "rejected"
         await db.commit()

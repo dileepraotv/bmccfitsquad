@@ -366,17 +366,17 @@ async def ops_test_admin_alert(secret: str = ""):
     """
     if not settings.cron_secret or secret != settings.cron_secret:
         raise HTTPException(status_code=401, detail="invalid or missing secret")
-    if not settings.admin_telegram_id:
+    if not settings.admin_telegram_ids:
         raise HTTPException(status_code=400, detail="ADMIN_TELEGRAM_ID is not configured")
 
     from app.tasks import _notify_admin
 
     await _notify_admin(
-        "✅ *Test alert* — if you're reading this, ADMIN_TELEGRAM_ID is "
+        "✅ *Test alert* — if you're reading this, your admin Telegram ID is "
         "wired up correctly. Weekly reconcile drift and webhook-health "
         "alerts will reach you here too."
     )
-    return {"sent": True, "admin_telegram_id": settings.admin_telegram_id}
+    return {"sent": True, "admin_telegram_ids": settings.admin_telegram_ids}
 
 
 @app.post(
