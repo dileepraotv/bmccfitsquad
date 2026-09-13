@@ -60,6 +60,15 @@ class User(Base):
 
     # Misc
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Join-request gate — "pending" until the admin approves/rejects via the
+    # Approve/Reject buttons sent to admin_telegram_id (see
+    # app.telegram.handlers._get_or_create_user / handle_callback's
+    # "adminjoin:" branch). Only "approved" users are handed a Strava OAuth
+    # link from /start or /connect. Existing rows default to "approved" so
+    # this doesn't lock out anyone already using the bot.
+    approval_status: Mapped[str] = mapped_column(
+        Text, default="approved", server_default="approved", nullable=False
+    )
     # Opt-out (on by default) — swaps the activity notification's greeting
     # for a contextual roast/kudos line based on distance vs sport threshold.
     # See app.telegram.notifications for the selection logic.

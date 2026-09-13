@@ -52,6 +52,7 @@ from telegram.ext import (
     filters,
 )
 
+from app.config import get_settings
 from app.database import AsyncSessionLocal
 from app.models import Activity, Goal, GroupChat, User
 from app.stats.calculator import calculate_stats, format_stats_message
@@ -84,6 +85,7 @@ from app.utils import SEPARATOR as _SEPARATOR
 from app.utils import escape_markdown_v2 as _escape_md
 
 logger = logging.getLogger(__name__)
+settings = get_settings()
 
 _QUOTES_PATH = pathlib.Path("data/quotes.txt")
 
@@ -164,15 +166,29 @@ def register_handlers(app: Application) -> None:
 # ---------------------------------------------------------------------------
 
 async def _get_or_create_user(update: Update) -> User:
-    """Upsert the Telegram user into the DB and return the ORM object."""
+    """Upsert the Telegram user into the DB and return the ORM object.
+
+    Brand-new rows are inserted with approval_status="pending" (existing
+    rows are left untouched by the ON CONFLICT branch below, so returning
+    users' status never gets reset) and the admin is DMed an Approve/Reject
+    prompt — see cmd_start/cmd_connect for where "pending" is actually
+    enforced (no OAuth link handed out), and handle_callback's
+    "adminjoin:" branch for the admin-side decision.
+    """
     tg_user = update.effective_user
     async with AsyncSessionLocal() as db:
+        existing = await db.execute(
+            select(User.id).where(User.telegram_user_id == tg_user.id)
+        )
+        is_new = existing.scalar_one_or_none() is None
+
         stmt = (
             pg_insert(User)
             .values(
                 telegram_user_id=tg_user.id,
                 telegram_username=tg_user.username,
                 telegram_first_name=tg_user.first_name or "Friend",
+                approval_status="pending",
             )
             .on_conflict_do_update(
                 index_elements=["telegram_user_id"],
@@ -185,7 +201,119 @@ async def _get_or_create_user(update: Update) -> User:
         )
         result = await db.execute(stmt)
         await db.commit()
-        return result.fetchone()[0]
+        user = result.fetchone()[0]
+
+    if is_new:
+        from app.tasks import fire_and_forget
+        fire_and_forget(_notify_admin_of_join_request(update, user))
+
+    return user
+
+
+async def _notify_admin_of_join_request(update: Update, user: User) -> None:
+    """DM the admin an Approve/Reject prompt for a brand-new user."""
+    if not settings.admin_telegram_id:
+        return
+    try:
+        username = f"@{user.telegram_username}" if user.telegram_username else "no username"
+        await update.get_bot().send_message(
+            chat_id=settings.admin_telegram_id,
+            text=(
+                "🆕 *New join request*\n"
+                f"{_escape_md(user.telegram_first_name)} \\({_escape_md(username)}\\) "
+                "wants to join BMCC FitSquad\\.\n"
+                f"Telegram ID: `{user.telegram_user_id}`"
+            ),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Approve", callback_data=f"adminjoin:approve:{user.telegram_user_id}"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"adminjoin:reject:{user.telegram_user_id}"),
+            ]]),
+        )
+    except Exception:
+        logger.warning("_notify_admin_of_join_request: failed to DM admin", exc_info=True)
+
+
+async def _check_approval_or_prompt(update: Update, user: User) -> bool:
+    """Gate for the two entry points that hand out a Strava OAuth link
+    (cmd_start, cmd_connect). Returns True iff the user is free to
+    proceed; otherwise sends the appropriate pending/rejected message and
+    returns False.
+    """
+    if user.approval_status == "pending":
+        await update.message.reply_text(
+            "🕒 Thanks for reaching out! Your request to join *BMCC FitSquad* "
+            "is pending admin approval\\. You'll get a message here the "
+            "moment you're approved\\.",
+            parse_mode="MarkdownV2",
+        )
+        return False
+    if user.approval_status == "rejected":
+        await update.message.reply_text(
+            "Your request to join wasn't approved\\. If you think this is a "
+            "mistake, please reach out to Dileep directly\\.",
+            parse_mode="MarkdownV2",
+        )
+        return False
+    return True
+
+
+async def _handle_admin_join_decision(query, data: str) -> None:
+    """Admin tapped Approve/Reject on a "New join request" DM.
+
+    data is "adminjoin:approve:<telegram_user_id>" or
+    "adminjoin:reject:<telegram_user_id>".
+    """
+    if not settings.admin_telegram_id or query.from_user.id != settings.admin_telegram_id:
+        await query.answer("Not authorized.", show_alert=True)
+        return
+
+    _, decision, tg_id_raw = data.split(":")
+    tg_id = int(tg_id_raw)
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(User).where(User.telegram_user_id == tg_id))
+        user = result.scalar_one_or_none()
+        if user is None:
+            await query.edit_message_text("⚠️ That user no longer exists.")
+            return
+        user.approval_status = "approved" if decision == "approve" else "rejected"
+        await db.commit()
+        name = user.telegram_first_name
+
+    if decision == "approve":
+        await query.edit_message_text(f"✅ Approved {name}.")
+        try:
+            from app.strava.auth import build_authorization_url, generate_oauth_state
+            state = await generate_oauth_state(tg_id)
+            auth_url = build_authorization_url(state)
+            await query.get_bot().send_message(
+                chat_id=tg_id,
+                text=(
+                    "🎉 You've been approved to join *BMCC FitSquad*\\!\n\n"
+                    "*Connect once, and I'll take it from there:* automatic "
+                    "activity notifications, always\\-current stats, and live "
+                    "goal progress — every time you log a ride, run, swim, or "
+                    "walk on Strava\\.\n\n"
+                    "Tap *Connect Strava* below to get started\\."
+                ),
+                parse_mode="MarkdownV2",
+                reply_markup=connect_strava_keyboard(auth_url),
+            )
+        except Exception:
+            logger.warning("_handle_admin_join_decision: failed to DM approved user %s", tg_id, exc_info=True)
+    else:
+        await query.edit_message_text(f"❌ Rejected {name}.")
+        try:
+            await query.get_bot().send_message(
+                chat_id=tg_id,
+                text=(
+                    "Your request to join wasn't approved. If you think this "
+                    "is a mistake, please reach out to Dileep directly."
+                ),
+            )
+        except Exception:
+            logger.warning("_handle_admin_join_decision: failed to DM rejected user %s", tg_id, exc_info=True)
 
 
 def _random_quote() -> str:
@@ -251,6 +379,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
             "Sorry, I couldn't reach the database right now. Please try again in a moment."
         )
+        return
+
+    if not await _check_approval_or_prompt(update, user):
         return
     name = update.effective_user.first_name or "there"
 
@@ -335,6 +466,9 @@ async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(
             "Sorry, I couldn't reach the database right now. Please try again in a moment."
         )
+        return
+
+    if not await _check_approval_or_prompt(update, user):
         return
 
     # Already connected — don't repeat first-time setup copy, and don't
@@ -2556,6 +2690,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     query = update.callback_query
     await query.answer()
     data = query.data or ""
+
+    if data.startswith("adminjoin:"):
+        await _handle_admin_join_decision(query, data)
+        return
 
     # Activity edit — description step (must be before activity:edit:<id>)
     if data == "activity:desc_skip":
