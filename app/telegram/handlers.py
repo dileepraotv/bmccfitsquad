@@ -141,6 +141,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("quote",         cmd_quote,         filters=_priv))
     app.add_handler(CommandHandler("recap",         cmd_recap,         filters=_priv))
     app.add_handler(CommandHandler("yearrecap",     cmd_yearrecap,     filters=_priv))
+    app.add_handler(CommandHandler(["broadcast", "adminbroadcast"], cmd_broadcast, filters=_priv))
 
     app.add_handler(CallbackQueryHandler(handle_callback))
 
@@ -956,6 +957,57 @@ async def cmd_yearrecap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await send_recap_message(
         context.bot, update.effective_chat.id, text, reply_markup=recap_goal_prompt_keyboard(),
     )
+
+
+async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin-only — DM every active bot user with a one-off announcement.
+
+    Usage: /broadcast <message>  (or /adminbroadcast <message> — same thing).
+    Non-admins get a polite "not an admin" reply instead of anything sent.
+    """
+    if update.effective_user.id not in settings.admin_telegram_ids:
+        await update.message.reply_text(
+            "🙏 Sorry, this command is only available to BMCC Bot Admins."
+        )
+        return
+
+    # context.args collapses whitespace and drops line breaks — pull the
+    # raw text after the command instead, so multi-line announcements
+    # (like the "we changed our webhook architecture" one) stay intact.
+    raw = update.message.text or ""
+    _, _, text = raw.partition(" ")
+    text = text.strip()
+
+    if not text:
+        await update.message.reply_text(
+            "Usage: /broadcast <message>\n\n"
+            "Example: /broadcast Hey folks! Quick update about the bot..."
+        )
+        return
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(User).where(User.is_active.is_(True)))
+        users = result.scalars().all()
+
+    await update.message.reply_text(f"📣 Sending to {len(users)} user(s)...")
+
+    import asyncio as _asyncio
+
+    sent, failed = 0, []
+    bot = update.get_bot()
+    for user in users:
+        try:
+            await bot.send_message(chat_id=user.telegram_user_id, text=text)
+            sent += 1
+        except Exception as exc:
+            failed.append(user.telegram_first_name)
+            logger.warning("cmd_broadcast: failed for user_id=%s: %s", user.id, exc)
+        await _asyncio.sleep(0.1)
+
+    summary = f"✅ Broadcast sent: {sent}/{len(users)} delivered."
+    if failed:
+        summary += f"\n⚠️ Failed: {', '.join(failed)}"
+    await update.message.reply_text(summary)
 
 
 async def cmd_notifications(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
