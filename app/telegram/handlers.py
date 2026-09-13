@@ -141,7 +141,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("quote",         cmd_quote,         filters=_priv))
     app.add_handler(CommandHandler("recap",         cmd_recap,         filters=_priv))
     app.add_handler(CommandHandler("yearrecap",     cmd_yearrecap,     filters=_priv))
-    app.add_handler(CommandHandler(["broadcast", "adminbroadcast"], cmd_broadcast, filters=_priv))
+    app.add_handler(CommandHandler("broadcast",     cmd_broadcast,     filters=_priv))
 
     app.add_handler(CallbackQueryHandler(handle_callback))
 
@@ -962,7 +962,7 @@ async def cmd_yearrecap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Admin-only — DM every active bot user with a one-off announcement.
 
-    Usage: /broadcast <message>  (or /adminbroadcast <message> — same thing).
+    Usage: /broadcast <message>
     Non-admins get a polite "not an admin" reply instead of anything sent.
     """
     if update.effective_user.id not in settings.admin_telegram_ids:
