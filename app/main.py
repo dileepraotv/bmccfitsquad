@@ -411,6 +411,64 @@ async def ops_notify_admin(request: Request):
 
 
 @app.get(
+    "/ops/broadcast",
+    tags=["ops"],
+    summary="Send a one-off announcement DM to every active bot user",
+)
+async def ops_broadcast(secret: str = "", text: str = "", dry_run: bool = True):
+    """Ad-hoc announcement broadcast — e.g. "we changed how activities are
+    delivered, ping Dileep if notifications stop working".
+
+    Sends to every is_active user (not just Strava-connected ones), one DM
+    each, with a small delay between sends to stay well under Telegram's
+    ~30 msg/sec global rate limit.
+
+    Protected by: ?secret={CRON_SECRET} query parameter.
+    Defaults to dry_run=true (no messages sent, just returns the recipient
+    count) — call with dry_run=false to actually send.
+    """
+    if not settings.cron_secret or secret != settings.cron_secret:
+        raise HTTPException(status_code=401, detail="invalid or missing secret")
+    text = text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="?text= is required")
+
+    import asyncio as _asyncio
+
+    from sqlalchemy import select
+    from telegram import Bot as TelegramBot
+    from telegram.error import TelegramError
+
+    from app.database import AsyncSessionLocal
+    from app.models import User
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(User).where(User.is_active.is_(True)))
+        users = result.scalars().all()
+
+    if dry_run:
+        return {
+            "dry_run": True,
+            "would_send_to": len(users),
+            "recipients": [u.telegram_first_name for u in users],
+        }
+
+    sent, failed = 0, []
+    bot = TelegramBot(token=settings.telegram_bot_token)
+    async with bot:
+        for user in users:
+            try:
+                await bot.send_message(chat_id=user.telegram_user_id, text=text)
+                sent += 1
+            except TelegramError as exc:
+                logger.warning("ops_broadcast: failed for user_id=%s: %s", user.id, exc)
+                failed.append({"name": user.telegram_first_name, "error": str(exc)})
+            await _asyncio.sleep(0.1)
+
+    return {"dry_run": False, "total": len(users), "sent": sent, "failed": failed}
+
+
+@app.get(
     "/ops/scan-duplicates",
     tags=["ops"],
     summary="One-off scan of activity history for possible duplicates + alert affected users",
