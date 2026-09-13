@@ -469,6 +469,70 @@ async def ops_broadcast(secret: str = "", text: str = "", dry_run: bool = True):
 
 
 @app.get(
+    "/ops/remove-user",
+    tags=["ops"],
+    summary="Permanently delete a user (and their activities/goals) by name",
+)
+async def ops_remove_user(secret: str = "", name: str = "", dry_run: bool = True):
+    """One-off cleanup for users who were never supposed to be onboarded
+    (e.g. accidental /start, wrong group).
+
+    ?name= matches (case-insensitively) against either Telegram first name
+    or Strava athlete name; the first match is deleted. Deleting the User
+    row cascades to their Activity and Goal rows (see app/models.py's
+    cascade="all, delete-orphan" relationships) — this is a hard, permanent
+    delete, not a deactivation.
+
+    Protected by: ?secret={CRON_SECRET} query parameter.
+    Defaults to dry_run=true (just previews the match) — call with
+    dry_run=false to actually delete.
+    """
+    if not settings.cron_secret or secret != settings.cron_secret:
+        raise HTTPException(status_code=401, detail="invalid or missing secret")
+    if not name:
+        raise HTTPException(status_code=400, detail="?name= is required")
+
+    from sqlalchemy import select
+
+    from app.database import AsyncSessionLocal
+    from app.models import User
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(User))
+        users = result.scalars().all()
+
+    needle = name.lower()
+    match = next(
+        (
+            u for u in users
+            if needle in (u.telegram_first_name or "").lower()
+            or needle in (u.strava_athlete_name or "").lower()
+        ),
+        None,
+    )
+    if match is None:
+        raise HTTPException(status_code=404, detail=f"no user matching name={name!r}")
+
+    preview = {
+        "telegram_user_id": match.telegram_user_id,
+        "telegram_first_name": match.telegram_first_name,
+        "strava_athlete_id": match.strava_athlete_id,
+        "strava_athlete_name": match.strava_athlete_name,
+    }
+
+    if dry_run:
+        return {"dry_run": True, "would_delete": preview}
+
+    async with AsyncSessionLocal() as db:
+        user = await db.get(User, match.id)
+        if user is not None:
+            await db.delete(user)
+            await db.commit()
+
+    return {"dry_run": False, "deleted": preview}
+
+
+@app.get(
     "/ops/scan-duplicates",
     tags=["ops"],
     summary="One-off scan of activity history for possible duplicates + alert affected users",
