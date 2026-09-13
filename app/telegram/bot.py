@@ -21,7 +21,7 @@ import logging
 
 import httpx
 from fastapi import APIRouter, Request, Response
-from telegram import BotCommand, Update
+from telegram import BotCommand, BotCommandScopeChat, Update
 from telegram.ext import Application, ApplicationBuilder
 
 from app.config import get_settings
@@ -125,6 +125,39 @@ async def setup_bot() -> None:
         BotCommand("skip",         "Skip the current step in an in-progress action"),
         BotCommand("help",         "Show all available commands"),
     ])
+
+    # Admin-only commands — shown only in the / menu for configured admins
+    # (via a per-chat scope), everyone else gets the default menu above.
+    # /broadcast still works for anyone who types it manually (see
+    # cmd_broadcast's own admin check) — this only controls menu visibility.
+    admin_commands = [
+        BotCommand("start",        "Welcome message and main menu"),
+        BotCommand("stats",        "View activity stats by sport and period"),
+        BotCommand("goals",        "Set, delete or check your fitness goals"),
+        BotCommand("recap",        "This month's stats so far, recapped"),
+        BotCommand("yearrecap",    "Preview your year in review so far"),
+        BotCommand("sync",         "Fetch latest activities (fast, day-to-day)"),
+        BotCommand("fullsync",     "Rebuild full history (use if stats look wrong)"),
+        BotCommand("duplicates",   "Check your history for possible duplicates"),
+        BotCommand("connect",      "Link your Strava account"),
+        BotCommand("disconnect",   "Unlink your Strava account"),
+        BotCommand("leaderboard",  "Monthly points leaderboard (multi-sport bonus)"),
+        BotCommand("quote",        "Random motivational quote"),
+        BotCommand("notifications", "How activity notifications are managed"),
+        BotCommand("roastmode",    "Toggle roast/kudos activity notifications"),
+        BotCommand("broadcast",    "[Admin] Send a message to every user"),
+        BotCommand("cancel",       "Cancel any in-progress action"),
+        BotCommand("skip",         "Skip the current step in an in-progress action"),
+        BotCommand("help",         "Show all available commands"),
+    ]
+    for admin_id in settings.admin_telegram_ids:
+        try:
+            await _application.bot.set_my_commands(
+                admin_commands, scope=BotCommandScopeChat(chat_id=admin_id),
+            )
+        except Exception:
+            logger.warning("Could not register admin command menu for chat_id=%s", admin_id, exc_info=True)
+
     logger.info("Telegram bot command menu registered")
 
 

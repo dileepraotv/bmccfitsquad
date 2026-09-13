@@ -461,10 +461,19 @@ _HELP_TEXT = (
     "🌐 [www\\.beyondmiles\\.cc](http://www.beyondmiles.cc) \\| 📸 @beyondmilescc"
 )
 
+# Appended to _HELP_TEXT only for configured admins — see cmd_help.
+_ADMIN_HELP_TEXT = (
+    "\n\n🛠️ *Admin*\n"
+    "/broadcast — Send a message to every active user"
+)
+
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = _HELP_TEXT
+    if update.effective_user.id in settings.admin_telegram_ids:
+        text += _ADMIN_HELP_TEXT
     await update.message.reply_text(
-        _HELP_TEXT,
+        text,
         parse_mode="MarkdownV2",
         disable_web_page_preview=True,
     )
