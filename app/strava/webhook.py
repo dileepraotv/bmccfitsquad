@@ -251,9 +251,17 @@ async def hub_webhook_forward(request: Request):
 async def touch_heartbeat() -> None:
     try:
         import time
-        from app.redis_client import get_redis, key_heartbeat
+        from app.redis_client import get_redis, key_heartbeat, key_last_webhook_event_at
         redis = await get_redis()
-        await redis.set(key_heartbeat(), str(int(time.time())))
+        now = str(int(time.time()))
+        await redis.set(key_heartbeat(), now)
+        # Separate from key_heartbeat() above, which catchup_sync_all_users()
+        # *also* stamps on every cron tick — this key only ever moves when a
+        # real Strava webhook event was actually received (direct or
+        # hub-relayed), so it can be used to detect "webhook delivery went
+        # quiet" specifically. See catchup_sync_all_users' polling-vs-webhook
+        # check.
+        await redis.set(key_last_webhook_event_at(), now)
     except Exception:
         logger.debug("Could not update heartbeat", exc_info=True)
 

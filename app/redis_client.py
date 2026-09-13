@@ -130,6 +130,26 @@ def key_webhook_health_check() -> str:
     return "ops:webhook_health_check:last_run_date"
 
 
+def key_last_webhook_event_at() -> str:
+    """Unix timestamp of the last successfully-ingested Strava webhook
+    event — set in app.strava.webhook._ingest_strava_payload, on *every*
+    event regardless of whether it arrived directly from Strava or
+    relayed via the hub. Deliberately separate from key_heartbeat(),
+    which catchup_sync_all_users() also stamps on every cron tick — that
+    makes key_heartbeat() useless on its own for telling "webhook delivery
+    specifically went quiet" apart from "the cron just ticked normally".
+    This key only ever moves when a real event was actually received."""
+    return "ops:webhook:last_event_at"
+
+
+def key_webhook_quiet_alert() -> str:
+    """Dedup/cooldown key so the "webhook delivery looks stalled but
+    polling is still finding new activities directly from Strava" alert
+    (see catchup_sync_all_users) doesn't re-fire on every single cron
+    tick for as long as the underlying problem persists."""
+    return "ops:webhook_quiet_alert:last_sent"
+
+
 # Recap text is no longer cached (see app/stats/recap.py) — removed
 # key_recap_text/key_yearly_recap_text/_RECAP_CACHE_VERSION.
 

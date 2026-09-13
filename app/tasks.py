@@ -1165,6 +1165,17 @@ _DAILY_SWEEP_WINDOW_SECONDS = 86_400  # 24 hours
 # ticks, independent of how often or how regularly the cron actually fires.
 _DAILY_SWEEP_SLOTS = 48
 
+# "Webhook delivery looks stalled" detection: if a polling layer (outage-gap
+# scan or daily sweep) discovers activities that weren't already in our DB —
+# i.e. they should have arrived instantly via webhook but didn't — and no
+# real webhook event (direct from Strava or relayed via the hub) has landed
+# in this long, that's a strong signal the hub relay (or its Strava
+# subscription) is down rather than just a quiet period with no activity.
+_WEBHOOK_QUIET_THRESHOLD_SECONDS = 1800  # 30 minutes
+# Once triggered, don't re-alert more than once per cooldown window even if
+# the condition keeps re-triggering on every subsequent tick.
+_WEBHOOK_QUIET_ALERT_COOLDOWN_SECONDS = 1800  # 30 minutes
+
 # Layer 4: each user is assigned a fixed day-of-week (Mon=0..Sun=6) on which
 # their entire Strava history is reconciled — shortened from monthly to
 # weekly so drift (missed webhooks, silent metric edits, sport-type
@@ -1528,6 +1539,19 @@ async def check_webhook_subscription_health(*, redis) -> dict:
         subs = await view_webhook_subscription()
     except Exception as exc:
         logger.warning("check_webhook_subscription_health: could not query Strava: %s", exc)
+        # Same daily dedup key already guards this, so this can't spam —
+        # but it must still alert: a silent auth failure here (e.g. a
+        # rotated client_secret) means we have *no idea* whether the
+        # subscription is even valid, which is exactly the kind of thing
+        # that bit us once already and went unnoticed for days.
+        fire_and_forget(_notify_admin(
+            "⚠️ *Strava webhook health check failed*\n"
+            f"Could not query Strava's push-subscription API: `{exc}`\n"
+            "This usually means STRAVA_CLIENT_ID/SECRET is stale or Strava "
+            "auth is otherwise broken — token refreshes for *all* users may "
+            "also be failing. Check Render env vars against the current "
+            "Strava app credentials."
+        ))
         return {"checked": True, "ok": None, "error": str(exc)}
 
     registered_urls = [s.get("callback_url") for s in subs]
@@ -1651,6 +1675,36 @@ async def catchup_sync_all_users() -> dict:
                     logger.exception("catchup_sync[daily-sweep]: error for user_id=%s", user.id)
                     errors += 1
             daily_sweep = {"users_processed": processed, "new_activities": new_activities, "errors": errors}
+
+    # --- Webhook-quiet detection: polling found activities webhooks should
+    # have delivered instantly, but no webhook event has landed recently --
+    polled_new_activities = (
+        (outage_scan["new_activities"] if outage_scan else 0)
+        + (daily_sweep["new_activities"] if daily_sweep else 0)
+    )
+    if polled_new_activities > 0:
+        from app.redis_client import key_last_webhook_event_at, key_webhook_quiet_alert
+
+        last_webhook_raw = await redis.get(key_last_webhook_event_at())
+        if last_webhook_raw is not None:
+            webhook_gap = now_ts - int(last_webhook_raw)
+            if webhook_gap > _WEBHOOK_QUIET_THRESHOLD_SECONDS:
+                dedup_key = key_webhook_quiet_alert()
+                if not await redis.get(dedup_key):
+                    await redis.set(dedup_key, "1", ex=_WEBHOOK_QUIET_ALERT_COOLDOWN_SECONDS)
+                    fire_and_forget(_notify_admin(
+                        "⚠️ *Real-time webhook delivery looks stalled*\n"
+                        f"No Strava webhook event received in {webhook_gap // 60} min, "
+                        f"but polling just found {polled_new_activities} new activity(ies) "
+                        "directly from Strava — those should have arrived instantly. "
+                        "Likely the hub relay (hub.beyondmiles.cc) or its Strava "
+                        "subscription is down; notifications for these were still sent, "
+                        "just delayed via the polling backstop."
+                    ))
+                logger.warning(
+                    "catchup_sync: webhook-quiet detected — gap=%ss polled_new_activities=%s",
+                    webhook_gap, polled_new_activities,
+                )
 
     # --- Layer 4: low-frequency weekly full-history reconciliation --------
     reconcile: dict | None = None
