@@ -358,19 +358,6 @@ _KUDOS_SMASH: list[str] = [
     "That's an emphatic YES. 💪",
 ]
 
-# Suspiciously flat route roast — overrides the distance-earned kudos when a
-# ride/run/walk clears its distance bar but barely climbed anything. Matches
-# e.g. a 100 km ride with < 500 m elevation gain (5 m of gain per km).
-_ELEVATION_ROAST_SPORTS: set[str] = {"Ride", "Run", "Walk"}
-_ELEVATION_ROAST_M_PER_KM = 5.0
-
-_ELEVATION_ROAST: list[str] = [
-    "{km} km and barely a bump in sight — that's a runway, not a route. 😝",
-    "Flat as a pancake out there. Where were the actual hills? 😝",
-    "Zero hills were harmed in the making of this activity. 😝",
-    "That elevation graph is basically a flat line with main character energy. 😝",
-]
-
 # "Other Activities" (Yoga, Racket Sports, Strength Training, Hiking) have no
 # distance/pace threshold defined, so they're judged on time instead: under
 # 30 minutes gets roasted, 30 minutes or more earns a kudos line.
@@ -396,11 +383,10 @@ def _roast_or_kudos_line(
     """Pick a contextual roast/kudos line for this activity, or None if the
     caller should fall back to the plain rotating greeting.
 
-    Ride/Run/Swim/Walk are judged on distance vs. a per-sport threshold.
-    Ride/Run/Walk additionally get roasted for a suspiciously flat route even
-    if the distance itself clears the bar. Everything else ("Other
-    Activities") is judged on time: under 30 minutes is roasted, 30+ earns
-    a kudos line.
+    Ride/Run/Swim/Walk are judged purely on distance vs. a per-sport
+    threshold (no "flat route" elevation override). Everything else
+    ("Other Activities") is judged on time: under 30 minutes is roasted,
+    30+ earns a kudos line.
     """
     bucket = _ROAST_BUCKET_BY_TYPE.get(activity_type)
 
@@ -424,12 +410,6 @@ def _roast_or_kudos_line(
         else:
             value, unit = round(distance_m / 1_000), "km"
         return line.format(value=value, unit=unit)
-
-    if bucket in _ELEVATION_ROAST_SPORTS and distance_m > 0:
-        elevation_gain_m = elevation_gain_m or 0
-        distance_km = distance_m / 1_000
-        if (elevation_gain_m / distance_km) < _ELEVATION_ROAST_M_PER_KM:
-            return random.choice(_ELEVATION_ROAST).format(km=round(distance_km))
 
     # One flat mix-and-match pool for any qualifying activity, regardless of
     # by how much it cleared the threshold — general, leaderboard-flavored,
