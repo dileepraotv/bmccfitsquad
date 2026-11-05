@@ -138,6 +138,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("leaderboard",   cmd_leaderboard,   filters=_priv))
     app.add_handler(CommandHandler("notifications", cmd_notifications, filters=_priv))
     app.add_handler(CommandHandler("roastmode",     cmd_roastmode,     filters=_priv))
+    app.add_handler(CommandHandler("timezone",      cmd_timezone,      filters=_priv))
     app.add_handler(CommandHandler("quote",         cmd_quote,         filters=_priv))
     app.add_handler(CommandHandler("recap",         cmd_recap,         filters=_priv))
     app.add_handler(CommandHandler("yearrecap",     cmd_yearrecap,     filters=_priv))
@@ -452,6 +453,7 @@ _HELP_TEXT = (
     "/quote — Random motivational quote\n"
     "/notifications — How activity notifications are managed\n"
     "/roastmode — Toggle roast/kudos activity notifications \\(on by default\\)\n"
+    "/timezone — View/set your timezone \\(for stats, goals, recap, streaks\\)\n"
     "/cancel — Cancel any in\\-progress action\n"
     "/skip — Skip the current step in an in\\-progress action\n"
     "/start — Welcome message and main menu\n"
@@ -1088,6 +1090,74 @@ async def cmd_roastmode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
 
 
+async def cmd_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show or set the IANA timezone used for this user's personal calendar
+    boundaries (stats/goals/recap/streaks, and when their scheduled monthly/
+    yearly recap fires). Auto-detected from Strava at /connect time —
+    this is mainly a correction tool, or for anyone who connected before
+    auto-detection existed. Usage: /timezone, /timezone America/New_York.
+
+    Deliberately does NOT affect /leaderboard, which stays pinned to one
+    shared reference timezone (Asia/Kolkata) since it's group-wide ranking
+    data, not personal to any one member — see cmd_leaderboard.
+    """
+    from app.timezones import is_valid_tz
+
+    arg = (context.args[0].strip() if context.args else "")
+
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(User).where(User.telegram_user_id == update.effective_user.id)
+            )
+            user = result.scalar_one_or_none()
+            if user is None:
+                await update.message.reply_text(
+                    "You haven't connected your Strava account yet\\. Use /connect to get started\\.",
+                    parse_mode="MarkdownV2",
+                )
+                return
+
+            if not arg:
+                await update.message.reply_text(
+                    f"🌍 Your timezone is currently set to *{_escape_md(user.timezone)}*\\.\n\n"
+                    "This decides what counts as \"today\"/\"this month\" for your "
+                    "/stats, /goals, /recap, and activity streaks\\.\n\n"
+                    "To change it: /timezone <IANA name>, e\\.g\\. "
+                    "`/timezone America/New_York` or `/timezone Europe/London`\\.",
+                    parse_mode="MarkdownV2",
+                )
+                return
+
+            if not is_valid_tz(arg):
+                await update.message.reply_text(
+                    f"⚠️ \"{arg}\" isn't a recognised timezone name\\. Use the "
+                    "IANA format, e\\.g\\. `America/New_York`, `Europe/London`, "
+                    "`Asia/Kolkata`, `Australia/Sydney`\\. Full list: "
+                    "[wikipedia\\.org/wiki/List\\_of\\_tz\\_database\\_time\\_zones]"
+                    "(https://en.wikipedia.org/wiki/List_of_tz_database_time_zones)\\.",
+                    parse_mode="MarkdownV2",
+                    disable_web_page_preview=True,
+                )
+                return
+
+            old_tz = user.timezone
+            user.timezone = arg
+            await db.commit()
+    except Exception:
+        logger.exception("cmd_timezone: DB error")
+        await update.message.reply_text(
+            "Sorry, I couldn't reach the database right now. Please try again in a moment."
+        )
+        return
+
+    await update.message.reply_text(
+        f"✅ Timezone updated: *{_escape_md(old_tz)}* → *{_escape_md(arg)}*\\.\n"
+        "Your /stats, /goals, /recap, and streaks will use this from now on\\.",
+        parse_mode="MarkdownV2",
+    )
+
+
 async def cmd_quote(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f'💬 *"{_random_quote()}"*', parse_mode="Markdown")
 
@@ -1510,14 +1580,21 @@ def _goal_recurrence_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-def _goal_period_dates(period: str):
+def _goal_period_dates(period: str, tz=None):
     """Return (start_date, end_date_inclusive) for display and DB queries.
 
     The end date returned is the *last day* of the period (inclusive) so it
     displays as e.g. 2026-01-01 → 2026-12-31.  The DB query uses
     ``activity_date < end_dt + 1 day`` (exclusive upper bound) to stay correct.
+
+    *tz* should be the goal owner's own timezone (app.timezones.user_tz) —
+    members can be anywhere in the world, so "today"/"this month" must be
+    judged in their own local time, not one fixed zone. Defaults to
+    Asia/Kolkata if omitted.
     """
-    now = datetime.now(_IST)
+    from app.timezones import resolve_tz
+    tz = tz or resolve_tz(None)
+    now = datetime.now(tz)
     y = now.year
 
     if period == "This Month":
@@ -1555,11 +1632,13 @@ def _goal_period_dates(period: str):
     return start.date(), end.date()
 
 
-def _format_goal_date_range(start, end) -> str:
+def _format_goal_date_range(start, end, tz=None) -> str:
     """Compact human-readable window — "Aug 1 – Aug 31" (year appended only
     once, and only if either end falls outside the current year) instead
-    of the verbose ISO "2026-08-01 → 2026-08-31"."""
-    cur_year = datetime.now(_IST).year
+    of the verbose ISO "2026-08-01 → 2026-08-31". *tz* should be the goal
+    owner's own timezone; defaults to Asia/Kolkata if omitted."""
+    from app.timezones import resolve_tz
+    cur_year = datetime.now(tz or resolve_tz(None)).year
     start_str = start.strftime("%b %-d")
     end_str = end.strftime("%b %-d")
     if start.year != cur_year or end.year != cur_year:
@@ -1572,7 +1651,7 @@ def _format_goal_date_range(start, end) -> str:
 _GOAL_PACE_LEGEND = "🔼 On pace · 🔽 Behind · ✅ Met"
 
 
-def _goal_pace_icon(pct: float, start_date, end_date) -> str:
+def _goal_pace_icon(pct: float, start_date, end_date, tz=None) -> str:
     """On-pace / behind-pace icon — compares % of target reached to % of
     the period elapsed, so 20% progress with 80% of the period gone reads
     very differently from 20% progress with only 20% gone. A single-glyph
@@ -1584,10 +1663,12 @@ def _goal_pace_icon(pct: float, start_date, end_date) -> str:
     meaning here; ✅ (rather than 🏆) keeps the achieved state the same
     visual size as the other two. Returns "" when the period hasn't
     started yet or has already ended (pacing only makes sense mid-period
-    — a closed period's result speaks for itself)."""
+    — a closed period's result speaks for itself). *tz* should be the goal
+    owner's own timezone; defaults to Asia/Kolkata if omitted."""
     if pct >= 100:
         return "✅"
-    today = datetime.now(_IST).date()
+    from app.timezones import resolve_tz
+    today = datetime.now(tz or resolve_tz(None)).date()
     if today < start_date or today > end_date:
         return ""
     total_days = (end_date - start_date).days + 1
@@ -1606,7 +1687,7 @@ def _goal_pace_icon(pct: float, start_date, end_date) -> str:
 
 def _format_goal_summary(sport_display: str, category: str, aggregation: str,
                           count: int, period: str, start, end,
-                          recurrence: str = "none") -> str:
+                          recurrence: str = "none", tz=None) -> str:
     emoji = _goal_sport_emoji(sport_display)
     lines = [
         "✅ *Goal saved!*",
@@ -1621,7 +1702,7 @@ def _format_goal_summary(sport_display: str, category: str, aggregation: str,
     }.get(recurrence, period)
     lines += [
         f"Period: *{period_label}*",
-        f"_{_format_goal_date_range(start, end)}_",
+        f"_{_format_goal_date_range(start, end, tz)}_",
     ]
     return "\n".join(lines)
 
@@ -1927,8 +2008,9 @@ async def _nearest_deadline_line(db, user: "User", goals: list) -> str | None:
     (e.g. this month), not the year-long window as a whole, since that's
     the deadline that's actually approaching."""
     from app.tasks import get_recurring_goal_progress
+    from app.timezones import user_tz
 
-    today = datetime.now(_IST).date()
+    today = datetime.now(user_tz(user)).date()
     best_deadline = None
     best_goal = None
     for g in goals:
@@ -1993,7 +2075,6 @@ async def _save_goal_and_confirm(query, tg_id: int, draft: dict, period: str, re
     count         = draft.get("count", 1)
     allow_multi   = draft.get("allow_multiple_daily", True)
     sport_db      = _SPORT_TYPE_MAP.get(sport_display, sport_display)
-    start, end    = _goal_period_dates(period)
 
     unit = _goal_metric_unit(sport_display, metric, aggregation)
     target_value = _goal_value_to_canonical(value, unit)
@@ -2007,6 +2088,10 @@ async def _save_goal_and_confirm(query, tg_id: int, draft: dict, period: str, re
         if not user:
             await query.edit_message_text("User not found. Try /start first.")
             return
+
+        from app.timezones import user_tz
+        tz = user_tz(user)
+        start, end = _goal_period_dates(period, tz)
 
         existing_res = await db.execute(
             select(Goal).where(Goal.user_id == user.id, Goal.is_active == True)  # noqa: E712
@@ -2034,7 +2119,7 @@ async def _save_goal_and_confirm(query, tg_id: int, draft: dict, period: str, re
             await query.edit_message_text(
                 f"You already have this exact goal active:\n\n"
                 f"{emoji} *{sport_display} : {duplicate.category}*\n"
-                f"_{_format_goal_date_range(duplicate.start_date, duplicate.end_date)}_\n\n"
+                f"_{_format_goal_date_range(duplicate.start_date, duplicate.end_date, tz)}_\n\n"
                 f"Delete it first if you want to replace it with a different target.",
                 parse_mode="Markdown",
                 reply_markup=_goals_main_keyboard(),
@@ -2069,7 +2154,7 @@ async def _save_goal_and_confirm(query, tg_id: int, draft: dict, period: str, re
 
     await _clear_draft(tg_id)
     await query.edit_message_text(
-        _format_goal_summary(sport_display, category, aggregation, count, period, start, end, recurrence),
+        _format_goal_summary(sport_display, category, aggregation, count, period, start, end, recurrence, tz=tz),
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton(_pad("My Goals", 42), callback_data="goal:menu"),
@@ -2315,14 +2400,18 @@ async def _handle_goal_callbacks(query, data: str) -> None:
         goal_id = data[len("goal:delete_pick:"):]
         async with AsyncSessionLocal() as db:
             result = await db.execute(
-                select(Goal).where(Goal.id == _uuid_mod.UUID(goal_id))
+                select(Goal, User)
+                .join(User, Goal.user_id == User.id)
+                .where(Goal.id == _uuid_mod.UUID(goal_id))
             )
-            goal = result.scalar_one_or_none()
+            row = result.first()
 
-        if not goal:
+        if not row:
             await query.edit_message_text("Goal not found.", reply_markup=_goals_main_keyboard())
             return
+        goal, goal_owner = row
 
+        from app.timezones import user_tz
         sport_label = _sport_display_label(goal.activity_type)
         emoji = _goal_sport_emoji(goal.activity_type)
         target_line = "" if goal.aggregation == "cumulative" else (
@@ -2332,7 +2421,7 @@ async def _handle_goal_callbacks(query, data: str) -> None:
             f"Delete this goal?\n\n"
             f"{emoji} *{sport_label} : {goal.category}*\n"
             f"{target_line}"
-            f"_{_format_goal_date_range(goal.start_date, goal.end_date)}_\n\n"
+            f"_{_format_goal_date_range(goal.start_date, goal.end_date, user_tz(goal_owner))}_\n\n"
             f"It'll be removed from your active goals — you can always add the same target again later.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
@@ -2587,7 +2676,9 @@ async def _show_goal_status(query) -> None:
         ]
 
         from app.tasks import format_goal_progress_value, get_goal_progress, get_recurring_goal_progress
+        from app.timezones import user_tz
 
+        tz = user_tz(user)
         detail_rows = []
         any_pace_shown = False
 
@@ -2618,7 +2709,7 @@ async def _show_goal_status(query) -> None:
                         (sp for sp in recurring.sub_periods if sp.status == "in_progress"), None
                     )
                     if current_sp:
-                        pace = _goal_pace_icon(current_sp.progress.pct, current_sp.start, current_sp.end)
+                        pace = _goal_pace_icon(current_sp.progress.pct, current_sp.start, current_sp.end, tz)
                         if pace:
                             # Tacked onto the header line itself (pushed
                             # right with padding) rather than its own line
@@ -2629,7 +2720,7 @@ async def _show_goal_status(query) -> None:
                 lines.append(
                     f"{header}\n\n"
                     f"{banner}\n"
-                    f"_{_format_goal_date_range(g.start_date, g.end_date)}_"
+                    f"_{_format_goal_date_range(g.start_date, g.end_date, tz)}_"
                 )
                 lines.append(divider)
                 detail_rows.append([InlineKeyboardButton(
@@ -2658,7 +2749,7 @@ async def _show_goal_status(query) -> None:
                 progress_line = f"🎯 {int(progress.current)}/{g.target_count} {session_word} ({pct}%)"
 
             header = f"{emoji} *{sport_label} : {g.category}*"
-            pace = _goal_pace_icon(progress.pct, g.start_date, g.end_date)
+            pace = _goal_pace_icon(progress.pct, g.start_date, g.end_date, tz)
             if pace:
                 # Tacked onto the header line itself (pushed right with
                 # padding) rather than a line of its own — see
@@ -2669,7 +2760,7 @@ async def _show_goal_status(query) -> None:
                 f"{header}\n\n"
                 f"{progress_line}\n"
                 f"{bar}\n"
-                f"_{_format_goal_date_range(g.start_date, g.end_date)}_"
+                f"_{_format_goal_date_range(g.start_date, g.end_date, tz)}_"
             )
             lines.append(divider)
 
@@ -2704,6 +2795,7 @@ async def _show_goal_detail(query, goal_id: str) -> None:
             return
 
         from app.tasks import format_goal_progress_value, get_recurring_goal_progress
+        from app.timezones import user_tz
         recurring = await get_recurring_goal_progress(db, user, goal)
 
     sport_label = _sport_display_label(goal.activity_type)
@@ -2748,7 +2840,7 @@ async def _show_goal_detail(query, goal_id: str) -> None:
         f"{emoji} *{sport_label} : {goal.category}*\n\n"
         + "\n".join(sp_lines) + "\n\n"
         f"{banner}\n"
-        f"_{_format_goal_date_range(goal.start_date, goal.end_date)}_"
+        f"_{_format_goal_date_range(goal.start_date, goal.end_date, user_tz(user))}_"
     )
     await query.edit_message_text(
         text,
@@ -2929,7 +3021,8 @@ async def _send_stats(query, sport: str, time_frame: str) -> None:
             return
 
         try:
-            stats = await calculate_stats(db, user.id, sport, time_frame)
+            from app.timezones import user_tz
+            stats = await calculate_stats(db, user.id, sport, time_frame, tz=user_tz(user))
         except Exception:
             logger.exception("calculate_stats failed for user=%s", user.id)
             await query.edit_message_text("Could not load your stats. Try again later.")

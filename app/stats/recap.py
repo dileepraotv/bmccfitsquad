@@ -22,9 +22,10 @@ Public API
       replaced, and app/models.py for the (user_id, activity_date) index
       that keeps that aggregation cheap).
 
-  month_bounds(year, month) -> tuple[datetime, datetime]
-      IST-anchored (start, end-exclusive) bounds for a calendar month —
-      see the _IST comment below for why this matters.
+  month_bounds(year, month, tz) -> tuple[datetime, datetime]
+      (start, end-exclusive) bounds for a calendar month, anchored to the
+      given athlete's own timezone — see the comment below for why this
+      matters.
 """
 from __future__ import annotations
 
@@ -32,6 +33,7 @@ import calendar
 import logging
 import random
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,17 +45,18 @@ from app.utils import format_kv_lines
 
 logger = logging.getLogger(__name__)
 
-# BMCC's users are all IST-based. Activity.activity_date is stored as a
-# UTC instant, but "which calendar month/year did this activity happen
-# in" must be judged in IST — an activity that started between 00:00 and
-# 05:29 IST is still the *previous* UTC calendar day, so bounding a month
-# at UTC midnight silently drops it into the prior month's recap/stats
+# Each athlete can be in a different timezone, but Activity.activity_date
+# is stored as a UTC instant. "Which calendar month/year did this activity
+# happen in" must be judged in *that athlete's own* timezone — an activity
+# that started between local midnight and their UTC offset is still the
+# *previous* UTC calendar day, so bounding a month at UTC (or any other
+# fixed-zone) midnight silently drops it into the prior month's recap
 # instead of the one the athlete (and Strava's own UI) consider it part
-# of. Building the boundary datetimes with tzinfo=_IST instead of
-# timezone.utc fixes this — comparing timezone-aware datetimes compares
-# the underlying instant regardless of which tzinfo they're attached to,
-# so this needs no change anywhere activity_date is actually queried.
-_IST = timezone(timedelta(hours=5, minutes=30))
+# of. Building the boundary datetimes with tzinfo=<the athlete's own zone>
+# instead of a fixed one fixes this — comparing timezone-aware datetimes
+# compares the underlying instant regardless of which tzinfo they're
+# attached to, so this needs no change anywhere activity_date is actually
+# queried. See app.timezones for resolution/fallback logic.
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -96,13 +99,18 @@ _MIN_STREAK_TO_SHOW = 3  # days — shorter streaks aren't worth calling out
 # Month/year arithmetic
 # ---------------------------------------------------------------------------
 
-def month_bounds(year: int, month: int) -> tuple[datetime, datetime]:
-    """IST-anchored (start, end-exclusive) bounds for a calendar month."""
-    start = datetime(year, month, 1, tzinfo=_IST)
+def month_bounds(year: int, month: int, tz: ZoneInfo | None = None) -> tuple[datetime, datetime]:
+    """(start, end-exclusive) bounds for a calendar month, anchored to *tz*
+    (the athlete's own timezone — see the module-level comment above).
+    Defaults to Asia/Kolkata if omitted (back-compat for any caller not yet
+    passing it)."""
+    from app.timezones import resolve_tz
+    tz = tz or resolve_tz(None)
+    start = datetime(year, month, 1, tzinfo=tz)
     if month == 12:
-        end = datetime(year + 1, 1, 1, tzinfo=_IST)
+        end = datetime(year + 1, 1, 1, tzinfo=tz)
     else:
-        end = datetime(year, month + 1, 1, tzinfo=_IST)
+        end = datetime(year, month + 1, 1, tzinfo=tz)
     return start, end
 
 
@@ -112,9 +120,12 @@ def _previous_month(year: int, month: int) -> tuple[int, int]:
     return year, month - 1
 
 
-def year_bounds(year: int) -> tuple[datetime, datetime]:
-    """IST-anchored (start, end-exclusive) bounds for a calendar year."""
-    return datetime(year, 1, 1, tzinfo=_IST), datetime(year + 1, 1, 1, tzinfo=_IST)
+def year_bounds(year: int, tz: ZoneInfo | None = None) -> tuple[datetime, datetime]:
+    """(start, end-exclusive) bounds for a calendar year, anchored to *tz*
+    (the athlete's own timezone). Defaults to Asia/Kolkata if omitted."""
+    from app.timezones import resolve_tz
+    tz = tz or resolve_tz(None)
+    return datetime(year, 1, 1, tzinfo=tz), datetime(year + 1, 1, 1, tzinfo=tz)
 
 
 def next_month_name(year: int, month: int) -> str:
@@ -208,14 +219,20 @@ async def _sport_best_before(db: AsyncSession, user_id, sport: str, before: date
     return float(result.scalar_one() or 0.0)
 
 
-async def _distinct_active_days(db: AsyncSession, user_id, start: datetime, end: datetime) -> int:
-    """Count of distinct calendar dates (IST, not the DB's UTC storage) with
-    at least one activity of any type (not just Ride/Run/Walk/Swim) in
-    [start, end). A plain SQL date() on the raw UTC timestamp would put an
-    activity started before ~05:30 IST on the wrong (previous) calendar
-    date, undercounting streaks/active-days for early-morning activities."""
+async def _distinct_active_days(
+    db: AsyncSession, user_id, start: datetime, end: datetime, tz: ZoneInfo | None = None,
+) -> int:
+    """Count of distinct calendar dates (in the athlete's own timezone, not
+    the DB's UTC storage) with at least one activity of any type (not just
+    Ride/Run/Walk/Swim) in [start, end). A plain SQL date() on the raw UTC
+    timestamp would put an activity started before local midnight-plus-
+    offset on the wrong (previous) calendar date, undercounting
+    streaks/active-days for early-morning activities. Defaults to
+    Asia/Kolkata if *tz* is omitted (back-compat)."""
+    from app.timezones import resolve_tz
+    tz = tz or resolve_tz(None)
     result = await db.execute(
-        select(func.count(func.distinct(func.date(func.timezone("Asia/Kolkata", Activity.activity_date)))))
+        select(func.count(func.distinct(func.date(func.timezone(tz.key, Activity.activity_date)))))
         .where(
             Activity.user_id == user_id,
             Activity.activity_date >= start,
@@ -225,9 +242,14 @@ async def _distinct_active_days(db: AsyncSession, user_id, start: datetime, end:
     return int(result.scalar_one() or 0)
 
 
-async def _current_streak_days(db: AsyncSession, user_id, as_of_end: datetime) -> int:
+async def _current_streak_days(
+    db: AsyncSession, user_id, as_of_end: datetime, tz: ZoneInfo | None = None,
+) -> int:
     """Consecutive-day activity streak ending on the most recent active day
-    at or before `as_of_end` (looking back up to 60 days)."""
+    at or before `as_of_end` (looking back up to 60 days), judged in the
+    athlete's own timezone. Defaults to Asia/Kolkata if *tz* is omitted."""
+    from app.timezones import resolve_tz
+    tz = tz or resolve_tz(None)
     lookback_start = as_of_end - timedelta(days=60)
     result = await db.execute(
         select(Activity.activity_date)
@@ -237,10 +259,11 @@ async def _current_streak_days(db: AsyncSession, user_id, as_of_end: datetime) -
             Activity.activity_date < as_of_end,
         )
     )
-    # .astimezone(_IST) before .date() — Activity.activity_date comes back
-    # UTC-aware, and a plain .date() would put a pre-05:30-IST activity on
-    # the wrong (previous) calendar day, same issue as _distinct_active_days.
-    dates = {row[0].astimezone(_IST).date() for row in result.fetchall()}
+    # .astimezone(tz) before .date() — Activity.activity_date comes back
+    # UTC-aware, and a plain .date() would put a pre-local-midnight activity
+    # on the wrong (previous) calendar day, same issue as
+    # _distinct_active_days.
+    dates = {row[0].astimezone(tz).date() for row in result.fetchall()}
     if not dates:
         return 0
 
@@ -380,7 +403,8 @@ async def _aggregate_recap(
         if highlight:
             highlights.append(highlight)
 
-    streak = await _current_streak_days(db, user.id, end)
+    from app.timezones import user_tz
+    streak = await _current_streak_days(db, user.id, end, user_tz(user))
     if streak >= _MIN_STREAK_TO_SHOW:
         highlights.append(f"{streak}-day activity streak")
 
@@ -410,9 +434,12 @@ async def compute_monthly_recap(db: AsyncSession, user: User, year: int, month: 
     the month is still in progress — the four core sports always appear;
     "Other Activities" sports only appear if the athlete actually logged
     one that month."""
-    start, end = month_bounds(year, month)
+    from app.timezones import user_tz
+    tz = user_tz(user)
+
+    start, end = month_bounds(year, month, tz)
     prev_year, prev_month = _previous_month(year, month)
-    prev_start, prev_end = month_bounds(prev_year, prev_month)
+    prev_start, prev_end = month_bounds(prev_year, prev_month, tz)
     prev_month_abbr = calendar.month_abbr[prev_month]
 
     agg = await _aggregate_recap(db, user, start, end, prev_start, prev_end, f"vs {prev_month_abbr}")
@@ -422,14 +449,14 @@ async def compute_monthly_recap(db: AsyncSession, user: User, year: int, month: 
     # /recap preview) would otherwise count every day from today through
     # month-end as a "rest day" it hasn't even happened yet — cap the
     # denominator at days actually elapsed (inclusive of today) instead,
-    # same fix already applied to the yearly recap below. Evaluated in IST
-    # (not UTC) so "today" matches the athlete's actual calendar date.
-    now = datetime.now(_IST)
+    # same fix already applied to the yearly recap below. Evaluated in the
+    # athlete's own timezone so "today" matches their actual calendar date.
+    now = datetime.now(tz)
     if now >= end:
         days_in_month = (end - start).days
     else:
         days_in_month = (now.date() - start.date()).days + 1
-    active_days = await _distinct_active_days(db, user.id, start, end)
+    active_days = await _distinct_active_days(db, user.id, start, end, tz)
     rest_days = max(0, days_in_month - active_days)
 
     return {
@@ -447,21 +474,25 @@ async def compute_yearly_recap(db: AsyncSession, user: User, year: int) -> dict:
     """Aggregate this athlete's recap for a full calendar year — same shape
     as compute_monthly_recap, trended against the prior year instead of the
     prior month."""
-    start, end = year_bounds(year)
-    prev_start, prev_end = year_bounds(year - 1)
+    from app.timezones import user_tz
+    tz = user_tz(user)
+
+    start, end = year_bounds(year, tz)
+    prev_start, prev_end = year_bounds(year - 1, tz)
 
     agg = await _aggregate_recap(db, user, start, end, prev_start, prev_end, f"vs {year - 1}")
 
     # /yearrecap is explicitly a preview of the *current, still in-progress*
     # year — using the full year length there wrongly counts every day from
     # today through Dec 31 as a "rest day" it hasn't even happened yet.
-    # Evaluated in IST so "today" matches the athlete's actual calendar date.
-    now = datetime.now(_IST)
+    # Evaluated in the athlete's own timezone so "today" matches their
+    # actual calendar date.
+    now = datetime.now(tz)
     if now >= end:
         days_in_year = (end - start).days
     else:
         days_in_year = (now.date() - start.date()).days + 1
-    active_days = await _distinct_active_days(db, user.id, start, end)
+    active_days = await _distinct_active_days(db, user.id, start, end, tz)
     rest_days = max(0, days_in_year - active_days)
 
     return {

@@ -43,6 +43,8 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
+from zoneinfo import ZoneInfo
+
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -112,6 +114,7 @@ async def calculate_stats(
     user_id: uuid.UUID,
     sport_type: str,
     time_frame: str,
+    tz: ZoneInfo | None = None,
 ) -> dict:
     """Calculate sport-specific stats for a user over the given time frame.
 
@@ -120,6 +123,13 @@ async def calculate_stats(
         user_id:     UUID primary key from the ``users`` table (``User.id``).
         sport_type:  One of "Ride", "RideEndurance", "Run", "Walk", "Swim".
         time_frame:  One of the five time-frame strings (see module docstring).
+        tz:          The user's own IANA timezone (see app.timezones.user_tz)
+                     — every "this week"/"this month"/etc. boundary below is
+                     evaluated in this zone, not a hardcoded one, since
+                     Activity.activity_date is a UTC instant and users can
+                     be anywhere in the world. Defaults to Asia/Kolkata if
+                     omitted (back-compat for any caller that hasn't been
+                     updated to pass it).
 
     Returns:
         Dict of computed stats; keys vary by sport_type (see module docstring).
@@ -132,7 +142,7 @@ async def calculate_stats(
     if time_frame not in _TIME_FRAME_LABELS:
         raise ValueError(f"Unknown time_frame {time_frame!r}. Choose from: {list(_TIME_FRAME_LABELS)}")
 
-    activities = await _fetch_activities(db_session, user_id, sport_type, time_frame)
+    activities = await _fetch_activities(db_session, user_id, sport_type, time_frame, tz)
 
     calculators = {
         "Ride":             _compute_ride_stats,
@@ -217,9 +227,10 @@ async def _fetch_activities(
     user_id: uuid.UUID,
     sport_type: str,
     time_frame: str,
+    tz: ZoneInfo | None = None,
 ) -> list[Activity]:
     """Load all matching Activity rows for stats calculation."""
-    start, end = _time_frame_bounds(time_frame)
+    start, end = _time_frame_bounds(time_frame, tz)
     activity_types = _SPORT_ACTIVITY_TYPES[sport_type]
 
     filters = [
@@ -574,56 +585,59 @@ def _format_duration_stats(s: dict, session_label: str) -> list[str]:
 # Shared utilities
 # ---------------------------------------------------------------------------
 
-_IST = timezone(timedelta(hours=5, minutes=30))
-
-
-def _time_frame_bounds(time_frame: str) -> tuple[datetime | None, datetime | None]:
-    """Return (start, end) for the given time frame, anchored to IST.
+def _time_frame_bounds(
+    time_frame: str, tz: ZoneInfo | None = None,
+) -> tuple[datetime | None, datetime | None]:
+    """Return (start, end) for the given time frame, anchored to *tz*.
 
     A None value means "no bound on that side".
     The end bound is *exclusive* — use ``activity_date < end`` in queries.
 
-    BMCC's users are all IST-based, but Activity.activity_date is stored as
-    a UTC instant. Anchoring these boundaries in UTC instead of IST would
-    put any activity that started between 00:00 and 05:29 IST into the
-    *previous* day/week/month/year's bucket — e.g. a ride starting 4:58 AM
-    IST on Nov 1st is still Oct 31st in UTC, so a UTC-anchored "this month"
-    filter would silently exclude it from November's stats. Comparing
-    timezone-aware datetimes compares the underlying instant regardless of
-    which tzinfo is attached, so building these boundaries with tzinfo=_IST
-    instead of timezone.utc is a complete fix — no change needed wherever
-    activity_date is actually queried.
+    Each user can be in a different timezone, but Activity.activity_date is
+    always stored as a UTC instant. Anchoring these boundaries in UTC (or
+    any one fixed zone) instead of the *user's own* zone would put any
+    activity that started between local midnight and the user's UTC offset
+    into the *previous* day/week/month/year's bucket — e.g. a ride starting
+    4:58 AM IST on Nov 1st is still Oct 31st in UTC, so a UTC-anchored
+    "this month" filter would silently exclude it from November's stats.
+    Comparing timezone-aware datetimes compares the underlying instant
+    regardless of which tzinfo is attached, so building these boundaries
+    with tzinfo=tz is a complete fix — no change needed wherever
+    activity_date is actually queried. Defaults to Asia/Kolkata if *tz* is
+    omitted (back-compat for any caller not yet passing the user's own).
     """
-    now = datetime.now(_IST)
+    from app.timezones import resolve_tz
+    tz = tz or resolve_tz(None)
+    now = datetime.now(tz)
 
     if time_frame == "all_time":
         return None, None
 
     if time_frame == "this_week":
-        # Monday 00:00 IST of the current week → now.
+        # Monday 00:00 local of the current week → now.
         today = now.date()
         monday = today - timedelta(days=today.weekday())
-        return datetime(monday.year, monday.month, monday.day, tzinfo=_IST), None
+        return datetime(monday.year, monday.month, monday.day, tzinfo=tz), None
 
     if time_frame == "year_to_date":
-        return datetime(now.year, 1, 1, tzinfo=_IST), None
+        return datetime(now.year, 1, 1, tzinfo=tz), None
 
     if time_frame == "previous_year":
         return (
-            datetime(now.year - 1, 1, 1, tzinfo=_IST),
-            datetime(now.year,     1, 1, tzinfo=_IST),
+            datetime(now.year - 1, 1, 1, tzinfo=tz),
+            datetime(now.year,     1, 1, tzinfo=tz),
         )
 
     if time_frame == "current_month":
-        return datetime(now.year, now.month, 1, tzinfo=_IST), None
+        return datetime(now.year, now.month, 1, tzinfo=tz), None
 
     if time_frame == "previous_month":
         if now.month == 1:
-            start = datetime(now.year - 1, 12, 1, tzinfo=_IST)
-            end   = datetime(now.year,      1, 1, tzinfo=_IST)
+            start = datetime(now.year - 1, 12, 1, tzinfo=tz)
+            end   = datetime(now.year,      1, 1, tzinfo=tz)
         else:
-            start = datetime(now.year, now.month - 1, 1, tzinfo=_IST)
-            end   = datetime(now.year, now.month,     1, tzinfo=_IST)
+            start = datetime(now.year, now.month - 1, 1, tzinfo=tz)
+            end   = datetime(now.year, now.month,     1, tzinfo=tz)
         return start, end
 
     raise ValueError(f"Unknown time_frame: {time_frame!r}")

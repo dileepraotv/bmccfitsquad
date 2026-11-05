@@ -69,6 +69,16 @@ class User(Base):
     approval_status: Mapped[str] = mapped_column(
         Text, default="approved", server_default="approved", nullable=False
     )
+    # IANA timezone name (e.g. "Asia/Kolkata", "America/New_York") — used
+    # for every *personal* calendar boundary (stats, goals, recap, streaks,
+    # scheduled recap/checkpoint timing). Auto-detected from Strava's
+    # athlete profile at connect time (see app.strava.webhook's OAuth
+    # callback), overridable via /timezone. See app.timezones for
+    # resolution/fallback logic. Deliberately NOT used by /leaderboard,
+    # which is shared group data and stays pinned to one reference zone.
+    timezone: Mapped[str] = mapped_column(
+        Text, default="Asia/Kolkata", server_default="Asia/Kolkata", nullable=False
+    )
     # Opt-out (on by default) — swaps the activity notification's greeting
     # for a contextual roast/kudos line based on distance vs sport threshold.
     # See app.telegram.notifications for the selection logic.

@@ -807,12 +807,14 @@ async def ops_compare_stats(secret: str = "", names: str = ""):
 async def ops_activity_dates(secret: str = "", name: str = "", days: int = 10, sport: str = ""):
     """Debug helper for 'this activity isn't showing up in this month's
     stats' reports — Activity.activity_date is stored in UTC (from Strava's
-    start_date), but calculate_stats' month/week boundaries are also
-    computed in UTC. An activity that started e.g. before ~05:30 IST on the
-    1st of a month lands on the *previous* UTC calendar day, and therefore
-    the *previous* month's "current_month"/"this_week" bucket — even though
-    the athlete (and Strava's own UI, which shows start_date_local) call it
-    the 1st. ?sport= optionally filters by Strava activity_type substring.
+    start_date), but calculate_stats' month/week boundaries are computed in
+    the *athlete's own* timezone (see app.timezones). An activity that
+    started e.g. before local midnight-plus-offset on the 1st of a month
+    lands on the *previous* UTC calendar day, and therefore the *previous*
+    month's "current_month"/"this_week" bucket if judged in the wrong zone
+    — even though the athlete (and Strava's own UI, which shows
+    start_date_local) call it the 1st. ?sport= optionally filters by Strava
+    activity_type substring.
 
     Protected by: ?secret={CRON_SECRET} query parameter
     """
@@ -827,8 +829,7 @@ async def ops_activity_dates(secret: str = "", name: str = "", days: int = 10, s
 
     from app.database import AsyncSessionLocal
     from app.models import Activity, User
-
-    _IST = timezone(timedelta(hours=5, minutes=30))
+    from app.timezones import user_tz
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(User))
@@ -846,6 +847,8 @@ async def ops_activity_dates(secret: str = "", name: str = "", days: int = 10, s
         if match is None:
             raise HTTPException(status_code=404, detail=f"no user matching name={name!r}")
 
+        tz = user_tz(match)
+
         since = datetime.now(timezone.utc) - timedelta(days=days)
         stmt = select(Activity).where(
             Activity.user_id == match.id, Activity.activity_date >= since,
@@ -856,6 +859,7 @@ async def ops_activity_dates(secret: str = "", name: str = "", days: int = 10, s
 
     return {
         "matched_user": match.telegram_first_name,
+        "timezone": match.timezone,
         "activities": [
             {
                 "strava_activity_id": a.strava_activity_id,
@@ -863,7 +867,7 @@ async def ops_activity_dates(secret: str = "", name: str = "", days: int = 10, s
                 "activity_type": a.activity_type,
                 "distance_km": round((a.distance_meters or 0) / 1000, 2),
                 "activity_date_utc": a.activity_date.isoformat(),
-                "activity_date_ist": a.activity_date.astimezone(_IST).isoformat(),
+                "activity_date_local": a.activity_date.astimezone(tz).isoformat(),
             }
             for a in rows
         ],
@@ -908,9 +912,81 @@ async def ops_stats_check(secret: str = "", name: str = "", sport: str = "Ride",
         if match is None:
             raise HTTPException(status_code=404, detail=f"no user matching name={name!r}")
 
-        stats = await calculate_stats(db, match.id, sport, time_frame)
+        from app.timezones import user_tz
+        stats = await calculate_stats(db, match.id, sport, time_frame, tz=user_tz(match))
 
-    return {"matched_user": match.telegram_first_name, "sport": sport, "time_frame": time_frame, "stats": stats}
+    return {
+        "matched_user": match.telegram_first_name,
+        "timezone": match.timezone,
+        "sport": sport,
+        "time_frame": time_frame,
+        "stats": stats,
+    }
+
+
+@app.get(
+    "/ops/timezone-check",
+    tags=["ops"],
+    summary="List every connected user's stored timezone, or resolve one by name",
+)
+async def ops_timezone_check(secret: str = "", name: str = ""):
+    """Verification tool for the per-user timezone rollout: with no ?name=,
+    lists every connected user's telegram name + stored `users.timezone`
+    (what /stats, /goals, /recap, and streaks are being evaluated in for
+    them). With ?name=, additionally shows what "now" looks like evaluated
+    in that user's zone, to sanity-check the stored value resolves and
+    behaves as expected.
+
+    Protected by: ?secret={CRON_SECRET} query parameter
+    """
+    if not settings.cron_secret or secret != settings.cron_secret:
+        raise HTTPException(status_code=401, detail="invalid or missing secret")
+
+    from datetime import datetime
+
+    from sqlalchemy import select
+
+    from app.database import AsyncSessionLocal
+    from app.models import User
+    from app.timezones import user_tz
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(User).where(User.strava_athlete_id.isnot(None)))
+        users = result.scalars().all()
+
+    if not name:
+        return {
+            "users": [
+                {
+                    "telegram_first_name": u.telegram_first_name,
+                    "strava_athlete_name": u.strava_athlete_name,
+                    "timezone": u.timezone,
+                }
+                for u in users
+            ]
+        }
+
+    needle = name.lower()
+    match = next(
+        (
+            u for u in users
+            if needle in (u.telegram_first_name or "").lower()
+            or needle in (u.strava_athlete_name or "").lower()
+        ),
+        None,
+    )
+    if match is None:
+        raise HTTPException(status_code=404, detail=f"no user matching name={name!r}")
+
+    tz = user_tz(match)
+    now_local = datetime.now(tz)
+    return {
+        "matched_user": match.telegram_first_name,
+        "stored_timezone": match.timezone,
+        "resolved_tzkey": tz.key,
+        "now_local": now_local.isoformat(),
+        "now_local_readable": now_local.strftime("%A, %B %-d %Y, %I:%M %p %Z"),
+    }
 
 
 @app.get("/telegram/status", tags=["ops"], summary="Telegram's own view of webhook delivery health")

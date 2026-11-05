@@ -411,6 +411,27 @@ async def strava_oauth_callback(
     user.strava_athlete_id = strava_athlete_id
     user.strava_athlete_name = athlete_name
 
+    # Auto-detect the athlete's timezone from their Strava profile (e.g.
+    # "(GMT-05:00) America/New_York") so every personal calendar boundary
+    # (stats/goals/recap/streaks — see app.timezones) uses *their* day, not
+    # a hardcoded IST one. Best-effort: the token summary from the exchange
+    # above doesn't include it, so this is one extra GET /athlete call;
+    # never let it block/fail the connect flow — a user can always correct
+    # it afterwards with /timezone.
+    try:
+        from app.strava.client import get_athlete
+        from app.timezones import parse_strava_timezone
+
+        full_athlete = await get_athlete(token_data["access_token"])
+        detected_tz = parse_strava_timezone(full_athlete.get("timezone"))
+        if detected_tz:
+            user.timezone = detected_tz
+    except Exception:
+        logger.warning(
+            "OAuth callback: could not auto-detect timezone for telegram_user_id=%s",
+            telegram_user_id, exc_info=True,
+        )
+
     await save_tokens(
         db,
         user,

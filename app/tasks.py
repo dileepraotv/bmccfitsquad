@@ -829,11 +829,13 @@ async def get_goal_progress(
     except Exception:
         pass
 
+    from app.timezones import user_tz
+    tz = user_tz(user)
     start_dt = datetime(
-        range_start.year, range_start.month, range_start.day, tzinfo=timezone.utc
+        range_start.year, range_start.month, range_start.day, tzinfo=tz
     )
     end_dt = datetime(
-        range_end.year, range_end.month, range_end.day, tzinfo=timezone.utc
+        range_end.year, range_end.month, range_end.day, tzinfo=tz
     ) + timedelta(days=1)
     act_types = _SPORT_ACTIVITY_TYPES.get(goal.activity_type, [goal.activity_type])
     metric_col = _METRIC_COLUMN.get(goal.metric, Activity.distance_meters)
@@ -992,7 +994,8 @@ async def get_recurring_goal_progress(db, user: User, goal: Goal) -> RecurringGo
     still get their own checkpoint DM from maybe_send_goal_checkpoints)
     rather than the goal going silent once it can no longer be "achieved".
     """
-    today = datetime.now(timezone.utc).date()
+    from app.timezones import user_tz
+    today = datetime.now(user_tz(user)).date()
     sub_periods = goal_sub_periods(goal)
     placeholder_target = goal.target_value if goal.aggregation == "cumulative" else float(goal.target_count)
 
@@ -1738,30 +1741,39 @@ async def catchup_sync_all_users() -> dict:
 # Task 4: maybe_send_monthly_recaps  (scheduled monthly recap, per user)
 # ---------------------------------------------------------------------------
 # Piggybacks on the same /cron/sync-all ping that already runs every few
-# minutes — no separate scheduler/cron registration needed. Fires once,
-# guarded by a Redis key, the first time this is called at/after 21:00 IST
-# on the last calendar day of the month (28/29/30/31 handled via
-# calendar.monthrange, so no month-length special-casing is needed).
+# minutes — no separate scheduler/cron registration needed. Fires once per
+# *user*, guarded by a per-user Redis key, the first time this is called
+# at/after 21:00 *that user's own local time* on the last calendar day of
+# their own local month (28/29/30/31 handled via calendar.monthrange, so no
+# month-length special-casing is needed).
+#
+# Members can be anywhere in the world (see app.timezones), so there is no
+# single global "21:00" or "last day of the month" instant that's correct
+# for everyone — each user's own local clock decides when their recap/
+# checkpoint fires, and each gets their own Redis dedup key so one user's
+# local month-end doesn't accidentally gate (or double-fire) another's.
 
-_IST = timezone(timedelta(hours=5, minutes=30))
-_RECAP_HOUR_IST = 21
-# Catch-up cutoff: if no cron tick lands anywhere in the 21:00-23:59 IST
-# primary window (e.g. Render was asleep or the cron pinger had a gap right
-# then), _period_end_reference_date() below gives one more chance to fire
-# during the first few hours of the next day, for the day that just ended.
-_RECAP_CATCHUP_CUTOFF_HOUR_IST = 9
+_RECAP_HOUR_LOCAL = 21
+# Catch-up cutoff: if no cron tick lands anywhere in this user's 21:00-23:59
+# local primary window (e.g. Render was asleep or the cron pinger had a gap
+# right then), _period_end_reference_date() below gives one more chance to
+# fire during the first few hours of the next day, for the day that just
+# ended — evaluated against that same user's local clock.
+_RECAP_CATCHUP_CUTOFF_HOUR_LOCAL = 9
 
 
-def _period_end_reference_date(now_ist: datetime):
+def _period_end_reference_date(now_local: datetime):
     """The calendar date to treat as "the day whose end-of-period events
     (monthly/yearly recap, goal checkpoints) are due right now", or None if
-    neither the primary nor catch-up window is currently open.
+    neither the primary nor catch-up window is currently open. *now_local*
+    must be a tz-aware datetime in whatever timezone the caller wants this
+    judged in — each user's own local time for per-user triggers.
 
-    Primary window: today itself, from 21:00 IST onward — the normal case,
-    where a cron tick lands within the ~3 hour window on the actual day in
-    question.
+    Primary window: today itself, from 21:00 local onward — the normal
+    case, where a cron tick lands within the ~3 hour window on the actual
+    day in question.
 
-    Catch-up window: yesterday, during the first 00:00-09:00 IST hours of
+    Catch-up window: yesterday, during the first 00:00-09:00 local hours of
     today — covers the case where *no* tick landed in the primary window at
     all. Without this, callers that gate on "is today the last day of the
     month" would simply never match again once the date rolls over,
@@ -1770,35 +1782,23 @@ def _period_end_reference_date(now_ist: datetime):
     Redis dedup keys each caller already uses make this safe to re-check
     every tick without ever double-sending.
     """
-    if now_ist.hour >= _RECAP_HOUR_IST:
-        return now_ist.date()
-    if now_ist.hour < _RECAP_CATCHUP_CUTOFF_HOUR_IST:
-        return (now_ist - timedelta(days=1)).date()
+    if now_local.hour >= _RECAP_HOUR_LOCAL:
+        return now_local.date()
+    if now_local.hour < _RECAP_CATCHUP_CUTOFF_HOUR_LOCAL:
+        return (now_local - timedelta(days=1)).date()
     return None
 
 
 async def maybe_send_monthly_recaps() -> dict:
-    """Check whether it's time for the monthly recap and send it to every
-    connected user if so. Safe to call on every cron tick — a Redis flag
-    ensures it only actually sends once per calendar month."""
+    """Check, independently for every connected user in their own local
+    timezone, whether it's time for their monthly recap, and send it if so.
+    Safe to call on every cron tick — a per-user Redis flag ensures each
+    user only actually gets a given month's recap once."""
     import calendar as _calendar
 
     from app.redis_client import get_redis
     from app.stats.recap import get_or_build_recap
-
-    now_ist = datetime.now(_IST)
-    ref_date = _period_end_reference_date(now_ist)
-    if ref_date is None:
-        return {"skipped": True, "reason": "not yet"}
-    last_day = _calendar.monthrange(ref_date.year, ref_date.month)[1]
-    if ref_date.day != last_day:
-        return {"skipped": True, "reason": "not yet"}
-    target_year, target_month = ref_date.year, ref_date.month
-
-    redis = await get_redis()
-    dedup_key = f"recap:sent:{target_year}-{target_month:02d}"
-    if not await redis.set(dedup_key, "1", ex=40 * 86_400, nx=True):
-        return {"skipped": True, "reason": "already sent this month"}
+    from app.timezones import user_tz
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(
@@ -1809,12 +1809,30 @@ async def maybe_send_monthly_recaps() -> dict:
         )
         users = result.scalars().all()
 
-    logger.info("monthly_recap: sending to %s connected user(s)", len(users))
+    redis = await get_redis()
+    due_users = []
+    for user in users:
+        now_local = datetime.now(user_tz(user))
+        ref_date = _period_end_reference_date(now_local)
+        if ref_date is None:
+            continue
+        last_day = _calendar.monthrange(ref_date.year, ref_date.month)[1]
+        if ref_date.day != last_day:
+            continue
+        dedup_key = f"recap:sent:{user.id}:{ref_date.year}-{ref_date.month:02d}"
+        if not await redis.set(dedup_key, "1", ex=40 * 86_400, nx=True):
+            continue
+        due_users.append((user, ref_date.year, ref_date.month))
+
+    if not due_users:
+        return {"skipped": True, "reason": "not yet"}
+
+    logger.info("monthly_recap: sending to %s connected user(s)", len(due_users))
 
     sent, errors = 0, 0
     bot = TelegramBot(token=settings.telegram_bot_token)
     async with bot:
-        for user in users:
+        for user, target_year, target_month in due_users:
             try:
                 async with AsyncSessionLocal() as db:
                     text = await get_or_build_recap(db, user, target_year, target_month)
@@ -1846,22 +1864,13 @@ async def maybe_send_monthly_recaps() -> dict:
 # immediately followed by the full-year one.
 
 async def maybe_send_yearly_recap() -> dict:
-    """Check whether it's time for the yearly recap (21:00 IST on 31 Dec)
-    and send it to every connected user if so. Safe to call on every cron
-    tick — a Redis flag ensures it only actually sends once per year."""
+    """Check, independently for every connected user in their own local
+    timezone, whether it's time for their yearly recap (21:00 local on 31
+    Dec), and send it if so. Safe to call on every cron tick — a per-user
+    Redis flag ensures each user only gets a given year's recap once."""
     from app.redis_client import get_redis
     from app.stats.recap import get_or_build_yearly_recap
-
-    now_ist = datetime.now(_IST)
-    ref_date = _period_end_reference_date(now_ist)
-    if ref_date is None or ref_date.month != 12 or ref_date.day != 31:
-        return {"skipped": True, "reason": "not yet"}
-    target_year = ref_date.year
-
-    redis = await get_redis()
-    dedup_key = f"yearrecap:sent:{target_year}"
-    if not await redis.set(dedup_key, "1", ex=40 * 86_400, nx=True):
-        return {"skipped": True, "reason": "already sent this year"}
+    from app.timezones import user_tz
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(
@@ -1872,12 +1881,27 @@ async def maybe_send_yearly_recap() -> dict:
         )
         users = result.scalars().all()
 
-    logger.info("yearly_recap: sending to %s connected user(s)", len(users))
+    redis = await get_redis()
+    due_users = []
+    for user in users:
+        now_local = datetime.now(user_tz(user))
+        ref_date = _period_end_reference_date(now_local)
+        if ref_date is None or ref_date.month != 12 or ref_date.day != 31:
+            continue
+        dedup_key = f"yearrecap:sent:{user.id}:{ref_date.year}"
+        if not await redis.set(dedup_key, "1", ex=40 * 86_400, nx=True):
+            continue
+        due_users.append((user, ref_date.year))
+
+    if not due_users:
+        return {"skipped": True, "reason": "not yet"}
+
+    logger.info("yearly_recap: sending to %s connected user(s)", len(due_users))
 
     sent, errors = 0, 0
     bot = TelegramBot(token=settings.telegram_bot_token)
     async with bot:
-        for user in users:
+        for user, target_year in due_users:
             try:
                 async with AsyncSessionLocal() as db:
                     text = await get_or_build_yearly_recap(db, user, target_year)
@@ -1903,40 +1927,34 @@ async def maybe_send_yearly_recap() -> dict:
 # ---------------------------------------------------------------------------
 # Task 6: maybe_send_goal_checkpoints  (Phase 2 recurring-goal checkpoints)
 # ---------------------------------------------------------------------------
-# Fires on the same 21:00 IST / last-day-of-month trigger as the recaps
-# above, but per-goal rather than per-user: every active recurrence="monthly"
-# goal gets a checkpoint for the month that just ended (every month), and
-# every active recurrence="quarterly" goal gets one on Mar/Jun/Sep/Dec (the
-# last month of each calendar quarter). Keeps firing every remaining
-# sub-period even after a goal's overall_status has flipped to "failed" —
-# per the confirmed scope, the user should keep seeing individual
-# performance for the rest of the year rather than the goal going silent.
+# Fires on the same 21:00-local / last-day-of-month trigger as the recaps
+# above, but per-goal rather than per-user, and judged in that goal owner's
+# own timezone: every active recurrence="monthly" goal gets a checkpoint
+# for the month that just ended (every month, in the owner's local time),
+# and every active recurrence="quarterly" goal gets one on Mar/Jun/Sep/Dec
+# (the last local month of each calendar quarter). Keeps firing every
+# remaining sub-period even after a goal's overall_status has flipped to
+# "failed" — per the confirmed scope, the user should keep seeing
+# individual performance for the rest of the year rather than the goal
+# going silent.
 
 async def maybe_send_goal_checkpoints() -> dict:
-    """Check whether it's the last day of a month (and, for quarterly goals,
-    also the last month of a quarter) at/after 21:00 IST, and if so send a
-    DM checkpoint for the sub-period that just closed to every user with a
-    matching active recurring goal. Safe to call on every cron tick — a
-    Redis flag per (goal, sub-period) ensures each checkpoint sends once."""
+    """Check, independently for every active recurring goal in its owner's
+    own local timezone, whether it's the last day of a month (and, for
+    quarterly goals, also the last month of a quarter) at/after 21:00
+    local, and if so send a DM checkpoint for the sub-period that just
+    closed. Safe to call on every cron tick — a Redis flag per
+    (goal, sub-period) ensures each checkpoint sends once."""
     import calendar as _calendar
 
     from app.redis_client import get_redis
-
-    now_ist = datetime.now(_IST)
-    ref_date = _period_end_reference_date(now_ist)
-    if ref_date is None:
-        return {"skipped": True, "reason": "not yet"}
-    last_day = _calendar.monthrange(ref_date.year, ref_date.month)[1]
-    if ref_date.day != last_day:
-        return {"skipped": True, "reason": "not yet"}
-
-    recurrences = ["monthly"] + (["quarterly"] if ref_date.month in (3, 6, 9, 12) else [])
+    from app.timezones import user_tz
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(Goal, User).join(User, Goal.user_id == User.id).where(
                 Goal.is_active == True,  # noqa: E712
-                Goal.recurrence.in_(recurrences),
+                Goal.recurrence.in_(["monthly", "quarterly"]),
                 User.is_active.is_(True),
             )
         )
@@ -1945,20 +1963,37 @@ async def maybe_send_goal_checkpoints() -> dict:
     if not rows:
         return {"skipped": False, "sent": 0, "errors": 0}
 
-    logger.info("goal_checkpoints: evaluating %s recurring goal(s)", len(rows))
+    due_rows = []
+    for goal, user in rows:
+        now_local = datetime.now(user_tz(user))
+        ref_date = _period_end_reference_date(now_local)
+        if ref_date is None:
+            continue
+        last_day = _calendar.monthrange(ref_date.year, ref_date.month)[1]
+        if ref_date.day != last_day:
+            continue
+        if goal.recurrence == "quarterly" and ref_date.month not in (3, 6, 9, 12):
+            continue
+        due_rows.append((goal, user, ref_date))
+
+    if not due_rows:
+        return {"skipped": True, "reason": "not yet"}
+
+    logger.info("goal_checkpoints: evaluating %s recurring goal(s)", len(due_rows))
 
     redis = await get_redis()
     sent, errors = 0, 0
     bot = TelegramBot(token=settings.telegram_bot_token)
     async with bot:
-        for goal, user in rows:
+        for goal, user, ref_date in due_rows:
             try:
                 async with AsyncSessionLocal() as db:
                     recurring = await get_recurring_goal_progress(db, user, goal)
 
-                # The sub-period that just closed is the one ending today —
-                # for a quarterly goal this only ever matches on a
-                # quarter-end month since its sub-periods only end then.
+                # The sub-period that just closed is the one ending today
+                # (the owner's local "today") — for a quarterly goal this
+                # only ever matches on a quarter-end month since its
+                # sub-periods only end then.
                 closed_sp = next(
                     (sp for sp in recurring.sub_periods if sp.end == ref_date), None
                 )
