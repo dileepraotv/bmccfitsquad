@@ -870,6 +870,49 @@ async def ops_activity_dates(secret: str = "", name: str = "", days: int = 10, s
     }
 
 
+@app.get(
+    "/ops/stats-check",
+    tags=["ops"],
+    summary="Run calculate_stats() directly for a user/sport/time_frame (verification tool)",
+)
+async def ops_stats_check(secret: str = "", name: str = "", sport: str = "Ride", time_frame: str = "current_month"):
+    """Calls the exact same calculate_stats() used by /stats, bypassing
+    Telegram — useful to verify a fix (e.g. the IST month-boundary fix)
+    without waiting on a live /stats round-trip.
+
+    Protected by: ?secret={CRON_SECRET} query parameter
+    """
+    if not settings.cron_secret or secret != settings.cron_secret:
+        raise HTTPException(status_code=401, detail="invalid or missing secret")
+    if not name:
+        raise HTTPException(status_code=400, detail="?name= is required")
+
+    from sqlalchemy import select
+
+    from app.database import AsyncSessionLocal
+    from app.models import User
+    from app.stats.calculator import calculate_stats
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(User))
+        users = result.scalars().all()
+        needle = name.lower()
+        match = next(
+            (
+                u for u in users
+                if needle in (u.telegram_first_name or "").lower()
+                or needle in (u.strava_athlete_name or "").lower()
+            ),
+            None,
+        )
+        if match is None:
+            raise HTTPException(status_code=404, detail=f"no user matching name={name!r}")
+
+        stats = await calculate_stats(db, match.id, sport, time_frame)
+
+    return {"matched_user": match.telegram_first_name, "sport": sport, "time_frame": time_frame, "stats": stats}
+
+
 @app.get("/telegram/status", tags=["ops"], summary="Telegram's own view of webhook delivery health")
 async def telegram_status():
     """Surfaces Telegram's getWebhookInfo so we can tell an app outage
