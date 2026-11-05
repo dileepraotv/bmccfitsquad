@@ -684,6 +684,105 @@ async def ops_send_recap(
 
 
 @app.get(
+    "/ops/send-recap-all",
+    tags=["ops"],
+    summary="Backfill a missed monthly/yearly recap to every connected user, for any period",
+)
+async def ops_send_recap_all(
+    secret: str = "",
+    year: int | None = None,
+    month: int | None = None,
+    yearly: bool = False,
+    dry_run: bool = True,
+):
+    """Broadcast version of /ops/send-recap — use this to backfill a month
+    whose scheduled send never fired (e.g. because the external cron
+    pinger wasn't actually reaching /cron/sync-all — see
+    _cron_secret_ok's docstring). Each user's recap is still computed in
+    *their own* timezone (get_or_build_recap/get_or_build_yearly_recap
+    already do this — see app.timezones), exactly as if it had sent on
+    schedule.
+
+    This does NOT touch the normal recap:sent:*/yearrecap:sent:* Redis
+    dedup keys, so running it is always safe to repeat and never risks a
+    double-send once the scheduled trigger starts firing normally again.
+
+    ?year=/&month= select the period (defaults to the current UTC
+    year/month); pass &yearly=true for a yearly recap (month then
+    ignored). Defaults to &dry_run=true — pass &dry_run=false to actually
+    send; the dry run shows exactly who would receive it first.
+
+    Protected by: ?secret={CRON_SECRET} query parameter
+    """
+    if not settings.cron_secret or secret != settings.cron_secret:
+        raise HTTPException(status_code=401, detail="invalid or missing secret")
+
+    from datetime import datetime, timezone
+
+    from sqlalchemy import select
+    from telegram import Bot as TelegramBot
+
+    from app.database import AsyncSessionLocal
+    from app.models import User
+    from app.stats.recap import get_or_build_recap, get_or_build_yearly_recap
+    from app.telegram.keyboards import recap_goal_prompt_keyboard
+    from app.telegram.notifications import send_recap_message
+
+    now = datetime.now(timezone.utc)
+    year = year or now.year
+    month = month or now.month
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(User).where(
+                User.is_active.is_(True),
+                User.strava_athlete_id.isnot(None),
+            )
+        )
+        users = result.scalars().all()
+
+    if dry_run:
+        return {
+            "dry_run": True,
+            "would_send_to": [u.telegram_first_name for u in users],
+            "period": {"year": year} if yearly else {"year": year, "month": month},
+        }
+
+    sent, errors, results = 0, 0, []
+    bot = TelegramBot(token=settings.telegram_bot_token)
+    async with bot:
+        for user in users:
+            try:
+                async with AsyncSessionLocal() as db:
+                    fresh_user = await db.get(User, user.id)
+                    if yearly:
+                        text = await get_or_build_yearly_recap(db, fresh_user, year)
+                    else:
+                        text = await get_or_build_recap(db, fresh_user, year, month)
+
+                await send_recap_message(
+                    bot,
+                    user.telegram_user_id,
+                    text,
+                    reply_markup=recap_goal_prompt_keyboard(),
+                )
+                sent += 1
+                results.append({"user": user.telegram_first_name, "ok": True})
+            except Exception as exc:
+                logger.exception("send-recap-all: failed for telegram_id=%s", user.telegram_user_id)
+                errors += 1
+                results.append({"user": user.telegram_first_name, "ok": False, "error": str(exc)})
+
+    return {
+        "dry_run": False,
+        "period": {"year": year} if yearly else {"year": year, "month": month},
+        "sent": sent,
+        "errors": errors,
+        "results": results,
+    }
+
+
+@app.get(
     "/ops/compare-stats",
     tags=["ops"],
     summary="Compare Postgres-computed activity totals against Strava's live /athlete/activities feed",
