@@ -39,7 +39,7 @@ import re
 import uuid as _uuid_mod
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import case, func, select
+from sqlalchemy import DateTime, case, func, literal, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.ext import (
@@ -762,12 +762,18 @@ def _leaderboard_legend_text() -> str:
 
 
 async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/leaderboard — a shared, month-wide aggregation across every member,
-    so (unlike per-user data such as /stats or /recap) the exact same
-    rendered text is correct for whoever asks. Cached for a few minutes:
-    high payoff for negligible staleness, since several members often check
-    it in quick succession after group activity."""
+    """/leaderboard — a month-wide aggregation across every member, where
+    each member's own activities are judged against *their own* calendar
+    month (see _build_leaderboard_text) rather than one shared reference
+    zone, so nobody is unfairly cut off mid-month just because they live
+    far from IST. Cached for a few minutes: high payoff for negligible
+    staleness, since several members often check it in quick succession
+    after group activity."""
     now = datetime.now(_IST)
+    # Only used to key the cache entry — doesn't need to line up exactly
+    # with any individual member's own month boundary (see
+    # _build_leaderboard_text), just needs to roll over roughly once a
+    # month so the cache doesn't serve last month's board indefinitely.
     month_key = f"{now.year}-{now.month:02d}"
 
     from app.redis_client import _LEADERBOARD_CACHE_TTL_SECONDS, get_redis, key_leaderboard
@@ -797,15 +803,30 @@ async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def _build_leaderboard_text(now: datetime) -> str:
-    """Compute the full /leaderboard message text for the calendar month
-    containing *now*. Pulled out of cmd_leaderboard so the cache-miss path
-    only touches the DB, never the Telegram Update object. *now* must be
-    IST-anchored (see cmd_leaderboard) — Activity.activity_date is stored
-    in UTC, and comparing timezone-aware datetimes compares the underlying
-    instant regardless of tzinfo, so building month_start with IST avoids
-    misattributing a pre-05:30-IST activity to the previous month."""
+    """Compute the full /leaderboard message text for "this month", where
+    each member's activities are judged against *their own* calendar month
+    — not one shared reference timezone. Members can be anywhere in the
+    world (see app.timezones); a single fixed reference zone (e.g. IST)
+    would silently cut off up to ~12 hours of a far-away member's month-end
+    activity from counting in the "right" month, even though those same
+    activities correctly land in their own month for /stats and /recap.
+    Instead, both sides of the comparison below go through
+    func.timezone(User.timezone, ...) — converting Activity.activity_date
+    AND the reference instant *now* into that same row's own user's local
+    wall-clock time — so "same calendar month" is evaluated consistently
+    per-user, in one query (a join, not a per-user loop), exactly matching
+    what that member sees in their own personal stats.
+
+    Pulled out of cmd_leaderboard so the cache-miss path only touches the
+    DB, never the Telegram Update object. *now* just needs to be a
+    tz-aware instant (any zone) — see above, it's immediately re-expressed
+    in each row's own user's zone, so which zone *now* itself is in
+    doesn't matter.
+    """
     async with AsyncSessionLocal() as db:
-        month_start = datetime(now.year, now.month, 1, tzinfo=_IST)
+        local_activity_ts = func.timezone(User.timezone, Activity.activity_date)
+        local_now_ts = func.timezone(User.timezone, literal(now, type_=DateTime(timezone=True)))
+        same_local_month = func.date_trunc("month", local_activity_ts) == func.date_trunc("month", local_now_ts)
 
         sport_sums = [
             func.sum(
@@ -824,7 +845,7 @@ async def _build_leaderboard_text(now: datetime) -> str:
         rows = await db.execute(
             select(User.telegram_first_name, User.strava_athlete_name, *sport_sums)
             .join(Activity, Activity.user_id == User.id)
-            .where(Activity.activity_date >= month_start)
+            .where(same_local_month)
             .group_by(User.id, User.telegram_first_name, User.strava_athlete_name)
         )
         entries = rows.all()
@@ -1272,12 +1293,17 @@ _GOAL_PERIODS = [
 
 _GOAL_DRAFT_TTL = 600  # seconds — draft expires after 10 min of inactivity
 
-# BMCC's users are all IST-based — every "today"/"this month" used to decide
-# goal period boundaries and deadlines must be evaluated in IST, not UTC.
-# Using UTC directly here means anyone opening the goal flow between 00:00
-# and 05:29 IST (still the previous UTC day) would silently get the *previous*
-# month/quarter/year/week's boundaries — a goal created at 1am IST on the
-# 1st of a new month would be dated into the month that just ended.
+# Per-goal/per-user "today"/"this month" boundaries (goal creation,
+# deadlines, pacing) are evaluated in each goal owner's own timezone — see
+# app.timezones.user_tz and _goal_period_dates/_format_goal_date_range/
+# _goal_pace_icon below, which all take an explicit tz parameter.
+#
+# _IST itself is kept only as the one deliberately-fixed reference
+# timezone for /leaderboard (cmd_leaderboard / _build_leaderboard_text) —
+# unlike personal stats/goals, the leaderboard's underlying ranking query
+# judges each member's activities against *their own* local calendar month
+# via users.timezone (see _build_leaderboard_text), so _IST here is only
+# used to pick a stable cache-key / display instant, not a filter boundary.
 _IST = timezone(timedelta(hours=5, minutes=30))
 
 # Guardrails on goal creation — without these a user can pile up unlimited
