@@ -27,7 +27,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
@@ -188,11 +188,43 @@ _cron_status: dict = {
     "last_recap_result": None,
     "last_yearly_recap_result": None,
     "last_goal_checkpoint_result": None,
+    "last_auth_rejected_ts": None,
+    "auth_rejected_count": 0,
 }
 
 
+def _cron_secret_ok(secret: str, authorization: str | None) -> bool:
+    """True iff *secret* (the ?secret= query param) or *authorization* (the
+    raw Authorization header) matches CRON_SECRET.
+
+    cron-job.org can be configured either way — our own .env.example tells
+    users to "set the same value as the Authorization Bearer token in
+    cron-job.org", but until now this endpoint only ever checked the query
+    parameter. Anyone who followed that instruction literally would have
+    every single scheduled tick silently rejected with 401 forever — the
+    catchup sync, webhook-health check, and monthly/yearly recap + goal
+    checkpoint triggers all piggyback on this one endpoint, so that one
+    mismatch is enough to make the entire reliability pipeline a no-op
+    despite looking fully wired up. Accepting *either* form here is a
+    strict widening (nothing that used to authenticate stops working) and
+    removes this whole class of silent misconfiguration.
+    """
+    if not settings.cron_secret:
+        return False
+    if secret and secret == settings.cron_secret:
+        return True
+    if authorization:
+        # Accept "Bearer <secret>" or the bare secret as the header value —
+        # cron-job.org's UI doesn't always make it obvious which one it
+        # actually sends on the wire.
+        token = authorization[7:] if authorization.lower().startswith("bearer ") else authorization
+        if token == settings.cron_secret:
+            return True
+    return False
+
+
 @app.api_route("/cron/sync-all", methods=["GET", "HEAD"], tags=["ops"], summary="Catchup sync — finds activities missed by webhook")
-async def cron_sync_all(secret: str = ""):
+async def cron_sync_all(secret: str = "", authorization: str | None = Header(default=None)):
     """Called periodically (UptimeRobot/cron-job.org) as a reliability safety net.
 
     Event-driven, not a blind poll — see the module docstring above
@@ -201,7 +233,8 @@ async def cron_sync_all(secret: str = ""):
     outage recovery, low-frequency daily rotation, weekly full-history
     reconciliation). Strava API usage no longer scales with (users x ticks).
 
-    Protected by: ?secret={CRON_SECRET} query parameter
+    Protected by: either ?secret={CRON_SECRET} query parameter, or an
+    `Authorization: Bearer {CRON_SECRET}` header — see _cron_secret_ok.
     """
     import asyncio
     from app.tasks import (
@@ -212,7 +245,12 @@ async def cron_sync_all(secret: str = ""):
         maybe_send_yearly_recap,
     )
 
-    if not settings.cron_secret or secret != settings.cron_secret:
+    if not _cron_secret_ok(secret, authorization):
+        # Tracked (not just logged) so /cron/status can surface "every real
+        # tick has been failing auth" at a glance instead of this only
+        # ever showing up as a gap in run_count that's easy to miss.
+        _cron_status["last_auth_rejected_ts"] = time.time()
+        _cron_status["auth_rejected_count"] += 1
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     _cron_status["last_run"] = time.time()
@@ -251,6 +289,7 @@ async def cron_status():
     from app.strava.client import get_rate_limit_status
 
     last_run = _cron_status["last_run"]
+    last_rejected = _cron_status["last_auth_rejected_ts"]
     return {
         "cron_secret_configured": bool(settings.cron_secret),
         "run_count": _cron_status["run_count"],
@@ -260,6 +299,13 @@ async def cron_status():
         "last_recap_result": _cron_status["last_recap_result"],
         "last_yearly_recap_result": _cron_status["last_yearly_recap_result"],
         "last_goal_checkpoint_result": _cron_status["last_goal_checkpoint_result"],
+        # If this keeps climbing while run_count stays flat, whatever's
+        # calling /cron/sync-all is sending the wrong secret (or the wrong
+        # auth scheme — see _cron_secret_ok) and every tick is a no-op.
+        "auth_rejected_count": _cron_status["auth_rejected_count"],
+        "last_auth_rejected_ago_seconds": (
+            round(time.time() - last_rejected) if last_rejected else None
+        ),
         "strava_rate_limit": await get_rate_limit_status(),
     }
 
