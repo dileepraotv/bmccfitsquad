@@ -799,6 +799,77 @@ async def ops_compare_stats(secret: str = "", names: str = ""):
     return {"report": report}
 
 
+@app.get(
+    "/ops/activity-dates",
+    tags=["ops"],
+    summary="Raw stored activity_date (UTC) + IST-local date for a user's recent activities",
+)
+async def ops_activity_dates(secret: str = "", name: str = "", days: int = 10, sport: str = ""):
+    """Debug helper for 'this activity isn't showing up in this month's
+    stats' reports — Activity.activity_date is stored in UTC (from Strava's
+    start_date), but calculate_stats' month/week boundaries are also
+    computed in UTC. An activity that started e.g. before ~05:30 IST on the
+    1st of a month lands on the *previous* UTC calendar day, and therefore
+    the *previous* month's "current_month"/"this_week" bucket — even though
+    the athlete (and Strava's own UI, which shows start_date_local) call it
+    the 1st. ?sport= optionally filters by Strava activity_type substring.
+
+    Protected by: ?secret={CRON_SECRET} query parameter
+    """
+    if not settings.cron_secret or secret != settings.cron_secret:
+        raise HTTPException(status_code=401, detail="invalid or missing secret")
+    if not name:
+        raise HTTPException(status_code=400, detail="?name= is required")
+
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import select
+
+    from app.database import AsyncSessionLocal
+    from app.models import Activity, User
+
+    _IST = timezone(timedelta(hours=5, minutes=30))
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(User))
+        users = result.scalars().all()
+
+        needle = name.lower()
+        match = next(
+            (
+                u for u in users
+                if needle in (u.telegram_first_name or "").lower()
+                or needle in (u.strava_athlete_name or "").lower()
+            ),
+            None,
+        )
+        if match is None:
+            raise HTTPException(status_code=404, detail=f"no user matching name={name!r}")
+
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+        stmt = select(Activity).where(
+            Activity.user_id == match.id, Activity.activity_date >= since,
+        ).order_by(Activity.activity_date.desc())
+        rows = (await db.execute(stmt)).scalars().all()
+        if sport:
+            rows = [a for a in rows if sport.lower() in a.activity_type.lower()]
+
+    return {
+        "matched_user": match.telegram_first_name,
+        "activities": [
+            {
+                "strava_activity_id": a.strava_activity_id,
+                "name": a.activity_name,
+                "activity_type": a.activity_type,
+                "distance_km": round((a.distance_meters or 0) / 1000, 2),
+                "activity_date_utc": a.activity_date.isoformat(),
+                "activity_date_ist": a.activity_date.astimezone(_IST).isoformat(),
+            }
+            for a in rows
+        ],
+    }
+
+
 @app.get("/telegram/status", tags=["ops"], summary="Telegram's own view of webhook delivery health")
 async def telegram_status():
     """Surfaces Telegram's getWebhookInfo so we can tell an app outage
