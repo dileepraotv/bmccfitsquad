@@ -765,7 +765,7 @@ async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     rendered text is correct for whoever asks. Cached for a few minutes:
     high payoff for negligible staleness, since several members often check
     it in quick succession after group activity."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(_IST)
     month_key = f"{now.year}-{now.month:02d}"
 
     from app.redis_client import _LEADERBOARD_CACHE_TTL_SECONDS, get_redis, key_leaderboard
@@ -797,9 +797,13 @@ async def cmd_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def _build_leaderboard_text(now: datetime) -> str:
     """Compute the full /leaderboard message text for the calendar month
     containing *now*. Pulled out of cmd_leaderboard so the cache-miss path
-    only touches the DB, never the Telegram Update object."""
+    only touches the DB, never the Telegram Update object. *now* must be
+    IST-anchored (see cmd_leaderboard) — Activity.activity_date is stored
+    in UTC, and comparing timezone-aware datetimes compares the underlying
+    instant regardless of tzinfo, so building month_start with IST avoids
+    misattributing a pre-05:30-IST activity to the previous month."""
     async with AsyncSessionLocal() as db:
-        month_start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+        month_start = datetime(now.year, now.month, 1, tzinfo=_IST)
 
         sport_sums = [
             func.sum(

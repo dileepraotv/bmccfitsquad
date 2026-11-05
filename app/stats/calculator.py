@@ -574,42 +574,56 @@ def _format_duration_stats(s: dict, session_label: str) -> list[str]:
 # Shared utilities
 # ---------------------------------------------------------------------------
 
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
 def _time_frame_bounds(time_frame: str) -> tuple[datetime | None, datetime | None]:
-    """Return (start_utc, end_utc) for the given time frame.
+    """Return (start, end) for the given time frame, anchored to IST.
 
     A None value means "no bound on that side".
     The end bound is *exclusive* — use ``activity_date < end`` in queries.
+
+    BMCC's users are all IST-based, but Activity.activity_date is stored as
+    a UTC instant. Anchoring these boundaries in UTC instead of IST would
+    put any activity that started between 00:00 and 05:29 IST into the
+    *previous* day/week/month/year's bucket — e.g. a ride starting 4:58 AM
+    IST on Nov 1st is still Oct 31st in UTC, so a UTC-anchored "this month"
+    filter would silently exclude it from November's stats. Comparing
+    timezone-aware datetimes compares the underlying instant regardless of
+    which tzinfo is attached, so building these boundaries with tzinfo=_IST
+    instead of timezone.utc is a complete fix — no change needed wherever
+    activity_date is actually queried.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(_IST)
 
     if time_frame == "all_time":
         return None, None
 
     if time_frame == "this_week":
-        # Monday 00:00 UTC of the current week → now.
+        # Monday 00:00 IST of the current week → now.
         today = now.date()
         monday = today - timedelta(days=today.weekday())
-        return datetime(monday.year, monday.month, monday.day, tzinfo=timezone.utc), None
+        return datetime(monday.year, monday.month, monday.day, tzinfo=_IST), None
 
     if time_frame == "year_to_date":
-        return datetime(now.year, 1, 1, tzinfo=timezone.utc), None
+        return datetime(now.year, 1, 1, tzinfo=_IST), None
 
     if time_frame == "previous_year":
         return (
-            datetime(now.year - 1, 1, 1, tzinfo=timezone.utc),
-            datetime(now.year,     1, 1, tzinfo=timezone.utc),
+            datetime(now.year - 1, 1, 1, tzinfo=_IST),
+            datetime(now.year,     1, 1, tzinfo=_IST),
         )
 
     if time_frame == "current_month":
-        return datetime(now.year, now.month, 1, tzinfo=timezone.utc), None
+        return datetime(now.year, now.month, 1, tzinfo=_IST), None
 
     if time_frame == "previous_month":
         if now.month == 1:
-            start = datetime(now.year - 1, 12, 1, tzinfo=timezone.utc)
-            end   = datetime(now.year,      1, 1, tzinfo=timezone.utc)
+            start = datetime(now.year - 1, 12, 1, tzinfo=_IST)
+            end   = datetime(now.year,      1, 1, tzinfo=_IST)
         else:
-            start = datetime(now.year, now.month - 1, 1, tzinfo=timezone.utc)
-            end   = datetime(now.year, now.month,     1, tzinfo=timezone.utc)
+            start = datetime(now.year, now.month - 1, 1, tzinfo=_IST)
+            end   = datetime(now.year, now.month,     1, tzinfo=_IST)
         return start, end
 
     raise ValueError(f"Unknown time_frame: {time_frame!r}")
